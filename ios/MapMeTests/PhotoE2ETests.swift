@@ -141,7 +141,9 @@ final class PhotoE2ETests: XCTestCase {
         let (outcome, report) = try await locateRealPhoto(scene, variant: "ocr", knownText: nil)
         XCTAssertEqual(report.status, "ok", outcome.message)
         let error = try XCTUnwrap(report.error, "not located: \(outcome.message)")
-        XCTAssertLessThanOrEqual(error.median, 80,
+        // With the fold-correction warp ~12-14 m (grid or contours, whichever Vision's reads allow);
+        // a single homography cannot beat ~37 m on this folded sheet.
+        XCTAssertLessThanOrEqual(error.median, 30,
                                  "real photo (Vision OCR) \(error.text) by \(report.method ?? "-"): \(outcome.message)")
     }
 
@@ -154,8 +156,12 @@ final class PhotoE2ETests: XCTestCase {
         let (outcome, report) = try await locateRealPhoto(scene, variant: "fixture-ocr", knownText: ocr)
         XCTAssertEqual(report.status, "ok", outcome.message)
         let error = try XCTUnwrap(report.error, "not located: \(outcome.message)")
-        XCTAssertLessThanOrEqual(error.median, 80,
+        XCTAssertEqual(report.method, "grid", outcome.message)
+        XCTAssertTrue(report.warp, "no fold correction: \(outcome.message)")
+        // CI measured 11.8 / 43.5 / 146.5 m (median / p90 / max); without the warp 31.7 / 90.9 / 295.5.
+        XCTAssertLessThanOrEqual(error.median, 20,
                                  "real photo (fixture OCR) \(error.text) by \(report.method ?? "-"): \(outcome.message)")
+        XCTAssertLessThanOrEqual(error.p90, 70, "real photo (fixture OCR) \(error.text)")
     }
 
     func testRealPhotoLocatesFromContoursOnly() async throws {
@@ -164,8 +170,11 @@ final class PhotoE2ETests: XCTestCase {
         XCTAssertEqual(report.status, "ok", outcome.message)
         XCTAssertEqual(report.method, "contours", outcome.message)
         let error = try XCTUnwrap(report.error, "not located: \(outcome.message)")
-        XCTAssertLessThanOrEqual(error.median, 90,
+        XCTAssertTrue(report.warp, "no fold correction: \(outcome.message)")
+        // CI measured 13.3 / 63.8 / 150.7 m (median / p90 / max); without the warp 35.2 / 98.8 / 357.4.
+        XCTAssertLessThanOrEqual(error.median, 25,
                                  "real photo (contours only) \(error.text) by \(report.method ?? "-"): \(outcome.message)")
+        XCTAssertLessThanOrEqual(error.p90, 90, "real photo (contours only) \(error.text)")
     }
 
     /// `GeoreferenceService` on the flattened real photo as the app runs it (photo mode, GPS fix

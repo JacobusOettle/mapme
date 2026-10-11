@@ -54,6 +54,9 @@ fn canon_char(c: char) -> char {
         '"' | '″' | '”' | '“' | '＂' | 'ʺ' | '˝' | '〃' | '„' => SEC,
         '−' | '–' | '—' | '‐' | '‑' | '‒' => '-',
         '∶' => ':',
+        // OCR confusions for hemisphere letters ("25°52'00\"$", "27°23'00\"€").
+        '$' => 'S',
+        '€' => 'E',
         '⁰' => '0',
         '¹' => '1',
         '²' => '2',
@@ -371,8 +374,10 @@ fn parse_tokens(toks: &[Tok]) -> Option<CoordValue> {
             grid = Some(s.parse().ok()?);
             value = 0.0;
         } else {
-            // "25 49 00 S": needs a hemisphere letter to be read as DMS.
-            if hemi.is_none() || comps.len() > 3 || comps[1..].iter().any(|c| c.int.len() > 2) {
+            // "25 49 00 S": needs a hemisphere letter to be read as DMS. "25 4900 S" (minutes and
+            // seconds run together, marks lost) is read the same way.
+            let packed_minutes = comps.len() == 2 && comps[0].int.len() <= 3 && comps[1].int.len() == 4;
+            if hemi.is_none() || comps.len() > 3 || (!packed_minutes && comps[1..].iter().any(|c| c.int.len() > 2)) {
                 return None;
             }
             value = dms_value(&comps)?;
@@ -486,6 +491,15 @@ fn parse_embedded_dms(c: &[char]) -> Option<CoordValue> {
         let mut j = start;
         while j < n && c[j].is_ascii_digit() {
             j += 1;
+        }
+        // Nor does a degrees-and-minutes run follow another number: in "25 5100S" (or "24-2400\"E")
+        // the "5100" is minutes and seconds, not 51° 00'.
+        let mut q = start;
+        while q > 0 && matches!(c[q - 1], ' ' | '-') {
+            q -= 1;
+        }
+        if j - start == 4 && q > 0 && c[q - 1].is_ascii_digit() {
+            continue;
         }
         let run: String = c[start..j].iter().collect();
         let (deg, minutes, mut k) = match run.len() {
@@ -1072,7 +1086,20 @@ mod tests {
         assert!((lat("25'53'00\"S") + 25.0 + 53.0 / 60.0).abs() < 1e-9);
         assert!((lat("25°53°00\"S") + 25.0 + 53.0 / 60.0).abs() < 1e-9);
         assert!((lat("25°50'00\"5") + 25.0 + 50.0 / 60.0).abs() < 1e-9);
-        for junk in ["GIS V1 Sept 2017- Eras Gous", "Magnetic Declination 18° West", "Sept 2017", "12 34 Street"] {
+        // Reads of the real photo fixture by Apple Vision.
+        assert!((lat("25 5100S") + 25.0 + 51.0 / 60.0).abs() < 1e-9);
+        assert!((lat("25°52 00\"$") + 25.0 + 52.0 / 60.0).abs() < 1e-9);
+        assert!((lon("27°24'00\"€") - (27.0 + 24.0 / 60.0)).abs() < 1e-9);
+        assert!((lat("25°5000\"S") + 25.0 + 50.0 / 60.0).abs() < 1e-9);
+        for junk in [
+            "GIS V1 Sept 2017- Eras Gous",
+            "Magnetic Declination 18° West",
+            "Sept 2017",
+            "12 34 Street",
+            "2017 5100S",
+            "24-2400\"E",
+            "Price $25",
+        ] {
             assert_eq!(parse_coordinate(junk), None, "{junk}");
         }
     }
