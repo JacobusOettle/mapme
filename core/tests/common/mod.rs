@@ -335,3 +335,229 @@ pub fn photo_case(map: &Rgb8, photo: &Rgb8, cam: &Homography, corner_error: f64)
     let from_map = to_map.inverse().expect("composite inverse");
     PhotoCase { image, to_map, from_map }
 }
+
+// ---------------------------------------------------------------------------
+// Photos for page detection: other cameras, tables and clutter
+// ---------------------------------------------------------------------------
+
+/// A phone camera and how it frames the paper.
+#[derive(Clone, Copy, Debug)]
+pub struct Shot {
+    /// Photo size in pixels.
+    pub w: usize,
+    pub h: usize,
+    /// Focal length in pixels.
+    pub f_px: f64,
+    /// Pitch, yaw and roll of the camera (degrees).
+    pub tilt_x: f64,
+    pub tilt_y: f64,
+    pub roll: f64,
+    /// Height of the paper's outline as a fraction of the photo height.
+    pub fill: f64,
+    /// Offset of the paper's outline from the photo centre (fraction of the photo size).
+    pub shift: (f64, f64),
+}
+
+impl Shot {
+    /// The default `synth_photo` camera (12 MP, see `photo_camera`).
+    pub fn iphone_12mp() -> Shot {
+        Shot {
+            w: PHOTO_W,
+            h: PHOTO_H,
+            f_px: 2900.0,
+            tilt_x: 14.0,
+            tilt_y: -6.0,
+            roll: 3.0,
+            fill: 0.86,
+            shift: (0.0, 0.0),
+        }
+    }
+
+    /// The app's `SyntheticPhoto.Camera()` (24 MP, 26 mm, page 75 % of the height, off-centre).
+    pub fn app_24mp() -> Shot {
+        let (w, h) = (4284usize, 5712usize);
+        let f_px = 26.0 / 43.266_615 * ((w * w + h * h) as f64).sqrt();
+        Shot { w, h, f_px, tilt_x: 12.0, tilt_y: -7.0, roll: 2.5, fill: 0.75, shift: (0.015, -0.045) }
+    }
+}
+
+/// map.jpg pixel → photo pixel for `shot` (generalises `camera_homography`).
+pub fn shot_camera(map_w: usize, map_h: usize, shot: &Shot) -> Homography {
+    let r = mat_mul(&mat_mul(&rot(0, shot.tilt_x), &rot(1, shot.tilt_y)), &rot(2, shot.roll));
+    let mm = 25.4 / 300.0;
+    let a: M3 = [[mm, 0.0, -(map_w as f64) / 2.0 * mm], [0.0, mm, -(map_h as f64) / 2.0 * mm], [0.0, 0.0, 1.0]];
+    let (pw, ph) = (shot.w as f64, shot.h as f64);
+    let cam = |d: f64| -> Homography {
+        let k: M3 = [[shot.f_px, 0.0, pw / 2.0], [0.0, shot.f_px, ph / 2.0], [0.0, 0.0, 1.0]];
+        let ext: M3 = [[r[0][0], r[0][1], 0.0], [r[1][0], r[1][1], 0.0], [r[2][0], r[2][1], d]];
+        to_h(&mat_mul(&mat_mul(&k, &ext), &a))
+    };
+    let corners = |h: &Homography| -> Vec<(f64, f64)> {
+        [(0.0, 0.0), (map_w as f64, 0.0), (map_w as f64, map_h as f64), (0.0, map_h as f64)]
+            .iter()
+            .map(|&(x, y)| h.apply(x, y))
+            .collect()
+    };
+    let mut d = 400.0;
+    for _ in 0..30 {
+        let c = corners(&cam(d));
+        let span = c.iter().map(|p| p.1).fold(f64::MIN, f64::max) - c.iter().map(|p| p.1).fold(f64::MAX, f64::min);
+        d *= span / (shot.fill * ph);
+    }
+    let h = cam(d);
+    let c = corners(&h);
+    let (x0, x1) = (c.iter().map(|p| p.0).fold(f64::MAX, f64::min), c.iter().map(|p| p.0).fold(f64::MIN, f64::max));
+    let (y0, y1) = (c.iter().map(|p| p.1).fold(f64::MAX, f64::min), c.iter().map(|p| p.1).fold(f64::MIN, f64::max));
+    let ox = pw / 2.0 - (x0 + x1) / 2.0 + shot.shift.0 * pw;
+    let oy = ph / 2.0 - (y0 + y1) / 2.0 + shot.shift.1 * ph;
+    Homography { m: [1.0, 0.0, ox, 0.0, 1.0, oy, 0.0, 0.0, 1.0] }.mul(&h)
+}
+
+/// What the paper lies on.
+#[derive(Clone, Copy, Debug)]
+pub enum Table {
+    /// Dark wood, as in the app's `SyntheticPhoto` (gradient 51,36,26 → 28,20,15).
+    Dark,
+    /// Mid-brown wood with grain (the colour `synth_photo` uses).
+    Wood,
+    /// Neutral mid-grey: paper and table differ in brightness only.
+    Grey,
+    /// A grey-green desk with random objects (rectangles of random colour, size and angle), some of
+    /// them partly under the paper.
+    Clutter(u64),
+}
+
+struct Object {
+    c: (f64, f64),
+    half: (f64, f64),
+    dir: (f64, f64),
+    rgb: [f32; 3],
+}
+
+fn clutter_objects(seed: u64, w: f64, h: f64) -> Vec<Object> {
+    let mut rng = Rng::new(seed);
+    let n = 10 + (rng.next_f64() * 6.0) as usize;
+    (0..n)
+        .map(|_| {
+            let c = (rng.next_f64() * w, rng.next_f64() * h);
+            let half = (w * (0.03 + 0.12 * rng.next_f64()), h * (0.015 + 0.08 * rng.next_f64()));
+            let a = rng.next_f64() * std::f64::consts::PI;
+            // Any colour but paper white (a second sheet next to the page is another story).
+            let rgb = loop {
+                let v = [0, 1, 2].map(|_| 20.0 + 215.0 * rng.next_f64() as f32);
+                let (mx, mn) = (v[0].max(v[1]).max(v[2]), v[0].min(v[1]).min(v[2]));
+                if mn < 150.0 || mx - mn > 60.0 {
+                    break v;
+                }
+            };
+            Object { c, half, dir: (a.cos(), a.sin()), rgb }
+        })
+        .collect()
+}
+
+/// Photograph `map` through `cam` (map pixel → photo pixel) onto a `w`×`h` photo: the paper on
+/// `table` with a soft drop shadow, then the lighting of `synth_photo` (vignetting, a one-sided
+/// shadow ×0.55 … 1, a warm cast), lens blur σ 1.2 px and sensor noise σ 2.5.
+pub fn synth_scene(map: &Rgb8, cam: &Homography, w: usize, h: usize, table: Table, seed: u64) -> Rgb8 {
+    use mapme_core::image::GrayF32;
+    use rayon::prelude::*;
+    let inv = cam.inverse().expect("camera homography");
+    let quad = paper_quad(cam, map.w, map.h);
+    let (wf, hf) = (w as f64, h as f64);
+    // Drop shadow: the paper outline shifted down and right, blurred.
+    let (sx, sy, sigma) = (0.004 * wf, 0.006 * wf, 0.007 * wf);
+    let edges: Vec<((f64, f64), (f64, f64))> = (0..4)
+        .map(|i| {
+            let (a, b) = (quad[i], quad[(i + 1) % 4]);
+            let len = (b.0 - a.0).hypot(b.1 - a.1);
+            ((a.0 + sx, a.1 + sy), ((b.1 - a.1) / len, -(b.0 - a.0) / len))
+        })
+        .collect();
+    let shadow = |x: f64, y: f64| -> f32 {
+        let d = edges.iter().map(|&(a, n)| (x - a.0) * n.0 + (y - a.1) * n.1).fold(f64::MIN, f64::max);
+        (0.5 / (1.0 + (1.702 * d / sigma).exp())) as f32
+    };
+    let objects = match table {
+        Table::Clutter(s) => clutter_objects(s, wf, hf),
+        _ => Vec::new(),
+    };
+    let table_rgb = |x: f64, y: f64| -> [f32; 3] {
+        match table {
+            Table::Dark => {
+                let t = ((x / wf + y / hf) / 2.0) as f32;
+                [51.0 - 23.0 * t, 36.0 - 16.0 * t, 26.0 - 11.0 * t]
+            }
+            Table::Wood => {
+                let grain = 1.0
+                    + 0.07 * (std::f64::consts::TAU * (y + 25.0 * (x / 300.0).sin()) / 37.0).sin()
+                    + 0.05 * (x / 911.0 + y / 1500.0).sin();
+                [112.0, 82.0, 58.0].map(|c| c * grain as f32)
+            }
+            Table::Grey => {
+                let mottle = 1.0 + 0.02 * (x / 97.0).sin() * (y / 131.0).cos();
+                [128.0 * mottle as f32; 3]
+            }
+            Table::Clutter(_) => {
+                let mut c = [92.0f32, 104.0, 96.0];
+                for o in &objects {
+                    let (dx, dy) = (x - o.c.0, y - o.c.1);
+                    let (u, v) = (dx * o.dir.0 + dy * o.dir.1, -dx * o.dir.1 + dy * o.dir.0);
+                    if u.abs() <= o.half.0 && v.abs() <= o.half.1 {
+                        c = o.rgb;
+                    }
+                }
+                c
+            }
+        }
+    };
+    let mut scene = vec![[0.0f32; 3]; w * h];
+    scene.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let yc = y as f64 + 0.5;
+        for (x, px) in row.iter_mut().enumerate() {
+            let xc = x as f64 + 0.5;
+            let (u, v) = inv.apply(xc, yc);
+            *px = match map.sample(u, v) {
+                Some(c) => c,
+                None => {
+                    let s = 1.0 - shadow(xc, yc);
+                    table_rgb(xc, yc).map(|c| c * s)
+                }
+            };
+        }
+    });
+    let cast = [1.0f32, 0.90, 0.74].map(|c| c * 0.97);
+    let light = |x: usize, y: usize| -> f32 {
+        let (u, v) = ((x as f32 + 0.5) / w as f32 * 2.0 - 1.0, (y as f32 + 0.5) / h as f32 * 2.0 - 1.0);
+        let vignette = 1.0 - 0.18 * (u * u + v * v);
+        let s = ((0.8 * x as f32 + 0.25 * y as f32) / (0.7 * w as f32)).clamp(0.0, 1.0);
+        vignette * (0.55 + 0.45 * s * s * (3.0 - 2.0 * s))
+    };
+    let planes: Vec<GrayF32> = (0..3)
+        .map(|c| {
+            let mut p = GrayF32::new(w, h);
+            p.data.par_chunks_mut(w).zip(scene.par_chunks(w)).enumerate().for_each(|(y, (row, src))| {
+                for (x, (v, s)) in row.iter_mut().zip(src).enumerate() {
+                    *v = s[c] * light(x, y) * cast[c];
+                }
+            });
+            let mut b = p.gaussian_blur(1.2);
+            b.data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                let mut rng = Rng::new(seed ^ ((c as u64) << 40) ^ (y as u64 + 1));
+                for v in row.iter_mut() {
+                    *v += 2.5 * rng.normal() as f32;
+                }
+            });
+            b
+        })
+        .collect();
+    Rgb8::from_channels(&planes[0], &planes[1], &planes[2]).unwrap()
+}
+
+/// Write `img` as a PNG (debugging aid).
+pub fn save_png(img: &Rgb8, path: &std::path::Path) {
+    let file = std::io::BufWriter::new(std::fs::File::create(path).expect("create png"));
+    let mut enc = png::Encoder::new(file, img.w as u32, img.h as u32);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().unwrap().write_image_data(&img.data).unwrap();
+}
