@@ -232,6 +232,45 @@ image's pixels, like everything else.
 * `corners` are the image corners TL, TR, BR, BL as `[lat, lon]`.
 * `pois` are map labels classified as place names, peaks or spot heights, in
   base-image pixels.
+* `warp` (photo mode only; absent or `null` otherwise) is a smooth correction
+  for paper that does not lie flat (fold creases, curl). No single homography
+  fits a folded sheet: on `fixtures/grootkloof/photo` (a phone photo of the
+  printed sheet, folded in four) the best one is off by ~37 m median and
+  ~180 m at the corners. With a warp the full model is
+
+  ```
+  merc(p) = H(p) + B(p)
+  ```
+
+  where `H` is `pixel_to_mercator` and `B(p)` is the bilinear interpolation of
+  per-node offsets on a regular lattice over the image:
+
+  ```json
+  "warp": {
+    "cols": 17, "rows": 23,
+    "origin": [0.0, 0.0],
+    "spacing": [120.5, 117.1],
+    "offsets_m": [dx00, dy00, dx01, dy01, ...]
+  }
+  ```
+
+  Node `(i, j)` (column `i`, row `j`) sits at pixel
+  `origin + (i·spacing[0], j·spacing[1])`. Its offset is
+  `offsets_m[2·(j·cols + i)]` (x) and `[… + 1]` (y), in Web-Mercator metres,
+  the units `H` outputs. To evaluate `B(p)`, take the lattice coordinates
+  `u = (p.x − origin[0]) / spacing[0]` and `v = (p.y − origin[1]) / spacing[1]`,
+  clamp them to `[0, cols − 1] × [0, rows − 1]` (the warp is constant beyond
+  the lattice), and interpolate the four surrounding nodes bilinearly. The
+  lattice covers the whole image: `origin = (0, 0)` and
+  `spacing = (width / (cols − 1), height / (rows − 1))`. The core keeps the
+  warp fold-free: its pixel derivative stays below 0.35× that of `H`, so the
+  inverse `mercator → pixel` converges by fixed-point iteration,
+  `p₀ = H⁻¹(m)`, `pₖ₊₁ = H⁻¹(m − B(pₖ))` (6 iterations reach < 0.01 px).
+  `rms_m`, `corners`, `scale_m_per_px` and `rotation_deg` include the warp.
+  `pixel_to_mercator` alone is still the best homography, so a client that
+  ignores `warp` gets the flat-model answer. `diagnostics.warp` says how the
+  warp was fitted (`source`: `"grid"` or `"contours"`, constraint counts, RMS
+  before and after, largest offset).
 
 ### Control point request/response
 
