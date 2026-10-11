@@ -17,6 +17,16 @@ struct OCRJob: Equatable {
     var rotation: OCRRotation
 }
 
+/// One line of text read by one pass, before de-duplication.
+struct OCRRead {
+    var observation: OCRObservation
+    /// The box touches an edge of its pass's crop that lies inside the image, so the text may be
+    /// cut off there (the overlapping neighbour pass reads it whole).
+    var atTileEdge: Bool
+    /// How the pass turned its crop.
+    var rotation: OCRRotation = .upright
+}
+
 enum OCRService {
     static let tileSize = 1600
     static let overlap = 0.15
@@ -25,15 +35,17 @@ enum OCRService {
     static let maxConcurrentPasses = 3
     /// Smallest text Vision should look for, in processed-image pixels.
     static let minimumTextPixels = 12.0
+    /// A box within this distance (base pixels) of a crop edge touches it.
+    static let tileEdgeMargin = 3.0
 
     /// Recognise text anywhere on the map, including vertical (rotated) grid labels.
     /// Returned boxes are in base-image pixels, top-left origin.
     static func recognize(in image: CGImage, progress: ((Double) -> Void)? = nil) async throws -> [OCRObservation] {
         let jobs = plan(width: image.width, height: image.height)
         guard !jobs.isEmpty else { return [] }
-        var all: [OCRObservation] = []
+        var all: [OCRRead] = []
         var done = 0
-        try await withThrowingTaskGroup(of: [OCRObservation].self) { group in
+        try await withThrowingTaskGroup(of: [OCRRead].self) { group in
             var pending = jobs.makeIterator()
             for _ in 0..<maxConcurrentPasses {
                 guard let job = pending.next() else { break }
@@ -160,11 +172,45 @@ enum OCRService {
 
     // MARK: - De-duplication (pure)
 
-    /// Merge reads of the same label from overlapping passes: same text with IoU > 0.4 keeps the
-    /// more confident one; a partial read cut at a tile edge (text contained in the other and
-    /// mostly overlapping it) keeps the longer text.
+    /// True when `box` (base pixels) comes within `margin` of an edge of `crop` that is not also an
+    /// edge of the image: an interior tile edge, where a pass may see only part of a word.
+    static func touchesInteriorEdge(_ box: CGRect, crop: CGRect, imageSize: CGSize,
+                                    margin: Double = OCRService.tileEdgeMargin) -> Bool {
+        let m = CGFloat(margin)
+        // Crop edges are whole pixels; half a pixel tells the image's own edges apart.
+        if crop.minX > 0.5, box.minX - crop.minX <= m { return true }
+        if crop.maxX < imageSize.width - 0.5, crop.maxX - box.maxX <= m { return true }
+        if crop.minY > 0.5, box.minY - crop.minY <= m { return true }
+        if crop.maxY < imageSize.height - 0.5, crop.maxY - box.maxY <= m { return true }
+        return false
+    }
+
+    /// `deduplicate` for reads with no tile-edge information.
     static func deduplicate(_ observations: [OCRObservation]) -> [OCRObservation] {
-        let ordered = observations.sorted {
+        deduplicate(observations.map { OCRRead(observation: $0, atTileEdge: false) })
+    }
+
+    /// Merge reads of the same label from overlapping passes:
+    /// - a read touching an interior tile edge (possibly cut off there, e.g. "BARTLETT FARM PAI")
+    ///   is dropped when a read of the same orientation that is not at a tile edge covers at least
+    ///   half of its box: the overlapping neighbour pass read the whole word. Reads at the image's
+    ///   own edges are kept, and so is a cut read nothing else covers (a label longer than the
+    ///   tiles' overlap, or one the neighbour pass missed);
+    /// - same text with IoU > 0.4 keeps the more confident one;
+    /// - a partial read (text contained in the other) mostly overlapping it keeps the longer text;
+    /// - near-duplicates, where one text is a near-prefix of the other (the common prefix is at
+    ///   least `nearPrefixFraction` of the shorter text, ignoring case and spaces) and the boxes
+    ///   overlap by at least half of the smaller, keep the longer text.
+    static func deduplicate(_ reads: [OCRRead]) -> [OCRObservation] {
+        let whole = reads.filter { !$0.atTileEdge && $0.observation.bbox.count == 4 }
+        let survivors = reads.filter { read in
+            guard read.atTileEdge, read.observation.bbox.count == 4 else { return true }
+            let r = rect(read.observation)
+            return !whole.contains { other in
+                other.rotation == read.rotation && fractionCovered(r, by: rect(other.observation)) >= 0.5
+            }
+        }
+        let ordered = survivors.map { $0.observation }.sorted {
             $0.confidence != $1.confidence ? $0.confidence > $1.confidence : $0.text.count > $1.text.count
         }
         var kept: [(obs: OCRObservation, key: String, rect: CGRect)] = []
@@ -179,6 +225,9 @@ enum OCRService {
                 } else if (k.key.contains(key) || key.contains(k.key)) && overlapOfSmaller(r, k.rect) > 0.6 {
                     if key.count > k.key.count { kept[i] = (o, key, r) }
                     continue candidates
+                } else if isNearPrefix(key, k.key) && overlapOfSmaller(r, k.rect) >= 0.5 {
+                    if key.count > k.key.count { kept[i] = (o, key, r) }
+                    continue candidates
                 }
             }
             kept.append((o, key, r))
@@ -186,6 +235,22 @@ enum OCRService {
         return kept.map { $0.obs }.sorted { a, b in
             a.bbox[1] != b.bbox[1] ? a.bbox[1] < b.bbox[1] : a.bbox[0] < b.bbox[0]
         }
+    }
+
+    /// Shortest common prefix, as a fraction of the shorter text, for two reads to be one label.
+    static let nearPrefixFraction = 0.8
+
+    /// One text starts like the other for at least `nearPrefixFraction` of the shorter one
+    /// ("bartlettfarmpai" / "bartlettfarmparking"). Expects `normalized` keys.
+    static func isNearPrefix(_ a: String, _ b: String) -> Bool {
+        let shorter = min(a.count, b.count)
+        guard shorter > 0 else { return false }
+        var common = 0
+        for (x, y) in zip(a, b) {
+            guard x == y else { break }
+            common += 1
+        }
+        return Double(common) >= nearPrefixFraction * Double(shorter) - 1e-9
     }
 
     static func iou(_ a: CGRect, _ b: CGRect) -> Double {
@@ -201,6 +266,14 @@ enum OCRService {
         guard !i.isNull, !i.isEmpty else { return 0 }
         let smaller = Double(min(a.width * a.height, b.width * b.height))
         return smaller > 0 ? Double(i.width * i.height) / smaller : 0
+    }
+
+    /// Fraction of `a`'s area inside `b`.
+    private static func fractionCovered(_ a: CGRect, by b: CGRect) -> Double {
+        let i = a.intersection(b)
+        guard !i.isNull, !i.isEmpty else { return 0 }
+        let area = Double(a.width * a.height)
+        return area > 0 ? Double(i.width * i.height) / area : 0
     }
 
     private static func rect(_ o: OCRObservation) -> CGRect {
@@ -220,7 +293,7 @@ enum OCRService {
         var confidence: Float
     }
 
-    private static func run(_ job: OCRJob, on image: CGImage) async throws -> [OCRObservation] {
+    private static func run(_ job: OCRJob, on image: CGImage) async throws -> [OCRRead] {
         try Task.checkCancellation()
         let bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
         let cropRect = job.crop.integral.intersection(bounds)
@@ -243,13 +316,16 @@ enum OCRService {
             return []
         }
         let processedBounds = CGRect(origin: .zero, size: size)
-        return lines.compactMap { (line: TextLine) -> OCRObservation? in
+        let imageSize = bounds.size
+        return lines.compactMap { (line: TextLine) -> OCRRead? in
             let px = visionRectToPixels(line.box, imageSize: size).intersection(processedBounds)
             guard !px.isNull, px.width > 0, px.height > 0 else { return nil }
             let b = mapToBase(px, crop: cropFrame, rotation: job.rotation)
-            return OCRObservation(text: line.text,
-                                  bbox: [Double(b.minX), Double(b.minY), Double(b.width), Double(b.height)],
-                                  confidence: line.confidence)
+            let observation = OCRObservation(text: line.text,
+                                             bbox: [Double(b.minX), Double(b.minY), Double(b.width), Double(b.height)],
+                                             confidence: line.confidence)
+            let atEdge = touchesInteriorEdge(b, crop: cropFrame, imageSize: imageSize)
+            return OCRRead(observation: observation, atTileEdge: atEdge, rotation: job.rotation)
         }
     }
 

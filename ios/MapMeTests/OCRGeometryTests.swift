@@ -111,4 +111,75 @@ final class OCRGeometryTests: XCTestCase {
         XCTAssertTrue(out.contains { $0.text == "KWAMI LODGE" })
         XCTAssertTrue(out.contains { $0.bbox[0] > 3000 })
     }
+
+    func testReadsCutAtInteriorTileEdgesAreDropped() throws {
+        // The Grootkloof PDF at 300 dpi: 3 × 4 upright tiles of 1600 px.
+        let size = CGSize(width: 3508, height: 4963)
+        let tiles = OCRService.tileRects(width: 3508, height: 4963)
+        XCTAssertEqual(tiles.count, 12)
+        let first = try XCTUnwrap(tiles.first)
+        XCTAssertEqual(first, CGRect(x: 0, y: 0, width: 1600, height: 1600))
+        // "BARTLETT FARM PAI" as CI read it: its box ends 2.3 px before the first tile's right edge,
+        // which lies inside the image (the next tile column starts at x = 954).
+        let cutBox = CGRect(x: 1351.2, y: 1476.7, width: 246.5, height: 28.3)
+        XCTAssertTrue(OCRService.touchesInteriorEdge(cutBox, crop: first, imageSize: size))
+        XCTAssertFalse(OCRService.touchesInteriorEdge(CGRect(x: 1351.2, y: 1476.7, width: 200, height: 28.3),
+                                                      crop: first, imageSize: size))
+        // Boxes on the image's own edges are not cut by the tiling.
+        XCTAssertFalse(OCRService.touchesInteriorEdge(CGRect(x: 0, y: 1, width: 40, height: 20), crop: first, imageSize: size))
+        let last = try XCTUnwrap(tiles.last)
+        XCTAssertEqual(last.maxX, 3508)
+        XCTAssertEqual(last.maxY, 4963)
+        XCTAssertFalse(OCRService.touchesInteriorEdge(CGRect(x: 3466, y: 4941, width: 41, height: 21), crop: last, imageSize: size))
+        // …but the last tile's left and top edges are interior.
+        let leftEdge = CGRect(x: last.minX + 1, y: last.minY + 500, width: 60, height: 20)
+        XCTAssertTrue(OCRService.touchesInteriorEdge(leftEdge, crop: last, imageSize: size))
+        let topEdge = CGRect(x: last.minX + 500, y: last.minY + 2.5, width: 60, height: 20)
+        XCTAssertTrue(OCRService.touchesInteriorEdge(topEdge, crop: last, imageSize: size))
+
+        // A garbled read cut at a tile edge ("IOUNT CONFERENCE & ADVENTU" is neither part nor
+        // prefix of the whole label) goes when the neighbour tile read the label whole.
+        let whole = OCRObservation(text: "PARAMOUNT CONFERENCE & ADVENTURE", bbox: [1116.8, 960, 520, 35.3], confidence: 0.9)
+        let garbled = OCRObservation(text: "IOUNT CONFERENCE & ADVENTU", bbox: [1197, 962, 400, 30], confidence: 1)
+        let cut = [OCRRead(observation: whole, atTileEdge: false), OCRRead(observation: garbled, atTileEdge: true)]
+        XCTAssertEqual(OCRService.deduplicate(cut).map(\.text), ["PARAMOUNT CONFERENCE & ADVENTURE"])
+        // Not at a tile edge, the same two reads are different labels to the other rules.
+        XCTAssertEqual(OCRService.deduplicate([whole, garbled]).count, 2)
+        // A cut read nothing else covers (a label longer than the overlap) stays, and so does one
+        // only a pass of another orientation covers.
+        let lone = OCRObservation(text: "MAGALIESBERG SHEET", bbox: [1300, 4600, 298, 60], confidence: 0.9)
+        let rotatedWhole = OCRRead(observation: whole, atTileEdge: false, rotation: .clockwise)
+        let kept = OCRService.deduplicate([OCRRead(observation: lone, atTileEdge: true),
+                                           OCRRead(observation: garbled, atTileEdge: true), rotatedWhole])
+        XCTAssertEqual(kept.count, 3)
+        XCTAssertTrue(kept.contains { $0.text == "MAGALIESBERG SHEET" })
+        XCTAssertTrue(kept.contains { $0.text == "IOUNT CONFERENCE & ADVENTU" })
+    }
+
+    func testNearPrefixDuplicatesKeepTheLongerText() {
+        // As CI read them on the Grootkloof sheet: one label, two reads.
+        let parking = OCRObservation(text: "BARTLETT FARM PARKING", bbox: [1351.7, 1474, 323.3, 31], confidence: 0.9)
+        let pai = OCRObservation(text: "BARTLETT FARM PAI", bbox: [1351.2, 1476.7, 246.5, 28.3], confidence: 1)
+        let gate = OCRObservation(text: "BARTLETT/FARM GATE", bbox: [1744.7, 1518.6, 281.4, 28.4], confidence: 1)
+        XCTAssertEqual(OCRService.deduplicate([pai, parking, gate]).map(\.text), ["BARTLETT FARM PARKING", "BARTLETT/FARM GATE"])
+        // Case and spaces are ignored.
+        let river = OCRObservation(text: "Non-Perennial River", bbox: [958.1, 4231.9, 244.2, 23.3], confidence: 0.8)
+        let riverCut = OCRObservation(text: "NON-PERENI", bbox: [958.1, 4232.5, 130, 22.8], confidence: 1)
+        XCTAssertEqual(OCRService.deduplicate([riverCut, river]).map(\.text), ["Non-Perennial River"])
+        // Different numbers in the same place, or the same start far apart: both stay.
+        let a = OCRObservation(text: "1416", bbox: [1400, 1518, 60, 21], confidence: 1)
+        let b = OCRObservation(text: "1418", bbox: [1401, 1519, 60, 21], confidence: 0.9)
+        XCTAssertEqual(OCRService.deduplicate([a, b]).count, 2)
+        let elsewhere = OCRObservation(text: "BARTLETT FARM PAI", bbox: [400, 3000, 246, 28], confidence: 1)
+        XCTAssertEqual(OCRService.deduplicate([parking, elsewhere]).count, 2)
+        // Boxes overlapping less than half of the smaller one: both stay.
+        let shifted = OCRObservation(text: "BARTLETT FARM PAI", bbox: [1560, 1476.7, 246.5, 28.3], confidence: 1)
+        XCTAssertEqual(OCRService.deduplicate([parking, shifted]).count, 2)
+
+        XCTAssertTrue(OCRService.isNearPrefix("bartlettfarmpai", "bartlettfarmparking"))
+        XCTAssertTrue(OCRService.isNearPrefix("riete", "rietfonteinvalley"))
+        XCTAssertFalse(OCRService.isNearPrefix("1416", "1418"))
+        XCTAssertFalse(OCRService.isNearPrefix("", "abc"))
+    }
 }
+

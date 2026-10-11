@@ -236,12 +236,19 @@ enum PhotoGeometry {
 
     static func triage(_ detected: PhotoQuad?, imageSize: CGSize) -> Triage {
         guard let quad = detected, isPlausible(quad, imageSize: imageSize) else { return .asIs }
+        return fillsFrame(quad, imageSize: imageSize) ? .asIs : .needsCorners(quad)
+    }
+
+    /// The outline is (nearly) the whole image: it covers at least `asIsCoverage` of it with every
+    /// corner within `asIsCornerDistance` of the image's own corner.
+    static func fillsFrame(_ quad: PhotoQuad, imageSize: CGSize) -> Bool {
         let w = Double(imageSize.width)
         let h = Double(imageSize.height)
+        guard w > 0, h > 0 else { return false }
         let coverage = quad.area / (w * h)
+        guard coverage >= asIsCoverage else { return false }
         let reach = asIsCornerDistance * (w * w + h * h).squareRoot()
-        let nearCorners = zip(quad.points, PhotoQuad.full(imageSize).points).allSatisfy { distance($0, $1) <= reach }
-        return coverage >= asIsCoverage && nearCorners ? .asIs : .needsCorners(quad)
+        return zip(quad.points, PhotoQuad.full(imageSize).points).allSatisfy { distance($0, $1) <= reach }
     }
 
     /// Corners within `tolerance` (fraction of the long side) of the image corners: nothing to flatten.

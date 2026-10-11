@@ -180,7 +180,7 @@ struct MapScreen: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             TrailStatsPanel(map: map, expanded: $panelExpanded, maxDetailsHeight: maxDetails, onShowAll: {
-                showNearby = true
+                openNearby()
             }, onSelectPOI: { poi in
                 tracking = .none
                 withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
@@ -219,6 +219,22 @@ struct MapScreen: View {
     }
 
     // MARK: - Actions
+
+    /// "Show All" in the expanded stats panel: collapse the panel first so it does not peek out
+    /// above the Nearby sheet (with a second grabber), then present the sheet.
+    private func openNearby() {
+        guard panelExpanded else {
+            showNearby = true
+            return
+        }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+            panelExpanded = false
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 220_000_000)
+            showNearby = true
+        }
+    }
 
     /// Long-press drops a user waypoint at that spot on the map.
     private func dropWaypoint(at pixel: CGPoint) {

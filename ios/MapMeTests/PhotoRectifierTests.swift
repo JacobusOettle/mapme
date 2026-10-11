@@ -118,6 +118,11 @@ final class PhotoRectifierTests: XCTestCase {
         let reversed = PhotoQuad(points: Array(sheet.points.reversed()))
         XCTAssertEqual(PhotoGeometry.triage(reversed, imageSize: photoSize), .asIs)
 
+        // What the simulator's Vision reports for a sheet on a table: (nearly) the whole frame.
+        XCTAssertTrue(PhotoGeometry.fillsFrame(frame, imageSize: photoSize))
+        XCTAssertTrue(PhotoGeometry.fillsFrame(PhotoQuad.full(photoSize), imageSize: photoSize))
+        XCTAssertFalse(PhotoGeometry.fillsFrame(sheet, imageSize: photoSize))
+
         XCTAssertTrue(PhotoGeometry.isFullImage(PhotoQuad.full(photoSize), imageSize: photoSize))
         XCTAssertFalse(PhotoGeometry.isFullImage(PhotoQuad.full(photoSize).rotatedClockwise, imageSize: photoSize))
         XCTAssertFalse(PhotoGeometry.isFullImage(sheet, imageSize: photoSize))
@@ -342,6 +347,136 @@ final class PhotoRectifierTests: XCTestCase {
         let square = PhotoQuad(topLeft: CGPoint(x: 50, y: 50), topRight: CGPoint(x: 350, y: 60),
                                bottomRight: CGPoint(x: 340, y: 350), bottomLeft: CGPoint(x: 60, y: 340))
         XCTAssertEqual(PhotoQuadDetector.refine(square, in: blank), square)
+    }
+
+    // MARK: - Page detection: choosing between Vision and the core
+
+    /// Pages in a 1200 × 1600 working image.
+    private let workSize = CGSize(width: 1200, height: 1600)
+    private let workPage = PhotoQuad(topLeft: CGPoint(x: 235, y: 171), topRight: CGPoint(x: 985, y: 249),
+                                     bottomRight: CGPoint(x: 1047, y: 1357), bottomLeft: CGPoint(x: 124, y: 1370))
+    /// The simulator's Vision answer for the synthetic photo: the frame, inset by a few pixels.
+    private let visionFrame = PhotoQuad(topLeft: CGPoint(x: 8.3, y: 6.25), topRight: CGPoint(x: 1191.7, y: 6.25),
+                                        bottomRight: CGPoint(x: 1191.7, y: 1593.75), bottomLeft: CGPoint(x: 8.3, y: 1593.75))
+    /// Something else on the table (e.g. only the upper part of the sheet).
+    private let otherOutline = PhotoQuad(topLeft: CGPoint(x: 235, y: 171), topRight: CGPoint(x: 985, y: 249),
+                                         bottomRight: CGPoint(x: 1010, y: 760), bottomLeft: CGPoint(x: 180, y: 770))
+
+    private func shifted(_ quad: PhotoQuad, by d: CGFloat) -> PhotoQuad {
+        quad.mapped { CGPoint(x: $0.x + d, y: $0.y - d) }
+    }
+
+    func testPageSelection() {
+        let near = shifted(workPage, by: 10)
+        let contrasts: [(PhotoQuad, Double?)] = [(workPage, 0.6), (near, 0.58), (visionFrame, nil), (otherOutline, 0.3)]
+        let contrast: (PhotoQuad) -> Double? = { quad in
+            guard let entry = contrasts.first(where: { $0.0 == quad }) else { return 0 }
+            return entry.1
+        }
+        func choose(_ vision: PhotoQuad?, _ core: PhotoQuad?) -> PageChoice? {
+            PhotoQuadDetector.select(vision: vision, core: core, imageSize: workSize, contrast: contrast)
+        }
+        // The simulator case: Vision returns the frame, the core finds the sheet.
+        XCTAssertEqual(choose(visionFrame, workPage), PageChoice(quad: workPage, source: .core))
+        XCTAssertEqual(choose(nil, workPage), PageChoice(quad: workPage, source: .core))
+        // Vision's frame alone is passed on (triage then uses the photo as it is).
+        XCTAssertEqual(choose(visionFrame, nil), PageChoice(quad: visionFrame, source: .vision))
+        XCTAssertEqual(PhotoGeometry.triage(visionFrame, imageSize: workSize), .asIs)
+        // Agreeing outlines: Vision's.
+        XCTAssertEqual(choose(near, workPage), PageChoice(quad: near, source: .vision))
+        // Disagreeing: the clearer border, with an edge for Vision.
+        XCTAssertEqual(choose(otherOutline, workPage), PageChoice(quad: workPage, source: .core))
+        XCTAssertEqual(choose(workPage, otherOutline), PageChoice(quad: workPage, source: .vision))
+        let closeCall: (PhotoQuad) -> Double? = { quad in quad == self.otherOutline ? 0.55 : 0.6 }
+        XCTAssertEqual(PhotoQuadDetector.select(vision: otherOutline, core: workPage, imageSize: workSize, contrast: closeCall),
+                       PageChoice(quad: otherOutline, source: .vision))
+        // An outline with no border in the pixels is no page (a featureless image).
+        XCTAssertNil(PhotoQuadDetector.select(vision: workPage, core: nil, imageSize: workSize) { _ in 0.005 })
+        XCTAssertEqual(PhotoQuadDetector.select(vision: workPage, core: nil, imageSize: workSize) { _ in 0.03 },
+                       PageChoice(quad: workPage, source: .vision))
+        // The core's outline needs a clearer border than Vision's.
+        XCTAssertNil(PhotoQuadDetector.select(vision: nil, core: workPage, imageSize: workSize) { _ in 0.04 })
+        // Implausible outlines are ignored.
+        let tiny = PhotoQuad(topLeft: CGPoint(x: 10, y: 10), topRight: CGPoint(x: 100, y: 10),
+                             bottomRight: CGPoint(x: 100, y: 100), bottomLeft: CGPoint(x: 10, y: 100))
+        XCTAssertNil(choose(tiny, nil))
+        XCTAssertEqual(choose(tiny, workPage), PageChoice(quad: workPage, source: .core))
+        XCTAssertNil(choose(nil, nil))
+
+        // The core's answer counts when it is confident and does not fill the frame; its corners
+        // are put in TL, TR, BR, BL order.
+        let coverage = workPage.area / Double(workSize.width * workSize.height)
+        let detection = PageDetection(quad: workPage.points, confidence: 0.9, coverage: coverage)
+        XCTAssertEqual(PhotoQuadDetector.acceptedCoreQuad(detection, imageSize: workSize), workPage)
+        let scrambled = PageDetection(quad: [workPage.bottomRight, workPage.topLeft, workPage.bottomLeft, workPage.topRight],
+                                      confidence: 0.9, coverage: coverage)
+        XCTAssertEqual(PhotoQuadDetector.acceptedCoreQuad(scrambled, imageSize: workSize), workPage)
+        XCTAssertNil(PhotoQuadDetector.acceptedCoreQuad(PageDetection(quad: workPage.points, confidence: 0.3, coverage: coverage),
+                                                        imageSize: workSize))
+        XCTAssertNil(PhotoQuadDetector.acceptedCoreQuad(PageDetection(quad: visionFrame.points, confidence: 0.9, coverage: 0.97),
+                                                        imageSize: workSize))
+    }
+
+    func testEdgeContrastMeasuresThePaperBorder() throws {
+        // A bright sheet (0.9) on a dark table (0.1): pixels 100..<300 × 80..<220.
+        let w = 400
+        let h = 300
+        var pixels = [Float](repeating: 0.1, count: w * h)
+        for y in 80..<220 {
+            for x in 100..<300 {
+                pixels[y * w + x] = 0.9
+            }
+        }
+        let gray = GrayImage(width: w, height: h, pixels: pixels)
+        let sheetOutline = PhotoQuad(topLeft: CGPoint(x: 100, y: 80), topRight: CGPoint(x: 300, y: 80),
+                                     bottomRight: CGPoint(x: 300, y: 220), bottomLeft: CGPoint(x: 100, y: 220))
+        XCTAssertEqual(try XCTUnwrap(PhotoQuadDetector.edgeContrast(sheetOutline, in: gray)), 0.8, accuracy: 1e-3)
+        // An outline inside the sheet (or anywhere on a featureless image) has no border.
+        let inside = PhotoQuad(topLeft: CGPoint(x: 130, y: 110), topRight: CGPoint(x: 270, y: 110),
+                               bottomRight: CGPoint(x: 270, y: 190), bottomLeft: CGPoint(x: 130, y: 190))
+        XCTAssertEqual(try XCTUnwrap(PhotoQuadDetector.edgeContrast(inside, in: gray)), 0, accuracy: 1e-6)
+        let blank = GrayImage(width: w, height: h, pixels: [Float](repeating: 0.5, count: w * h))
+        XCTAssertEqual(try XCTUnwrap(PhotoQuadDetector.edgeContrast(sheetOutline, in: blank)), 0, accuracy: 1e-6)
+        // An outline on the image border cannot be measured.
+        XCTAssertNil(PhotoQuadDetector.edgeContrast(PhotoQuad.full(CGSize(width: w, height: h)), in: gray))
+    }
+
+    func testCorePageFinderFindsTheSheet() throws {
+        let page = try markerPage()
+        var camera = SyntheticPhoto.Camera()
+        camera.width = 1200
+        camera.height = 1600
+        camera.fill = 0.72
+        let photo = try SyntheticPhoto.make(page: page, camera: camera)
+        let size = CGSize(width: 1200, height: 1600)
+        let raster = try XCTUnwrap(RGBARaster(photo.image))
+        XCTAssertEqual(raster.bytesPerRow, 4800)
+        XCTAssertEqual(raster.bytes.count, 4800 * 1600)
+
+        // The core alone: close enough for the edge snapping to take over, in TL, TR, BR, BL order.
+        let found = try XCTUnwrap(PhotoQuadDetector.corePage(in: raster), "the core found no page")
+        XCTAssertGreaterThanOrEqual(found.confidence, PhotoQuadDetector.minimumCoreConfidence)
+        XCTAssertEqual(found.coverage, photo.corners.area / Double(size.width * size.height), accuracy: 0.05)
+        let raw = try XCTUnwrap(PhotoQuad(points: found.quad))
+        for (a, b) in zip(raw.points, photo.corners.points) {
+            assertClose(a, b, PhotoQuadDetector.searchFraction * 1600, "core corner")
+        }
+
+        // The whole detector (Vision too, whatever it says here): the sheet, snapped to its edges,
+        // and the corner editor opens.
+        let analysis = PhotoQuadDetector.analyzeSync(photo.image)
+        let chosen = try XCTUnwrap(analysis.quad, analysis.summary)
+        for (a, b) in zip(chosen.points, photo.corners.points) {
+            assertClose(a, b, 0.01 * 1600, analysis.summary)
+        }
+        XCTAssertEqual(PhotoGeometry.triage(chosen, imageSize: size), .needsCorners(chosen))
+
+        // A featureless image has no page.
+        let ctx = try XCTUnwrap(TileStore.makeContext(width: 1200, height: 700))
+        ctx.setFillColor(CGColor(red: 0.9, green: 0.85, blue: 0.7, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: 1200, height: 700))
+        let blank = try XCTUnwrap(RGBARaster(try XCTUnwrap(ctx.makeImage())))
+        XCTAssertNil(PhotoQuadDetector.corePage(in: blank))
     }
 
     func testLineFitHelpers() throws {

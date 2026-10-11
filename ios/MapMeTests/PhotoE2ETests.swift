@@ -4,15 +4,17 @@ import XCTest
 @testable import MapMe
 
 /// Photos of paper maps end to end on the Grootkloof sheet: a synthetic phone photo of the printed
-/// sheet (perspective, table, uneven warm light, blur, JPEG) → page detection (Vision + edge
-/// snapping) → flattening → OCR → photo-mode georeference. Errors are measured against the sheet's
-/// surveyed graticule through the known photo geometry (page → photo → flattened pixels).
+/// sheet (perspective, table, uneven warm light, blur, JPEG) → page detection (Vision and the
+/// core's page finder, edge snapping) → flattening → OCR → photo-mode georeference. Errors are
+/// measured against the sheet's surveyed graticule through the known photo geometry (page → photo
+/// → flattened pixels).
 final class PhotoE2ETests: XCTestCase {
     private struct Scene {
         var synthetic: SyntheticPhoto.Result
         /// The photo decoded the way the importer decodes it.
         var photo: CGImage
-        /// Corners the page was flattened with (Vision's, or the true ones when Vision found none).
+        /// Corners the page was flattened with: the detected ones (the true ones if detection failed,
+        /// which is a test failure, so the georeference tests still run).
         var corners: PhotoQuad
         var flat: CGImage
         /// Page raster pixels → flattened pixels.
@@ -36,20 +38,30 @@ final class PhotoE2ETests: XCTestCase {
         XCTAssertEqual(photo.height, synthetic.image.height)
         attachImage(photo, name: "photo-e2e-synthetic-photo")
 
+        // The importer's detection: Vision and the core's page finder, the better outline snapped
+        // to the paper's edges. The simulator's Vision returns the whole frame for this photo; the
+        // core must then find the sheet. Either way the chosen outline is what is checked.
         let truth = synthetic.corners
         var corners = truth
         let longSide = Double(max(photo.width, photo.height))
-        if let detected = await PhotoQuadDetector.detect(in: photo) {
+        let photoSize = CGSize(width: photo.width, height: photo.height)
+        let analysis = await PhotoQuadDetector.analyze(photo)
+        note("Page detection: \(analysis.summary)")
+        if let detected = analysis.quad {
             let offsets = zip(detected.points, truth.points).map { PhotoGeometry.distance($0, $1) }
             let worst = offsets.max() ?? .infinity
-            XCTAssertLessThan(worst, 0.03 * longSide, "detected \(detected.json) vs true \(truth.json)")
-            note("Vision found the sheet; corner offsets \(offsets.map { String(format: "%.1f", $0) }) px")
+            XCTAssertLessThan(worst, 0.01 * longSide,
+                              "detected \(detected.json) vs true \(truth.json) (\(analysis.summary))")
+            let source = analysis.source?.rawValue ?? "?"
+            let offsetText = offsets.map { String(format: "%.1f", $0) }.joined(separator: ", ")
+            note("\(source) found the sheet; corner offsets [\(offsetText)] px")
+            XCTAssertEqual(PhotoGeometry.triage(detected, imageSize: photoSize), .needsCorners(detected),
+                           "the corner editor must open for this photo (\(analysis.summary))")
             corners = detected
         } else {
-            note("Vision found no sheet in this environment; flattening with the true corners")
+            XCTFail("No sheet found in the synthetic photo (\(analysis.summary)); flattening with the true corners")
         }
-        XCTAssertEqual(PhotoGeometry.triage(corners, imageSize: CGSize(width: photo.width, height: photo.height)),
-                       .needsCorners(corners))
+        XCTAssertEqual(PhotoGeometry.triage(corners, imageSize: photoSize), .needsCorners(corners))
 
         let info = PhotoCaptureInfo.read(from: url)
         XCTAssertTrue(info.isCamera)
@@ -224,14 +236,20 @@ final class PhotoE2ETests: XCTestCase {
         }
         let folders = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
         XCTAssertTrue(folders.isEmpty, "\(folders)")
-        // Screenshots and other non-photos are imported as before, without the editor.
+        // Screenshots and other non-photos are imported as before, without the editor. An outline
+        // a detector may report on a featureless image has no border in the pixels and is dropped.
         let ctx = try XCTUnwrap(TileStore.makeContext(width: 1200, height: 700))
         ctx.setFillColor(CGColor(red: 0.9, green: 0.85, blue: 0.7, alpha: 1))
         ctx.fill(CGRect(x: 0, y: 0, width: 1200, height: 700))
-        let data = try XCTUnwrap(TileStore.jpegData(try XCTUnwrap(ctx.makeImage())))
-        let never: PhotoCornerPicker = { _ in
-            XCTFail("no corner editor for a plain image")
-            return nil
+        let plainImage = try XCTUnwrap(ctx.makeImage())
+        let plainAnalysis = await PhotoQuadDetector.analyze(plainImage)
+        note("Plain image page detection: \(plainAnalysis.summary)")
+        XCTAssertEqual(PhotoGeometry.triage(plainAnalysis.quad, imageSize: CGSize(width: 1200, height: 700)), .asIs,
+                       plainAnalysis.summary)
+        let data = try XCTUnwrap(TileStore.jpegData(plainImage))
+        let never: PhotoCornerPicker = { request in
+            XCTFail("no corner editor for a plain image (initial \(request.initial.json))")
+            return request.initial
         }
         let plain = try await importer.importImageData(data, suggestedName: "Screenshot", mode: .detectPhoto(never)) { _, _ in }
         XCTAssertEqual(plain.document.sourceKind, .image)

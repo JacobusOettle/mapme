@@ -87,8 +87,12 @@ final class AppModel {
 
     /// Called once when the UI appears.
     func onLaunch() async {
-        location.requestPermission()
-        location.start()
+        // Hosting unit tests: no location permission alert (it would outlive the unit tests and
+        // sit over the UI tests that run next).
+        if !location.isIdleForTests {
+            location.requestPermission()
+            location.start()
+        }
         #if DEBUG
         if importSamplePhotoIfRequested() { return }
         #endif

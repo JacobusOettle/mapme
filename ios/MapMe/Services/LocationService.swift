@@ -6,6 +6,8 @@ import UIKit
 /// CoreLocation wrapper: position + compass heading.
 /// Launch arguments for tests/screenshots: `-mockLocation <lat>,<lon>`, `-mockHeading <deg>`, `-mockWalk`,
 /// `-mockWalkSpeed <m/s>` (default 1.5).
+/// As the host app of the unit tests (and not mocked) it stays idle: no CoreLocation, no permission
+/// request, so no system alert outlives the unit tests and covers the UI tests that follow.
 /// Use from the main thread (delegate callbacks arrive on main because the manager is created there).
 @Observable
 final class LocationService: NSObject {
@@ -18,6 +20,14 @@ final class LocationService: NSObject {
     private(set) var authorization: CLAuthorizationStatus = .notDetermined
     /// True when driven by launch-argument mocks.
     private(set) var isMocked = false
+    /// True when CoreLocation is left alone: the app is hosting unit tests without mocks.
+    private(set) var isIdleForTests = false
+
+    /// The app was launched by XCTest to host unit tests (XCTest puts its configuration in the
+    /// host's environment; apps launched by UI tests do not get it).
+    static var isHostingUnitTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
 
     @ObservationIgnored private var manager: CLLocationManager?
     @ObservationIgnored private var observers: [(CLLocation) -> Void] = []
@@ -44,6 +54,8 @@ final class LocationService: NSObject {
             self.mock = mock
             isMocked = true
             authorization = .authorizedWhenInUse
+        } else if Self.isHostingUnitTests {
+            isIdleForTests = true
         } else {
             let m = CLLocationManager()
             m.delegate = self

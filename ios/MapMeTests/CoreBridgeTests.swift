@@ -55,4 +55,37 @@ final class CoreBridgeTests: XCTestCase {
         XCTAssertEqual(response.status, "failed")
         XCTAssertNil(response.georeference)
     }
+
+    func testPageDetectionJSON() throws {
+        let ok = #"{"status":"ok","quad":[[10,20],[110,22],[108,180],[12,178]],"confidence":0.83,"coverage":0.4}"#
+        let page = try XCTUnwrap(MapMeCore.decodePageDetection(ok, width: 200, height: 200))
+        let expected: [CGPoint] = [CGPoint(x: 10.0, y: 20.0), CGPoint(x: 110.0, y: 22.0),
+                                   CGPoint(x: 108.0, y: 180.0), CGPoint(x: 12.0, y: 178.0)]
+        XCTAssertEqual(page.quad, expected)
+        XCTAssertEqual(page.confidence, 0.83, accuracy: 1e-12)
+        XCTAssertEqual(page.coverage, 0.4, accuracy: 1e-12)
+        // Without a coverage it is worked out from the quad.
+        let bare = #"{"status":"ok","quad":[[0,0],[100,0],[100,50],[0,50]],"confidence":0.7}"#
+        let computed = try XCTUnwrap(MapMeCore.decodePageDetection(bare, width: 200, height: 100))
+        XCTAssertEqual(computed.coverage, 0.25, accuracy: 1e-12)
+        XCTAssertNil(MapMeCore.decodePageDetection(#"{"status":"failed","message":"no page"}"#, width: 10, height: 10))
+        let threeCorners = #"{"status":"ok","quad":[[0,0],[1,0],[1,1]],"confidence":0.9,"coverage":0.5}"#
+        XCTAssertNil(MapMeCore.decodePageDetection(threeCorners, width: 10, height: 10))
+        XCTAssertNil(MapMeCore.decodePageDetection("not json", width: 10, height: 10))
+    }
+
+    func testDetectPageRejectsBadInputAndBlankImages() throws {
+        let bytes = [UInt8](repeating: 255, count: 16)
+        bytes.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) -> Void in
+            // Too few bytes for 4 × 4, and an empty raster.
+            XCTAssertNil(MapMeCore.detectPage(rgba: buffer, width: 4, height: 4, bytesPerRow: 16))
+            XCTAssertNil(MapMeCore.detectPage(rgba: buffer, width: 0, height: 1, bytesPerRow: 0))
+        }
+        // A plain white page: nothing stands out, and the call returns cleanly.
+        let white = [UInt8](repeating: 255, count: 320 * 240 * 4)
+        let found = white.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) -> PageDetection? in
+            MapMeCore.detectPage(rgba: buffer, width: 320, height: 240, bytesPerRow: 320 * 4)
+        }
+        XCTAssertNil(found)
+    }
 }

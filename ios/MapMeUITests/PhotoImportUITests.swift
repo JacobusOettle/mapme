@@ -2,7 +2,8 @@ import XCTest
 
 /// Photo of a paper map, through the UI: the app photographs its bundled sample sheet
 /// (`-importSamplePhoto`, a synthetic photo in perspective on a table), shows "Adjust Corners"
-/// with the detected sheet, flattens and locates it, and opens it with a mocked GPS fix.
+/// with the detected sheet (in the simulator Vision sees only the whole frame; the core's page
+/// finder supplies the outline), flattens and locates it, and opens it with a mocked GPS fix.
 final class PhotoImportUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = true
@@ -28,6 +29,19 @@ final class PhotoImportUITests: XCTestCase {
         XCTAssertTrue(app.buttons["cornersAutoButton"].exists)
         XCTAssertTrue(app.buttons["cornersFullImageButton"].exists)
         XCTAssertTrue(done.isEnabled)
+        // The handles sit on the sheet's corners, well inside the photo (not on its corners, as
+        // they would for "the whole image"): the sheet's top-left is ~20 % in from the left edge
+        // and its bottom-right ~13 % in from the right.
+        let width = app.frame.width
+        let topLeft = app.descendants(matching: .any).matching(identifier: "cornerHandle0").firstMatch
+        let bottomRight = app.descendants(matching: .any).matching(identifier: "cornerHandle2").firstMatch
+        if topLeft.exists, bottomRight.exists {
+            XCTAssertGreaterThan(topLeft.frame.midX, 0.1 * width, "top-left handle at \(topLeft.frame)")
+            XCTAssertLessThan(bottomRight.frame.midX, 0.95 * width, "bottom-right handle at \(bottomRight.frame)")
+            XCTAssertLessThan(topLeft.frame.midY, bottomRight.frame.midY)
+        } else {
+            XCTFail("The corner handles are not in the accessibility tree")
+        }
         done.tap()
 
         let openMap = app.buttons["openMapButton"]
