@@ -53,6 +53,10 @@ use std::time::Instant;
 
 /// Grid line fits with a larger RMS (ground metres) only seed the contour stage.
 pub const GRID_MAX_RMS_M: f64 = 25.0;
+/// Photos: paper that does not lie flat (folds, curl) bends the grid, so a
+/// homography through the grid intersections of a good fit is off by tens
+/// of metres (`fixtures/grootkloof/photo`: ~20 m RMS).
+pub const PHOTO_GRID_MAX_RMS_M: f64 = 60.0;
 /// Contour matches at least this confident are reported without refining
 /// further candidates (`refine::confidence`: ≥ 0.7 is a confident match).
 pub const CONFIDENT: f64 = 0.7;
@@ -748,7 +752,8 @@ impl<'a> Run<'a> {
             match m {
                 MethodReq::Grid => {
                     if let Some(g) = self.grid()? {
-                        if g.method == GridMethod::Lines && g.rms_m < GRID_MAX_RMS_M {
+                        let max_rms = if self.req.photo { PHOTO_GRID_MAX_RMS_M } else { GRID_MAX_RMS_M };
+                        if g.method == GridMethod::Lines && g.rms_m < max_rms {
                             return self.grid_ok(&g);
                         }
                         weak = Some(g);
@@ -867,7 +872,8 @@ impl<'a> Run<'a> {
             4 => 0.97,
             _ => 1.0,
         };
-        let conf = 0.97 * label_factor * (1.0 - 0.3 * ramp(g.rms_m, 5.0, GRID_MAX_RMS_M));
+        let rms_ramp = if self.req.photo { ramp(g.rms_m, 10.0, PHOTO_GRID_MAX_RMS_M) } else { ramp(g.rms_m, 5.0, GRID_MAX_RMS_M) };
+        let conf = 0.97 * label_factor * (1.0 - 0.3 * rms_ramp);
         let (ya, xa) = self.label_axes(g);
         let msg = format!(
             "Located from {} {ya} and {} {xa} grid label{} ({}).",
