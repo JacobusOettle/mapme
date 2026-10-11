@@ -22,12 +22,15 @@ ready for Android.
 
 ## Screenshots
 
-Every iOS CI run attaches simulator screenshots of the app to the run (artifact
-**`screenshots`**, open `index.html` inside it). <!-- Add the best ones here. -->
+The Grootkloof PDF in the iPhone simulator with a simulated GPS fix
+(-25.8401, 27.3920): located from its grid labels (±1 m), red dot and heading
+cone next to spot height 1488. Every push refreshes these on the
+[`ci-screenshots`](https://github.com/JacobusOettle/mapme/tree/ci-screenshots)
+branch (also attached to each iOS run as the `screenshots` artifact).
 
-| Library | Locating | On the map | Nearby |
-|---|---|---|---|
-| *from CI* | *from CI* | *from CI* | *from CI* |
+| North up | Heading up | Nearby |
+|---|---|---|
+| <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshots__01-map-north-up_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshots__02-heading-up_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshots__03-nearby_0.png" width="240"> |
 
 ## Install on your iPhone
 
