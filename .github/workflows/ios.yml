@@ -304,19 +304,26 @@ jobs:
           retention-days: 30
 
       # Artifacts need a browser login to view; a branch is readable with plain git.
-      - name: Publish screenshots and test logs to the ci-screenshots branch
+      # The IPA rides along so there is a stable direct download link for every build.
+      - name: Publish screenshots, test logs and the IPA to the ci-screenshots branch
         if: ${{ !cancelled() && github.event_name == 'push' }}
         continue-on-error: true
         env:
           TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
-          files=(build/screenshots/*.png build/screenshots/*.json build/logs/test.log build/logs/test-summary.json)
+          files=(build/screenshots/*.png build/screenshots/*.json build/logs/test.log build/logs/test-summary.json
+                 build/MapMe-unsigned.ipa)
           (( ${#files[@]} )) || { echo "nothing to publish"; exit 0; }
           dir="$(mktemp -d)"
           cp "${files[@]}" "$dir/"
           cd "$dir"
-          printf '# CI screenshots\n\nFrom %s on %s, run %s.\n' "$GITHUB_SHA" "$GITHUB_REF_NAME" "$GITHUB_RUN_ID" > README.md
+          {
+            printf '# Latest CI build\n\nFrom %s on %s, run %s.\n\n' "$GITHUB_SHA" "$GITHUB_REF_NAME" "$GITHUB_RUN_ID"
+            if [[ -f MapMe-unsigned.ipa ]]; then
+              printf 'Install MapMe-unsigned.ipa with Sideloadly or AltStore (docs/INSTALL.md).\n'
+            fi
+          } > README.md
           git init -q -b ci-screenshots
           git add -A
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \

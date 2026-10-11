@@ -16,7 +16,11 @@ Mac with Xcode.
 
 The repository is private, so sign in to GitHub first.
 
-* **Release (easiest):** open
+* **Latest build (easiest):** every CI build of any branch puts its IPA on the
+  `ci-screenshots` branch:
+  [MapMe-unsigned.ipa](https://github.com/JacobusOettle/mapme/raw/ci-screenshots/MapMe-unsigned.ipa)
+  (direct download; the branch also has the screenshots of that build).
+* **Release:** open
   [Releases → latest-build](https://github.com/JacobusOettle/mapme/releases/tag/latest-build)
   and download `MapMe-unsigned.ipa`. CI refreshes this prerelease after every
   green build of `main` or a `v*` tag.
