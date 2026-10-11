@@ -1,7 +1,7 @@
 # MapMe architecture
 
-MapMe puts your live GPS position on any map you give it: a PDF, an image or a
-screenshot (photos of paper maps come later). It works out where the map is on Earth by
+MapMe puts your live GPS position on any map you give it: a PDF, an image, a
+screenshot or a photo of a paper map. It works out where the map is on Earth by
 itself (georeferencing), then shows a red dot, your heading, your track and nearby points
 of interest.
 
@@ -58,10 +58,10 @@ order:
    near-vertical, at most ±5°) with a line-projection Hough. Pair labels with lines,
    then robustly fit (RANSAC) value = a + b·position for each axis, enforcing
    equal spacing and monotonic values. Grid-line intersections become ground
-   control points, and an affine (≥3 non-collinear GCPs) or homography (≥4,
-   reserved for photos) is fit. Typical accuracy is a few metres. If labels
-   exist but no lines are found, label centres are used directly as a coarse
-   fit, which is then refined with contours when a DEM is available.
+   control points, and an affine (≥3 non-collinear GCPs) is fit, or for
+   photos a homography (see *Photo mode*). Typical accuracy is a few metres.
+   If labels exist but no lines are found, label centres are used directly as
+   a coarse fit, which is then refined with contours when a DEM is available.
 2. **Contour matching against a DEM** (`contour.rs`, `skeleton.rs`,
    `search.rs`, `refine.rs`). This needs a GPS position (the map is assumed to
    lie within `search_radius_m` of you):
@@ -93,6 +93,61 @@ order:
    points on the map and on an Apple satellite map (or "I'm here" at their
    GPS position). 2 points give a similarity, 3 an affine, 4+ an affine
    (homography for photos).
+
+### Photo mode (`"photo": true`)
+
+A photo of a paper map is first flattened by the app from the page borders
+(VisionKit document scanner / Vision rectangle detection, plus a corner editor)
+and imported like any image. Two things survive that flattening and would
+break a scan-style georeference: the page corners are never exact, so a
+residual perspective remains (a 2.5 % corner error moves the map corners by
+~100–300 m on a 1:25 000 sheet), and the output size comes from the quad's edge
+lengths, so the aspect ratio is off by up to ~15 % at a 15–20° camera tilt.
+Lighting is uneven (shadow, vignetting, colour cast) and thin lines are blurred
+into the paper. With `photo: true` the request:
+
+* **normalises the image** (`contour::normalize_illumination`): the paper
+  colour is estimated per channel on a 48-block grid (each block's 90th
+  percentile), closed with neighbouring blocks (ink-filled blocks borrow the
+  paper level of their neighbours), padded by linear extrapolation, smoothed
+  and divided out: paper becomes white and neutral in shadow and light. A
+  contrast curve `v^1.5` restores the colour of blurred line pixels. Blocks that
+  are not paper (other chromaticity or much darker) and connected to the image
+  border, i.e. the table a flattening with corners outside the page leaves, are
+  blanked together with the ring of blocks holding the page edge. This copy is
+  used for grid lines and contours; the original stays in the session.
+* **grid**: lines are detected on a sharpened copy (unsharp mask σ 1.5) both
+  directly and against their local background (`grid::flatten_local_background`,
+  a two-sided top-hat that keeps thin strokes and drops tints and edges), and
+  merged. Line families may converge (±2.5° around their median), per-axis
+  line fits tolerate 4 % of the line spacing (positions are projective in the
+  grid value), and the conformality check accepts the scanner's aspect error.
+  With ≥ 6 GCPs a homography is fitted too and used when its RMS is ≤ 75 % of
+  the affine's and ≥ 0.5 m lower (`diagnostics.grid.model = "homography"`).
+* **contours**: the mask is the default (or picked) colour model on the
+  normalised photo, grown by hysteresis into a relaxed model (faint, blurred
+  parts of lines connected to clear ones), cleaned with a 3×3 majority vote,
+  and stripped of regions too thick to be a line (dense contours blurred into
+  a blob, fills). The coarse search is unchanged (similarity templates tolerate
+  the residual perspective and aspect error; the right location keeps a peak
+  ratio ≈ 1.4–2.2). The refinement (`refine::RefineOptions { photo: true }`)
+  runs similarity as usual, then an affine coarse-to-fine from pyramid level 2
+  that may be anisotropic (≤ 1.35), then a projective stage from level 1:
+  8 parameters about the samples' centroid in coordinates normalised by their
+  half-diagonal, merc = rm + (a·u + b·v + c, d·u + e·v + f) / (1 + g·u + h·v),
+  analytic Jacobian, the same robust variable-projection LM. It is kept when
+  it lowers the robust cost by ≥ 3 % and stays sane (|g|, |h| ≤ 0.15, no fold
+  over the samples' extent, plausible local scale and anisotropy);
+  `diagnostics.refined.projective` tells.
+
+The response's `pixel_to_mercator` is then a true homography (last row not
+`[0, 0, 1]`); `scale_m_per_px` and `rotation_deg` are taken from its local
+affine approximation at the image centre and `corners` from the homography
+itself. On synthetic photos of the Grootkloof sheet (`tests/photo.rs`: camera
+tilted ~15°, shadow ×0.55…1, warm cast, blur σ 1.2, noise; flattened from
+corners 0.5 % and 2.5 % off, inwards and outwards) the grid path is within
+~2 m and the contour path within ~10–30 m over the whole map frame (an affine
+from the same GCPs is off by 20 m and 115 m).
 
 The core is pull-based for DEM data. When it needs tiles it does not have, it
 answers `need_dem` with the tile list. The app downloads them (cached on disk),
@@ -132,7 +187,8 @@ ignored, rows `bytes_per_row` apart, copied by the session.
   "search_radius_m": 20000,
   "allow_rotation": false,
   "methods": ["grid", "contours"],
-  "verify": false
+  "verify": false,
+  "photo": false
 }
 ```
 
@@ -140,7 +196,10 @@ Every field is optional; defaults are as shown, except `gps`, `dpi` and
 `contour_rgb`, which default to `null`, and `ocr`, which defaults to `[]`.
 `bbox` is `[x, y, w, h]` in base-image pixels. `dpi` is the raster's pixels per
 inch when known (PDF render), which turns an OCR'd scale like `1:25 000` into a
-scale prior.
+scale prior. `photo` marks a photo of a paper map that the app flattened by its
+page borders (see *Photo mode*): the image is normalised for lighting and the
+grid and contour fits may end in a homography. OCR boxes are in the flattened
+image's pixels, like everything else.
 
 ### Georeference response
 
@@ -166,6 +225,8 @@ scale prior.
   `[{"z":11,"x":1179,"y":1175}, …]`; add them and call again with the same
   request.
 * `method` is `"grid" | "labels" | "contours" | null`.
+* `pixel_to_mercator` is affine (last row `[0, 0, 1]`) except in photo mode,
+  where it may be a full homography; always evaluate it projectively.
 * `scale_m_per_px` is in *ground* metres.
 * `rotation_deg` is the clockwise angle of map-up from true north.
 * `corners` are the image corners TL, TR, BR, BL as `[lat, lon]`.
@@ -184,20 +245,24 @@ scale prior.
 ```
 core/                 Rust crate mapme-core (lib + staticlib + C header)
   src/geo.rs          Web Mercator, haversine, bearing, UTM, Affine/Homography fits
-  src/image.rs        GrayF32 / Mask buffers, area resize, Gaussian blur, Sobel, bilinear
+  src/image.rs        GrayF32 / Mask buffers, area resize, Gaussian blur, Sobel, bilinear,
+                      perspective warp, unsharp mask
   src/fft.rs          2-D complex FFT helpers on rustfft
   src/dem.rs          Terrarium decode, tile math, DemStore, DemMosaic sampling
-  src/contour.rs      contour colour model + mask extraction
+  src/contour.rs      contour colour model + mask extraction, photo illumination
+                      normalisation and hysteresis masks
   src/skeleton.rs     thinning, junction removal, segment extraction, sampling
   src/search.rs       coarse orientation-field FFT search
-  src/refine.rs       contour-constancy least-squares refinement + scoring
+  src/refine.rs       contour-constancy least-squares refinement (similarity, affine,
+                      projective for photos) + scoring
   src/labels.rs       coordinate / scale / POI label parsing
   src/grid.rs         grid-line detection, label↔line association, GCP fit
   src/control_points.rs manual calibration fits
   src/georef.rs       Session + orchestrator (request → response)
   src/ffi.rs          C ABI
   include/mapme_core.h
-  tests/              integration tests on fixtures/grootkloof
+  tests/              integration tests on fixtures/grootkloof (photo.rs: synthetic
+                      photos of the sheet, flattened from imperfect corners)
 fixtures/grootkloof/  the real map (PDF + extracted JPEG), DEM tiles, OCR fixture, truth
 ios/                  XcodeGen project (project.yml), app, unit tests, UI tests
 scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
@@ -235,7 +300,9 @@ resolution) and `thumb.jpg`.
 
 * Import + render + tile pyramid for an A3 300-dpi PDF: < 3 s on an A15.
 * Grid georeference (OCR + core): < 3 s. Contour georeference: < 4 s plus DEM
-  download.
+  download. Photo mode adds the normalisation (~0.1 s for 9 MP) and costlier
+  line and mask extraction: ~0.9 s grid and ~2 s contour path on the CI-class
+  Linux box (4 cores), < 6 s even when three candidates must be refined.
 * Map interaction at 60/120 fps, because tiles are drawn off the main thread
   by CATiledLayer and overlays are cheap CAShapeLayers.
 * Release core: `opt-level=3`, LTO, `codegen-units=1`, `panic=unwind` (needed

@@ -10,11 +10,16 @@
 //! axis and an exhaustive RANSAC fits `value = a + b·position` per axis.
 //! Unlabelled lines that land on round grid values join in. Line
 //! intersections become GCPs for an affine fit.
+//!
+//! *Photos* (`GridOptions::photo`, `detect_lines_photo`): lines are found on
+//! a sharpened copy and against their local background, may converge, and
+//! with enough GCPs a homography replaces the affine when it fits clearly
+//! better (the perspective a flattened photo keeps).
 
 use crate::geo::{
     latlon_to_merc, latlon_to_utm, merc_to_latlon, utm_to_latlon, Affine, Homography, LatLon, Utm, EARTH_RADIUS,
 };
-use crate::image::Rgb8;
+use crate::image::{unsharp_mask, Rgb8};
 use crate::labels::{parse_coordinate, CoordValue, OcrObservation};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -506,12 +511,17 @@ pub fn detect_lines(img: &Rgb8) -> Vec<GridLine> {
     if img.w < 32 || img.h < 32 || img.data.len() != img.w * img.h * 3 {
         return Vec::new();
     }
-    let (mut lines, colour) = rayon::join(
+    let (lines, colour) = rayon::join(
         || detect_class(img, InkClass::Dark, MIN_COVERAGE),
         || detect_class(img, InkClass::Colour, COLOUR_MIN_COVERAGE),
     );
-    let (w, h) = (img.w as f64, img.h as f64);
-    for l in colour {
+    merge_lines(lines, colour, img.w as f64, img.h as f64)
+}
+
+/// `lines` plus the lines of `more` that are not already there, horizontal
+/// lines first, each family sorted by position.
+fn merge_lines(mut lines: Vec<GridLine>, more: Vec<GridLine>, w: f64, h: f64) -> Vec<GridLine> {
+    for l in more {
         if !lines.iter().any(|m| same_line(m, &l, w, h)) {
             lines.push(l);
         }
@@ -525,6 +535,75 @@ pub fn detect_lines(img: &Rgb8) -> Vec<GridLine> {
         ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
     });
     lines
+}
+
+/// Radius (pixels) of the local-background windows used on photos: wider
+/// than a blurred grid line, narrower than the gaps between grid lines.
+pub const PHOTO_BACKGROUND_RADIUS: usize = 6;
+/// Unsharp mask applied to photos before line detection (sigma px, amount).
+const PHOTO_SHARPEN: (f64, f32) = (1.5, 1.2);
+
+/// `detect_lines` for photographed maps (`img` normalised by
+/// `contour::normalize_illumination`). A photo blurs the thin grid lines into
+/// faint grey strokes, so the image is sharpened first. Lines are detected
+/// on it directly and, for stretches over area tints, with each pixel
+/// measured against its local background (`flatten_local_background`); the
+/// two sets are merged.
+pub fn detect_lines_photo(img: &Rgb8) -> Vec<GridLine> {
+    if img.w < 32 || img.h < 32 || img.data.len() != img.w * img.h * 3 {
+        return Vec::new();
+    }
+    let sharp = unsharp_mask(img, PHOTO_SHARPEN.0, PHOTO_SHARPEN.1);
+    let (direct, flat) = rayon::join(
+        || detect_lines(&sharp),
+        || detect_lines(&flatten_local_background(&sharp, PHOTO_BACKGROUND_RADIUS)),
+    );
+    merge_lines(direct, flat, img.w as f64, img.h as f64)
+}
+
+/// Contrast of each pixel against its local background, per channel:
+/// `255 − (background − value)`. The background is the brightest value on
+/// *both* sides of the pixel within `r` pixels, across the row or across the
+/// column (whichever is brighter): a thin dark stroke keeps its contrast,
+/// while tints, fills, shading and the edges between them (dark on one side
+/// only) become white.
+pub fn flatten_local_background(img: &Rgb8, r: usize) -> Rgb8 {
+    let (w, h) = (img.w, img.h);
+    if w == 0 || h == 0 || img.data.len() != w * h * 3 {
+        return img.clone();
+    }
+    let px = |x: usize, y: usize, c: usize| img.data[(y * w + x) * 3 + c];
+    // min(max left, max right) along each row.
+    let mut across_row = vec![0u8; w * h * 3];
+    across_row.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            for c in 0..3 {
+                let left = (x.saturating_sub(r)..=x).map(|xx| px(xx, y, c)).max().unwrap_or(0);
+                let right = (x..=(x + r).min(w - 1)).map(|xx| px(xx, y, c)).max().unwrap_or(0);
+                row[x * 3 + c] = left.min(right);
+            }
+        }
+    });
+    // Same across each column (row slices, so memory stays sequential),
+    // combined with the row background.
+    let line = |y: usize| &img.data[y * w * 3..(y + 1) * w * 3];
+    let mut out = vec![0u8; w * h * 3];
+    out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        let mut up = line(y).to_vec();
+        for yy in y.saturating_sub(r)..y {
+            up.iter_mut().zip(line(yy)).for_each(|(u, &v)| *u = (*u).max(v));
+        }
+        row.copy_from_slice(line(y));
+        for yy in y + 1..=(y + r).min(h - 1) {
+            row.iter_mut().zip(line(yy)).for_each(|(d, &v)| *d = (*d).max(v));
+        }
+        let across = &across_row[y * w * 3..(y + 1) * w * 3];
+        for (((o, &u), &a), &v) in row.iter_mut().zip(&up).zip(across).zip(line(y)) {
+            let bg = (*o).min(u).max(a);
+            *o = 255 - (bg - v);
+        }
+    });
+    Rgb8 { w, h, data: out }
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +638,9 @@ pub struct GridResult {
     pub gcps: Vec<Gcp>,
     /// OCR observations (indices) that were used as coordinate labels.
     pub used_labels: Vec<usize>,
+    /// True when `transform` is a homography (photo mode), else an affine.
+    #[serde(default)]
+    pub projective: bool,
 }
 
 const MIN_GROUND_M_PER_PX: f64 = 0.05;
@@ -572,6 +654,21 @@ const FULL_GRID_GATE_M: f64 = 150_000.0;
 const ABBREV_GRID_GATE_M: f64 = 60_000.0;
 /// Grid lines deviating more than this from their family's median tilt are ignored.
 const MAX_FAMILY_TILT_DEG: f64 = 0.75;
+/// Photos: residual perspective makes grid lines converge, so they may
+/// deviate more from the family median…
+const PHOTO_FAMILY_TILT_DEG: f64 = 2.5;
+/// …their positions are a projective, not linear, function of the grid
+/// value (tolerance as a fraction of the line spacing)…
+const PHOTO_AXIS_TOL: f64 = 0.04;
+/// …and the page's aspect ratio is a guess, so the GCP fit need not be
+/// conformal (tolerance on the axis-scale ratio, like the 0.06 of scans).
+const PHOTO_CONFORMAL_TOL: f64 = 0.35;
+/// Photos: with at least this many GCPs a homography is fitted too…
+pub const PHOTO_MIN_HOMOGRAPHY_GCPS: usize = 6;
+/// …and used when its RMS (ground metres) is at most this fraction of the
+/// affine's and at least `PHOTO_HOMOGRAPHY_MIN_GAIN_M` lower.
+const PHOTO_HOMOGRAPHY_RMS_RATIO: f64 = 0.75;
+const PHOTO_HOMOGRAPHY_MIN_GAIN_M: f64 = 0.5;
 /// Bounds the exhaustive RANSAC (hypotheses grow with the square of this).
 const MAX_HYPOTHESIS_PAIRS: usize = 240;
 /// Distinct fits kept per axis and slope sign for the joint choice.
@@ -661,6 +758,8 @@ struct Ctx {
     h: f64,
     gps: Option<LatLon>,
     utm: Option<Utm>,
+    /// Photo mode (`GridOptions::photo`).
+    photo: bool,
 }
 
 fn lin_of(sys: Sys, ax: Ax, v: f64) -> f64 {
@@ -1055,7 +1154,8 @@ fn solve_axis_lines(cands: &[Cand], lines: &[GridLine], ax: Ax, sys: Sys, ctx: &
             ls.into_iter().map(|(li, d)| (li, 1.0 / (1.0 + (d / s).powi(2)))).collect()
         })
         .collect();
-    let al = AxisLines { sys, ax, cands, ts, near, spacing, tol: (0.005 * spacing).max(3.0) };
+    let tol = if ctx.photo { PHOTO_AXIS_TOL * spacing } else { 0.005 * spacing };
+    let al = AxisLines { sys, ax, cands, ts, near, spacing, tol: tol.max(3.0) };
     for (k, &(ci, li)) in pairs.iter().enumerate() {
         for &(cj, lj) in &pairs[k + 1..] {
             if ci == cj || li == lj {
@@ -1159,6 +1259,8 @@ fn to_latlon(sys: Sys, vx: f64, vy: f64, ctx: &Ctx) -> Option<LatLon> {
 
 struct Solution {
     affine: Affine,
+    /// The fit used: `affine`, or a homography (photos).
+    transform: Homography,
     method: GridMethod,
     rms_m: f64,
     n_lat: usize,
@@ -1229,7 +1331,11 @@ fn combine(
     // (Mercator, UTM/TM), 1/cos φ for plain lat/lon (equirectangular) maps.
     // Labels paired with the wrong lines break this.
     let ratio = affine.b.hypot(affine.e) / affine.a.hypot(affine.d);
-    let tol = if from_lines { 0.06 } else { 0.25 };
+    let tol = match (from_lines, ctx.photo) {
+        (_, true) => PHOTO_CONFORMAL_TOL,
+        (true, false) => 0.06,
+        (false, false) => 0.25,
+    };
     if !((ratio - 1.0).abs() <= tol || (ratio * g - 1.0).abs() <= tol) {
         return None;
     }
@@ -1240,6 +1346,29 @@ fn combine(
         ss += e * e;
     }
     let mut rms_m = (ss / src.len() as f64).sqrt();
+    let mut transform = affine.to_homography();
+    if ctx.photo && from_lines && src.len() >= PHOTO_MIN_HOMOGRAPHY_GCPS {
+        // Residual perspective of a flattened photo: a homography through
+        // the line intersections, when it fits clearly better.
+        if let Some(hm) = Homography::fit(&src, &dst) {
+            let mut ss = 0.0;
+            for ((p, d), gc) in src.iter().zip(&dst).zip(&gcps) {
+                let q = hm.apply(p.0, p.1);
+                let e = (q.0 - d.0).hypot(q.1 - d.1) * gc.lat.to_radians().cos();
+                ss += e * e;
+            }
+            let rms_h = (ss / src.len() as f64).sqrt();
+            let det = hm.local_affine(ctx.w / 2.0, ctx.h / 2.0).det();
+            if rms_h.is_finite()
+                && rms_h <= PHOTO_HOMOGRAPHY_RMS_RATIO * rms_m
+                && rms_h <= rms_m - PHOTO_HOMOGRAPHY_MIN_GAIN_M
+                && det * affine.det() > 0.0
+            {
+                transform = hm;
+                rms_m = rms_h;
+            }
+        }
+    }
     let method = if from_lines { GridMethod::Lines } else { GridMethod::LabelsOnly };
     if !from_lines {
         // Label placement uncertainty: residual scatter plus half a text height.
@@ -1270,6 +1399,7 @@ fn combine(
     used.dedup();
     Some(Solution {
         affine,
+        transform,
         method,
         rms_m,
         n_lat: lat_obs.len(),
@@ -1318,14 +1448,23 @@ fn solve_system(sys: Sys, cands: &[Cand], lines_x: &[GridLine], lines_y: &[GridL
 
 /// Lines of one family that are parallel to the family's consensus: grid
 /// lines are, stray straight features (a fence, a road) usually are not.
-fn grid_family(lines: &[GridLine], axis: LineAxis) -> Vec<GridLine> {
+fn grid_family(lines: &[GridLine], axis: LineAxis, max_tilt_deg: f64) -> Vec<GridLine> {
     let fam: Vec<GridLine> =
         lines.iter().filter(|l| l.axis == axis && l.theta.is_finite() && l.rho.is_finite()).copied().collect();
     if fam.len() < 3 {
         return fam;
     }
     let Some(med) = median(fam.iter().map(GridLine::tilt_deg).collect()) else { return fam };
-    fam.into_iter().filter(|l| (l.tilt_deg() - med).abs() <= MAX_FAMILY_TILT_DEG).collect()
+    fam.into_iter().filter(|l| (l.tilt_deg() - med).abs() <= max_tilt_deg).collect()
+}
+
+/// Options of `georeference_from_grid_with`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GridOptions {
+    /// The image is a photo flattened by its page borders: grid lines may
+    /// converge, line positions are projective in the grid values, the
+    /// aspect ratio is approximate, and with enough GCPs a homography is fitted.
+    pub photo: bool,
 }
 
 /// Full grid pipeline. `gps` resolves UTM zone / abbreviated grid labels and
@@ -1336,12 +1475,29 @@ pub fn georeference_from_grid(
     obs: &[OcrObservation],
     gps: Option<LatLon>,
 ) -> Option<GridResult> {
+    georeference_from_grid_with(img, lines, obs, gps, &GridOptions::default())
+}
+
+/// `georeference_from_grid` with options (photo mode).
+pub fn georeference_from_grid_with(
+    img: &Rgb8,
+    lines: &[GridLine],
+    obs: &[OcrObservation],
+    gps: Option<LatLon>,
+    opts: &GridOptions,
+) -> Option<GridResult> {
     let gps = gps.filter(|g| g.lat.is_finite() && g.lon.is_finite() && g.lat.abs() <= 84.0);
-    let ctx =
-        Ctx { w: img.w.max(1) as f64, h: img.h.max(1) as f64, gps, utm: gps.map(|g| latlon_to_utm(g.lat, g.lon)) };
+    let ctx = Ctx {
+        w: img.w.max(1) as f64,
+        h: img.h.max(1) as f64,
+        gps,
+        utm: gps.map(|g| latlon_to_utm(g.lat, g.lon)),
+        photo: opts.photo,
+    };
     let (geo, utm) = label_candidates(obs, &ctx);
-    let lines_x = grid_family(lines, LineAxis::Vertical);
-    let lines_y = grid_family(lines, LineAxis::Horizontal);
+    let max_tilt = if opts.photo { PHOTO_FAMILY_TILT_DEG } else { MAX_FAMILY_TILT_DEG };
+    let lines_x = grid_family(lines, LineAxis::Vertical, max_tilt);
+    let lines_y = grid_family(lines, LineAxis::Horizontal, max_tilt);
     let mut best: Option<Solution> = None;
     for (sys, cands) in [(Sys::Geo, &geo), (Sys::Utm, &utm)] {
         if let Some(s) = solve_system(sys, cands, &lines_x, &lines_y, &ctx) {
@@ -1352,7 +1508,8 @@ pub fn georeference_from_grid(
     }
     let s = best?;
     Some(GridResult {
-        transform: s.affine.to_homography(),
+        projective: !s.transform.is_affine(),
+        transform: s.transform,
         method: s.method,
         rms_m: s.rms_m,
         n_lat: s.n_lat,
@@ -1424,6 +1581,36 @@ mod tests {
         assert!((hs[0].tilt_deg() - 1.5).abs() < 0.05, "{}", hs[0].tilt_deg());
         assert!((vs[0].pos_at(450.0) - 250.0).abs() < 0.3);
         assert!((vs[1].pos_at(450.0) - 900.5).abs() < 0.3);
+    }
+
+    #[test]
+    fn local_background_flattening_keeps_thin_lines_only() {
+        // Dark 2-px lines over a beige tint and over a shaded area (a photo).
+        let (w, h) = (200, 120);
+        let mut img = blank(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let bg = if x < 100 { [200, 195, 185] } else { [150, 145, 140] };
+                put(&mut img, x, y, bg);
+            }
+            for x in [60, 61] {
+                put(&mut img, x, y, [90, 88, 83]);
+            }
+            for x in [150, 151] {
+                put(&mut img, x, y, [68, 65, 63]);
+            }
+        }
+        let f = flatten_local_background(&img, PHOTO_BACKGROUND_RADIUS);
+        assert_eq!(f.rgb(20, 50), [255, 255, 255]);
+        assert_eq!(f.rgb(180, 50), [255, 255, 255]);
+        assert_eq!(f.rgb(60, 50), [145, 148, 153]);
+        assert_eq!(f.rgb(151, 50), [173, 175, 178]);
+        // The scan detector sees no thin line on the tints; the photo detector finds both.
+        assert!(detect_lines(&img).iter().all(|l| l.axis != LineAxis::Vertical));
+        let photo = detect_lines_photo(&img);
+        let vs: Vec<f64> = photo.iter().filter(|l| l.axis == LineAxis::Vertical).map(|l| l.pos_at(60.0)).collect();
+        assert_eq!(vs.len(), 2, "{photo:?}");
+        assert!((vs[0] - 60.5).abs() < 0.5 && (vs[1] - 150.5).abs() < 0.5, "{vs:?}");
     }
 
     #[test]

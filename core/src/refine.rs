@@ -12,9 +12,13 @@
 //! translation grid on the coarsest level) so initial errors of several
 //! hundred metres still converge: first a 4-parameter similarity, then a full
 //! affine if that lowers the cost meaningfully and stays near-conformal.
+//!
+//! Photos of paper maps (`RefineOptions::photo`) keep some perspective and a
+//! wrong aspect ratio after flattening: the affine then runs coarse-to-fine
+//! and may be anisotropic, and an 8-parameter projective stage follows.
 
 use crate::dem::{DemMosaic, MercBox};
-use crate::geo::Affine;
+use crate::geo::{Affine, Homography};
 use crate::image::GrayF32;
 use crate::search::Candidate;
 use crate::skeleton::ContourSamples;
@@ -22,8 +26,12 @@ use rayon::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct RefineResult {
-    /// Pixel → Mercator transform after refinement.
+    /// Pixel → Mercator transform after refinement (for a projective fit,
+    /// its affine approximation at the samples' centroid).
     pub transform: Affine,
+    /// The full projective transform when the photo-mode projective stage
+    /// was kept (`RefineOptions::photo`), else None.
+    pub homography: Option<Homography>,
     /// Robust mean absolute within-segment elevation residual (metres):
     /// mean of min(|r|, `RESIDUAL_CLIP_M`).
     pub cost_m: f64,
@@ -43,7 +51,7 @@ pub struct RefineResult {
     /// Valid samples / segments used.
     pub n_samples: usize,
     pub n_segments: usize,
-    /// True if the final transform is a full affine (else a similarity).
+    /// True if the final transform is a full affine or projective (else a similarity).
     pub affine: bool,
     /// Estimated contour interval (metres): median elevation difference
     /// between neighbouring contour lines (across, not along, the lines).
@@ -70,6 +78,20 @@ const MAX_LOG_SCALE_CHANGE: f64 = 0.15;
 const AFFINE_MIN_GAIN: f64 = 0.03;
 /// …and its two axis scales differ by less than this ratio.
 const AFFINE_MAX_ANISOTROPY: f64 = 1.08;
+/// Photo mode: a flattened photo's aspect ratio is a guess (a document
+/// scanner sizes the output from the quad's edge lengths, ~10 % off at a 15°
+/// camera tilt), so the affine may be this anisotropic…
+const PHOTO_MAX_ANISOTROPY: f64 = 1.35;
+/// …and change the similarity's scale by this much (log units).
+const PHOTO_MAX_LOG_SCALE_CHANGE: f64 = 0.12;
+/// Photo mode: DEM pyramid levels the affine / projective stages start from.
+const PHOTO_AFFINE_LEVEL: usize = 2;
+const PHOTO_PROJECTIVE_LEVEL: usize = 1;
+/// The projective stage is kept only if it lowers the cost by this fraction…
+const PROJECTIVE_MIN_GAIN: f64 = 0.03;
+/// …and its perspective terms stay small: the denominator changes by at most
+/// this much from the centroid to the edge of the samples' extent.
+const PHOTO_MAX_PERSPECTIVE: f64 = 0.15;
 /// Segments need this many valid samples to count.
 const MIN_SEG_SAMPLES: usize = 4;
 /// The pyramid goes down to cells of about this size (Mercator metres).
@@ -158,13 +180,23 @@ enum Model {
     Similarity,
     /// [a, b, d, e, tx, ty].
     Affine,
+    /// Full projective transform (photos), about the Mercator reference
+    /// point `rm` in normalised pixel coordinates u = (x − cx)/sn,
+    /// v = (y − cy)/sn, which keeps the 8 parameters well conditioned:
+    /// merc = rm + (a·u + b·v + c, d·u + e·v + f) / (1 + g·u + h·v),
+    /// parameters [a, b, c, d, e, f, g, h].
+    Projective,
 }
+
+/// Most parameters of any model.
+const NP: usize = 8;
 
 impl Model {
     fn n(self) -> usize {
         match self {
             Model::Similarity => 4,
             Model::Affine => 6,
+            Model::Projective => 8,
         }
     }
 }
@@ -172,24 +204,60 @@ impl Model {
 #[derive(Debug, Clone, Copy)]
 struct Params {
     model: Model,
-    p: [f64; 6],
+    p: [f64; NP],
     cx: f64,
     cy: f64,
+    /// Pixel normalisation length and Mercator reference of `Projective`.
+    sn: f64,
+    rm: (f64, f64),
 }
 
 impl Params {
-    fn from_affine(t: &Affine, model: Model, cx: f64, cy: f64) -> Params {
+    fn from_affine(t: &Affine, model: Model, d: &Data) -> Params {
+        let (cx, cy, sn) = (d.cx, d.cy, d.sn);
         let (tx, ty) = t.apply(cx, cy);
         let p = match model {
             Model::Similarity => {
                 // Closest similarity: a = s cos θ, b = −s sin θ, d = −s sin θ, e = −s cos θ.
                 let sc = 0.5 * (t.a - t.e);
                 let ss = -0.5 * (t.b + t.d);
-                [(sc * sc + ss * ss).sqrt().max(1e-12).ln(), ss.atan2(sc), tx, ty, 0.0, 0.0]
+                [(sc * sc + ss * ss).sqrt().max(1e-12).ln(), ss.atan2(sc), tx, ty, 0.0, 0.0, 0.0, 0.0]
             }
-            Model::Affine => [t.a, t.b, t.d, t.e, tx, ty],
+            Model::Affine => [t.a, t.b, t.d, t.e, tx, ty, 0.0, 0.0],
+            Model::Projective => [t.a * sn, t.b * sn, 0.0, t.d * sn, t.e * sn, 0.0, 0.0, 0.0],
         };
-        Params { model, p, cx, cy }
+        Params { model, p, cx, cy, sn, rm: (tx, ty) }
+    }
+
+    /// Projective parameters of a homography (None if it is singular at the centroid).
+    fn from_homography(h: &Homography, d: &Data) -> Option<Params> {
+        let (cx, cy, sn) = (d.cx, d.cy, d.sn);
+        let k = h.m[6] * cx + h.m[7] * cy + h.m[8];
+        if !k.is_finite() || k.abs() < 1e-300 {
+            return None;
+        }
+        let m = h.m.map(|v| v / k);
+        let rm = h.apply(cx, cy);
+        let p = [
+            (m[0] - rm.0 * m[6]) * sn,
+            (m[1] - rm.0 * m[7]) * sn,
+            0.0,
+            (m[3] - rm.1 * m[6]) * sn,
+            (m[4] - rm.1 * m[7]) * sn,
+            0.0,
+            m[6] * sn,
+            m[7] * sn,
+        ];
+        Some(Params { model: Model::Projective, p, cx, cy, sn, rm })
+    }
+
+    /// Projective mapping: (Mercator x, y, denominator q).
+    #[inline]
+    fn project(&self, x: f64, y: f64) -> (f64, f64, f64) {
+        let [a, b, c, d, e, f, g, h] = self.p;
+        let (u, v) = ((x - self.cx) / self.sn, (y - self.cy) / self.sn);
+        let q = 1.0 + g * u + h * v;
+        (self.rm.0 + (a * u + b * v + c) / q, self.rm.1 + (d * u + e * v + f) / q, q)
     }
 
     fn to_affine(self) -> Affine {
@@ -198,9 +266,44 @@ impl Params {
                 Affine::pixel_to_merc_similarity(self.p[0].exp(), self.p[1], self.cx, self.cy, self.p[2], self.p[3])
             }
             Model::Affine => {
-                let [a, b, d, e, tx, ty] = self.p;
+                let [a, b, d, e, tx, ty, _, _] = self.p;
                 Affine { a, b, c: tx - a * self.cx - b * self.cy, d, e, f: ty - d * self.cx - e * self.cy }
             }
+            Model::Projective => self.to_homography().local_affine(self.cx, self.cy),
+        }
+    }
+
+    fn to_homography(self) -> Homography {
+        if self.model != Model::Projective {
+            return self.to_affine().to_homography();
+        }
+        let [a, b, c, d, e, f, g, h] = self.p;
+        let (cx, cy, sn) = (self.cx, self.cy, self.sn);
+        let w = [g / sn, h / sn, 1.0 - (g * cx + h * cy) / sn];
+        let r1 = [a / sn, b / sn, c - (a * cx + b * cy) / sn];
+        let r2 = [d / sn, e / sn, f - (d * cx + e * cy) / sn];
+        let mut m = [0.0; 9];
+        for k in 0..3 {
+            m[k] = self.rm.0 * w[k] + r1[k];
+            m[3 + k] = self.rm.1 * w[k] + r2[k];
+            m[6 + k] = w[k];
+        }
+        Homography { m }
+    }
+}
+
+/// Transform being evaluated by `metrics`.
+#[derive(Debug, Clone, Copy)]
+enum Fit {
+    Affine(Affine),
+    Projective(Homography),
+}
+
+impl Fit {
+    fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+        match self {
+            Fit::Affine(t) => t.apply(x, y),
+            Fit::Projective(h) => h.apply(x, y),
         }
     }
 }
@@ -219,19 +322,26 @@ fn soft_l1_weight(r: f64, c: f64) -> f64 {
 /// One evaluation: robust cost and (optionally) normal equations.
 struct Eval {
     cost: f64,
-    ata: [[f64; 6]; 6],
-    atb: [f64; 6],
+    ata: [[f64; NP]; NP],
+    atb: [f64; NP],
     /// Per-sample residual and elevation (NaN where unused).
     resid: Vec<f64>,
     elev: Vec<f64>,
 }
 
 /// Elevation, gradient and Mercator position of every sample (NaN = off DEM).
-fn sample_all(d: &Data, dem: &DemMosaic, t: &Affine) -> Vec<[f64; 5]> {
+fn sample_all(d: &Data, dem: &DemMosaic, par: &Params) -> Vec<[f64; 5]> {
+    let t = par.to_affine();
+    let projective = par.model == Model::Projective;
     (0..d.xs.len())
         .into_par_iter()
         .map(|i| {
-            let (mx, my) = t.apply(d.xs[i], d.ys[i]);
+            let (mx, my) = if projective {
+                let (mx, my, _) = par.project(d.xs[i], d.ys[i]);
+                (mx, my)
+            } else {
+                t.apply(d.xs[i], d.ys[i])
+            };
             match dem.sample_with_grad(mx, my) {
                 Some((h, gx, gy)) => [h as f64, gx as f64, gy as f64, mx, my],
                 None => [f64::NAN; 5],
@@ -243,10 +353,9 @@ fn sample_all(d: &Data, dem: &DemMosaic, t: &Affine) -> Vec<[f64; 5]> {
 /// Evaluate `par` on `dem` for all samples of `d`.
 #[allow(clippy::needless_range_loop)]
 fn evaluate_params(d: &Data, dem: &DemMosaic, par: &Params, c: f64, jac: bool) -> Eval {
-    let t = par.to_affine();
     let n = d.xs.len();
     let np = par.model.n();
-    let samp = sample_all(d, dem, &t);
+    let samp = sample_all(d, dem, par);
     // Segments need enough valid samples.
     let mut cnt = vec![0usize; d.n_segs];
     for i in 0..n {
@@ -287,25 +396,33 @@ fn evaluate_params(d: &Data, dem: &DemMosaic, par: &Params, c: f64, jac: bool) -
             cost += penalty;
         }
     }
-    let mut ata = [[0.0f64; 6]; 6];
-    let mut atb = [0.0f64; 6];
+    let mut ata = [[0.0f64; NP]; NP];
+    let mut atb = [0.0f64; NP];
     if jac {
-        let row = |i: usize| -> [f64; 6] {
+        let row = |i: usize| -> [f64; NP] {
             let [_, gx, gy, mx, my] = samp[i];
             let p = &par.p;
             match par.model {
                 Model::Similarity => {
                     let (dx, dy) = (mx - p[2], my - p[3]);
-                    [gx * dx + gy * dy, gx * dy - gy * dx, gx, gy, 0.0, 0.0]
+                    [gx * dx + gy * dy, gx * dy - gy * dx, gx, gy, 0.0, 0.0, 0.0, 0.0]
                 }
                 Model::Affine => {
                     let (x, y) = (d.xs[i] - par.cx, d.ys[i] - par.cy);
-                    [gx * x, gx * y, gy * x, gy * y, gx, gy]
+                    [gx * x, gx * y, gy * x, gy * y, gx, gy, 0.0, 0.0]
+                }
+                Model::Projective => {
+                    let (u, v) = ((d.xs[i] - par.cx) / par.sn, (d.ys[i] - par.cy) / par.sn);
+                    let q = 1.0 + p[6] * u + p[7] * v;
+                    let (gxq, gyq) = (gx / q, gy / q);
+                    // ∂(merc − rm)/∂(g, h) = −(merc − rm)·(u, v)/q.
+                    let k = -(gx * (mx - par.rm.0) + gy * (my - par.rm.1)) / q;
+                    [gxq * u, gxq * v, gxq, gyq * u, gyq * v, gyq, k * u, k * v]
                 }
             }
         };
         // Weighted segment means of the Jacobian rows (variable projection).
-        let mut sj = vec![[0.0f64; 6]; d.n_segs];
+        let mut sj = vec![[0.0f64; NP]; d.n_segs];
         let mut sw = vec![0.0f64; d.n_segs];
         for i in 0..n {
             if used[i] {
@@ -357,6 +474,9 @@ struct Data {
     n_segs: usize,
     cx: f64,
     cy: f64,
+    /// Half the diagonal of the samples' bounding box (pixels, ≥ 1): the
+    /// coordinate normalisation of the projective model.
+    sn: f64,
 }
 
 impl Data {
@@ -364,6 +484,14 @@ impl Data {
         let n = s.pts.len().max(1) as f64;
         let cx = s.pts.iter().map(|p| p[0] as f64).sum::<f64>() / n;
         let cy = s.pts.iter().map(|p| p[1] as f64).sum::<f64>() / n;
+        let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for p in &s.pts {
+            x0 = x0.min(p[0] as f64);
+            x1 = x1.max(p[0] as f64);
+            y0 = y0.min(p[1] as f64);
+            y1 = y1.max(p[1] as f64);
+        }
+        let sn = if s.pts.is_empty() { 1.0 } else { (0.5 * (x1 - x0).hypot(y1 - y0)).max(1.0) };
         Data {
             xs: s.pts.iter().map(|p| p[0] as f64).collect(),
             ys: s.pts.iter().map(|p| p[1] as f64).collect(),
@@ -371,6 +499,7 @@ impl Data {
             n_segs: s.n_segs,
             cx,
             cy,
+            sn,
         }
     }
 
@@ -383,7 +512,7 @@ impl Data {
             ys.push(self.ys[i]);
             seg.push(self.seg[i]);
         }
-        Data { xs, ys, seg, n_segs: self.n_segs, cx: self.cx, cy: self.cy }
+        Data { xs, ys, seg, n_segs: self.n_segs, cx: self.cx, cy: self.cy, sn: self.sn }
     }
 }
 
@@ -436,6 +565,12 @@ fn lm(
             let step_m = match par.model {
                 Model::Similarity => delta[2].hypot(delta[3]) + 3000.0 * (delta[0].abs() + delta[1].abs()),
                 Model::Affine => delta[4].hypot(delta[5]) + 1500.0 * delta[..4].iter().map(|v| v.abs()).sum::<f64>(),
+                Model::Projective => {
+                    let extent = 0.5 * (par.p[0].abs() + par.p[4].abs());
+                    delta[2].hypot(delta[5])
+                        + [0, 1, 3, 4].iter().map(|&k| delta[k].abs()).sum::<f64>()
+                        + extent * (delta[6].abs() + delta[7].abs())
+                }
             };
             par = cand;
             cur = next;
@@ -455,6 +590,15 @@ fn lm(
     (par, cur.cost, it, converged)
 }
 
+/// Options of `refine_prepared_with`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RefineOptions {
+    /// The image is a photo of a paper map flattened by its page borders:
+    /// residual perspective and aspect errors are expected, so the affine
+    /// stage may be strongly anisotropic and a projective stage follows.
+    pub photo: bool,
+}
+
 /// Levenberg–Marquardt on similarity then affine parameters, starting at `init`.
 /// `dem` is a fine mosaic (zoom 13) covering the map footprint plus margin.
 pub fn refine(samples: &ContourSamples, dem: &DemMosaic, init: &Affine) -> RefineResult {
@@ -463,14 +607,24 @@ pub fn refine(samples: &ContourSamples, dem: &DemMosaic, init: &Affine) -> Refin
 
 /// `refine` with a DEM prepared once (reuse it across candidates).
 pub fn refine_prepared(samples: &ContourSamples, dem: &PreparedDem, init: &Affine) -> RefineResult {
+    refine_prepared_with(samples, dem, init, &RefineOptions::default())
+}
+
+/// `refine_prepared` with options (photo mode: anisotropic affine, then projective).
+pub fn refine_prepared_with(
+    samples: &ContourSamples,
+    dem: &PreparedDem,
+    init: &Affine,
+    opts: &RefineOptions,
+) -> RefineResult {
     let mut full = Data::new(samples);
     if full.xs.len() > MAX_SAMPLES_FINE {
         full = full.subset(full.xs.len().div_ceil(MAX_SAMPLES_FINE));
     }
     if samples.pts.is_empty() || dem.levels.is_empty() {
-        return metrics(&full, dem, init, 0, false, false);
+        return metrics(&full, dem, &Fit::Affine(*init), 0, false, false);
     }
-    let start = Params::from_affine(init, Model::Similarity, full.cx, full.cy);
+    let start = Params::from_affine(init, Model::Similarity, &full);
     let bounds = (start.p[0] - MAX_LOG_SCALE_CHANGE, start.p[0] + MAX_LOG_SCALE_CHANGE);
     let n_levels = dem.levels.len();
     let coarse_stride = full.xs.len().div_ceil(MAX_SAMPLES_COARSE).max(1);
@@ -514,10 +668,15 @@ pub fn refine_prepared(samples: &ContourSamples, dem: &PreparedDem, init: &Affin
         iterations += it;
         converged = conv;
     }
-    // Full affine on the finest level, kept only if clearly better and near-conformal.
     let fine = &dem.levels[0];
     let sim_cost = evaluate_params(&fine_data, fine, &par, LOSS_SCALE_M, false).cost;
-    let aff_start = Params::from_affine(&par.to_affine(), Model::Affine, full.cx, full.cy);
+    if opts.photo {
+        let stages =
+            PhotoStages { full: &full, fine_data: &fine_data, dem, level_data: &level_data, loss: &loss, bounds };
+        return stages.run(par, sim_cost, iterations, converged);
+    }
+    // Full affine on the finest level, kept only if clearly better and near-conformal.
+    let aff_start = Params::from_affine(&par.to_affine(), Model::Affine, &full);
     let (aff, aff_cost, it, aff_conv) = lm(&fine_data, fine, aff_start, LOSS_SCALE_M, 25, bounds);
     iterations += it;
     let ta = aff.to_affine();
@@ -531,7 +690,84 @@ pub fn refine_prepared(samples: &ContourSamples, dem: &PreparedDem, init: &Affin
         is_affine = true;
         converged = aff_conv;
     }
-    metrics(&full, dem, &out, iterations, converged, is_affine)
+    metrics(&full, dem, &Fit::Affine(out), iterations, converged, is_affine)
+}
+
+/// Photo mode: affine from `PHOTO_AFFINE_LEVEL` down, then projective from
+/// `PHOTO_PROJECTIVE_LEVEL` down (coarse-to-fine, so the residual
+/// perspective of a flattened photo, a few hundred metres at the corners, is
+/// inside the basin of convergence). Each stage is kept only if it lowers the
+/// finest-level robust cost meaningfully and stays plausible.
+struct PhotoStages<'a> {
+    full: &'a Data,
+    fine_data: &'a Data,
+    dem: &'a PreparedDem,
+    level_data: &'a dyn Fn(usize) -> Data,
+    loss: &'a dyn Fn(usize) -> f64,
+    bounds: (f64, f64),
+}
+
+impl PhotoStages<'_> {
+    /// LM from `start`, coarse-to-fine from level `top`.
+    /// Returns (params, finest-level cost, iterations, converged).
+    fn descend(&self, start: Params, top: usize) -> (Params, f64, usize, bool) {
+        let top = top.min(self.dem.levels.len() - 1);
+        let (mut par, mut iterations, mut converged) = (start, 0, false);
+        for lvl in (0..=top).rev() {
+            let dl = if lvl == 0 { None } else { Some((self.level_data)(lvl)) };
+            let data = dl.as_ref().unwrap_or(self.fine_data);
+            let (p, _, it, conv) = lm(data, &self.dem.levels[lvl], par, (self.loss)(lvl), 25, self.bounds);
+            par = p;
+            iterations += it;
+            converged = conv;
+        }
+        let cost = evaluate_params(self.fine_data, &self.dem.levels[0], &par, LOSS_SCALE_M, false).cost;
+        (par, cost, iterations, converged)
+    }
+
+    fn run(&self, sim: Params, sim_cost: f64, mut iterations: usize, mut converged: bool) -> RefineResult {
+        let ts = sim.to_affine();
+        // Anisotropic affine (a document scanner guesses the page aspect ratio).
+        let (aff, aff_cost, it, aff_conv) =
+            self.descend(Params::from_affine(&ts, Model::Affine, self.full), PHOTO_AFFINE_LEVEL);
+        iterations += it;
+        let ta = aff.to_affine();
+        let (mut best, mut best_cost, mut is_affine) = (sim, sim_cost, false);
+        if aff_cost < sim_cost * (1.0 - AFFINE_MIN_GAIN)
+            && anisotropy(&ta) < PHOTO_MAX_ANISOTROPY
+            && (ta.mean_scale() / ts.mean_scale()).ln().abs() < PHOTO_MAX_LOG_SCALE_CHANGE
+        {
+            (best, best_cost, is_affine, converged) = (aff, aff_cost, true, aff_conv);
+        }
+        // Projective: the perspective left by imperfect page corners.
+        let start = Params::from_affine(&best.to_affine(), Model::Projective, self.full);
+        let (proj, proj_cost, it, proj_conv) = self.descend(start, PHOTO_PROJECTIVE_LEVEL);
+        iterations += it;
+        if proj_cost < best_cost * (1.0 - PROJECTIVE_MIN_GAIN) && self.plausible_projective(&proj, &ts) {
+            let h = proj.to_homography();
+            return metrics(self.full, self.dem, &Fit::Projective(h), iterations, proj_conv, true);
+        }
+        metrics(self.full, self.dem, &Fit::Affine(best.to_affine()), iterations, converged, is_affine)
+    }
+
+    /// Small projective terms, no fold over the samples' extent, a plausible
+    /// local affine part.
+    fn plausible_projective(&self, p: &Params, sim: &Affine) -> bool {
+        let (g, h) = (p.p[6], p.p[7]);
+        if !(g.is_finite() && h.is_finite()) || g.abs() > PHOTO_MAX_PERSPECTIVE || h.abs() > PHOTO_MAX_PERSPECTIVE {
+            return false;
+        }
+        // Denominator over the corners of the normalised sample extent (|u|, |v| ≤ 1).
+        let q_min = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .iter()
+            .map(|&(u, v)| 1.0 + g * u + h * v)
+            .fold(f64::INFINITY, f64::min);
+        let local = p.to_affine();
+        q_min > 0.5
+            && local.det() * sim.det() > 0.0
+            && anisotropy(&local) < PHOTO_MAX_ANISOTROPY
+            && (local.mean_scale() / sim.mean_scale()).ln().abs() < PHOTO_MAX_LOG_SCALE_CHANGE
+    }
 }
 
 /// Ratio of the larger to the smaller singular value of the linear part.
@@ -556,12 +792,23 @@ pub fn evaluate(samples: &ContourSamples, dem: &DemMosaic, t: &Affine) -> Refine
 
 /// `evaluate` with a prepared DEM.
 pub fn evaluate_prepared(samples: &ContourSamples, dem: &PreparedDem, t: &Affine) -> RefineResult {
-    metrics(&Data::new(samples), dem, t, 0, false, false)
+    metrics(&Data::new(samples), dem, &Fit::Affine(*t), 0, false, false)
 }
 
-fn metrics(d: &Data, dem: &PreparedDem, t: &Affine, iterations: usize, converged: bool, affine: bool) -> RefineResult {
+/// `evaluate_prepared` for any pixel → Mercator homography (photo-mode grid fits).
+pub fn evaluate_prepared_homography(samples: &ContourSamples, dem: &PreparedDem, h: &Homography) -> RefineResult {
+    let fit = if h.is_affine() { Fit::Affine(h.to_affine()) } else { Fit::Projective(*h) };
+    metrics(&Data::new(samples), dem, &fit, 0, false, false)
+}
+
+fn metrics(d: &Data, dem: &PreparedDem, fit: &Fit, iterations: usize, converged: bool, affine: bool) -> RefineResult {
+    let (transform, homography) = match fit {
+        Fit::Affine(t) => (*t, None),
+        Fit::Projective(h) => (h.local_affine(d.cx, d.cy), Some(*h)),
+    };
     let empty = RefineResult {
-        transform: *t,
+        transform,
+        homography,
         cost_m: f64::INFINITY,
         median_seg_std_m: f64::INFINITY,
         inlier_fraction: 0.0,
@@ -582,12 +829,18 @@ fn metrics(d: &Data, dem: &PreparedDem, t: &Affine, iterations: usize, converged
     if d.xs.is_empty() {
         return empty;
     }
-    let par = Params::from_affine(t, Model::Affine, d.cx, d.cy);
+    let par = match fit {
+        Fit::Affine(t) => Params::from_affine(t, Model::Affine, d),
+        Fit::Projective(h) => match Params::from_homography(h, d) {
+            Some(p) => p,
+            None => return empty,
+        },
+    };
     let e = evaluate_params(d, fine, &par, LOSS_SCALE_M, false);
     let n = d.xs.len();
     let on_dem = (0..n)
         .filter(|&i| {
-            let (mx, my) = t.apply(d.xs[i], d.ys[i]);
+            let (mx, my) = fit.apply(d.xs[i], d.ys[i]);
             fine.sample(mx, my).is_finite()
         })
         .count();
@@ -626,7 +879,7 @@ fn metrics(d: &Data, dem: &PreparedDem, t: &Affine, iterations: usize, converged
     let contour_interval_m = interval_estimate(d, &e, &used);
     let interval_snr = if sigma_r > 0.0 { contour_interval_m / sigma_r } else { 0.0 };
     RefineResult {
-        transform: *t,
+        transform,
         cost_m,
         median_seg_std_m,
         inlier_fraction: inliers,
@@ -640,6 +893,7 @@ fn metrics(d: &Data, dem: &PreparedDem, t: &Affine, iterations: usize, converged
         affine,
         contour_interval_m,
         interval_snr,
+        homography,
     }
 }
 
@@ -801,15 +1055,39 @@ mod tests {
     #[test]
     fn params_roundtrip() {
         let t = Affine::pixel_to_merc_similarity(2.1, 0.05, 1750.0, 2480.0, 3.05e6, -2.98e6);
-        let p = Params::from_affine(&t, Model::Similarity, 1000.0, 2000.0);
+        let s = ContourSamples { pts: vec![[0.0, 0.0], [2000.0, 4000.0]], seg: vec![0, 0], n_segs: 1 };
+        let d = Data::new(&s);
+        assert_eq!((d.cx, d.cy), (1000.0, 2000.0));
+        assert!((d.sn - 0.5 * 2000f64.hypot(4000.0)).abs() < 1e-9);
+        let p = Params::from_affine(&t, Model::Similarity, &d);
         let back = p.to_affine();
         for (x, y) in [(0.0, 0.0), (3500.0, 4900.0)] {
             let (a, b) = (t.apply(x, y), back.apply(x, y));
             assert!((a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6);
         }
-        let q = Params::from_affine(&t, Model::Affine, 1000.0, 2000.0).to_affine();
+        let q = Params::from_affine(&t, Model::Affine, &d).to_affine();
         assert!((q.a - t.a).abs() < 1e-12 && (q.f - t.f).abs() < 1e-6);
         assert!((anisotropy(&t) - 1.0).abs() < 1e-9);
+        // Projective: from an affine it is that affine; homography round trip.
+        let pr = Params::from_affine(&t, Model::Projective, &d);
+        for (x, y) in [(0.0, 0.0), (3500.0, 4900.0)] {
+            let (a, (mx, my, _)) = (t.apply(x, y), pr.project(x, y));
+            let b = pr.to_homography().apply(x, y);
+            assert!((a.0 - mx).abs() < 1e-6 && (a.1 - my).abs() < 1e-6);
+            assert!((a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6);
+        }
+        let mut pr2 = pr;
+        pr2.p[6] = 0.03;
+        pr2.p[7] = -0.05;
+        pr2.p[2] = 120.0;
+        let h = pr2.to_homography();
+        let back = Params::from_homography(&h, &d).unwrap();
+        for (x, y) in [(0.0, 0.0), (3500.0, 4900.0), (1000.0, 2000.0)] {
+            let ((ax, ay, _), b) = (pr2.project(x, y), back.to_homography().apply(x, y));
+            let c = h.apply(x, y);
+            assert!((ax - b.0).abs() < 1e-5 && (ay - b.1).abs() < 1e-5, "{x} {y}");
+            assert!((ax - c.0).abs() < 1e-5 && (ay - c.1).abs() < 1e-5, "{x} {y}");
+        }
     }
 
     #[test]
@@ -819,20 +1097,18 @@ mod tests {
         assert!((ramp(1.5, 1.0, 2.0) - 0.5).abs() < 1e-12);
     }
 
-    /// Synthetic terrain: contours of a known surface, sampled through a known
-    /// transform, are recovered from a 300 m offset start.
-    #[test]
-    fn recovers_synthetic_offset() {
+    /// DEM tiles (zoom 13) of a synthetic surface over `fp`, and its 10 m
+    /// contours traced in a 2000×2400 px image through `truth` (pixel →
+    /// Mercator), by marching along each 6th row and recording level crossings.
+    fn synthetic_case(truth: &dyn Fn(f64, f64) -> (f64, f64), fp: &MercBox) -> (ContourSamples, DemMosaic) {
         use crate::dem::{DemStore, TILE_SIZE};
         let z = 13u8;
         let elev = |mx: f64, my: f64| -> f64 {
             let (u, v) = (mx / 900.0, my / 700.0);
             300.0 * (u.sin() * v.cos()) + 80.0 * ((mx + 2.0 * my) / 400.0).sin()
         };
-        let truth = Affine::pixel_to_merc_similarity(2.0, 0.02, 1000.0, 1200.0, 3.0e6, -2.98e6);
-        let fp = refine_dem_box(&truth, 2000, 2400);
         let mut store = DemStore::new();
-        for t in crate::dem::tiles_covering(z, &fp) {
+        for t in crate::dem::tiles_covering(z, fp) {
             let b = crate::dem::tile_bounds(t);
             let res = crate::dem::resolution(z);
             let mut e = vec![0.0f32; TILE_SIZE * TILE_SIZE];
@@ -844,15 +1120,13 @@ mod tests {
             }
             store.add_elevations(t, e);
         }
-        let dem = store.mosaic(z, &fp);
-        // Trace contours (every 10 m) of the true surface in pixel space by
-        // marching along x in each row and recording level crossings.
+        let dem = store.mosaic(z, fp);
         let mut s = ContourSamples::default();
         let mut seg_of_level = std::collections::HashMap::new();
         for y in (0..2400).step_by(6) {
             let mut prev = None;
             for x in 0..2000 {
-                let (mx, my) = truth.apply(x as f64 + 0.5, y as f64 + 0.5);
+                let (mx, my) = truth(x as f64 + 0.5, y as f64 + 0.5);
                 let lvl = (elev(mx, my) / 10.0).floor() as i64;
                 if let Some(p) = prev {
                     if p != lvl {
@@ -867,6 +1141,15 @@ mod tests {
             }
         }
         s.n_segs = seg_of_level.len();
+        (s, dem)
+    }
+
+    /// Synthetic terrain: contours of a known surface, sampled through a known
+    /// transform, are recovered from a 300 m offset start.
+    #[test]
+    fn recovers_synthetic_offset() {
+        let truth = Affine::pixel_to_merc_similarity(2.0, 0.02, 1000.0, 1200.0, 3.0e6, -2.98e6);
+        let (s, dem) = synthetic_case(&|x, y| truth.apply(x, y), &refine_dem_box(&truth, 2000, 2400));
         let init = Affine::pixel_to_merc_similarity(2.04, 0.0, 1000.0, 1200.0, 3.0e6 + 250.0, -2.98e6 - 200.0);
         let r = refine(&s, &dem, &init);
         let (a, b) = (r.transform.apply(1000.0, 1200.0), truth.apply(1000.0, 1200.0));
@@ -874,5 +1157,61 @@ mod tests {
         assert!(err < 6.0, "centre error {err} m, {r:?}");
         assert!((r.transform.mean_scale() / 2.0 - 1.0).abs() < 0.005, "{r:?}");
         assert!(r.explained_variance > 0.99, "{r:?}");
+        assert!(r.homography.is_none());
+    }
+
+    /// Photo mode: a flattened photo's residual perspective and aspect error
+    /// (here 6 % and up to ~4 % scale change across the image) are recovered
+    /// by the projective stage; scan mode cannot represent them.
+    #[test]
+    fn recovers_synthetic_perspective() {
+        let sim = Affine::pixel_to_merc_similarity(2.0, 0.02, 1000.0, 1200.0, 3.0e6, -2.98e6);
+        // Pixel-space perspective about the image centre.
+        let (cx, cy, g, h) = (1000.0, 1200.0, 1.2e-5, -1.5e-5);
+        let t = |a: f64, b: f64| Homography { m: [1.0, 0.0, a, 0.0, 1.0, b, 0.0, 0.0, 1.0] };
+        let k = Homography { m: [1.0, 0.0, 0.0, 0.0, 1.06, 0.0, g, h, 1.0] };
+        let truth = sim.to_homography().mul(&t(cx, cy).mul(&k).mul(&t(-cx, -cy))).normalized();
+        let (s, dem) = synthetic_case(&|x, y| truth.apply(x, y), &refine_dem_box(&sim, 2000, 2400));
+        let max_err = |m: &Homography| {
+            let mut worst = 0.0f64;
+            for i in 0..5 {
+                for j in 0..5 {
+                    let (x, y) = (2000.0 * i as f64 / 4.0, 2400.0 * j as f64 / 4.0);
+                    let (a, b) = (m.apply(x, y), truth.apply(x, y));
+                    worst = worst.max((a.0 - b.0).hypot(a.1 - b.1));
+                }
+            }
+            worst
+        };
+        let init = Affine::pixel_to_merc_similarity(2.05, 0.0, 1000.0, 1200.0, 3.0e6 + 150.0, -2.98e6 - 120.0);
+        let prep = PreparedDem::new(&dem);
+        let photo = refine_prepared_with(&s, &prep, &init, &RefineOptions { photo: true });
+        let scan = refine_prepared(&s, &prep, &init);
+        let hp = photo.homography.expect("projective stage kept");
+        let (e_photo, e_scan) = (max_err(&hp), max_err(&scan.transform.to_homography()));
+        assert!(e_photo < 8.0, "photo max error {e_photo:.1} m, {photo:?}");
+        assert!(e_scan > 3.0 * e_photo && e_scan > 20.0, "scan {e_scan:.1} m vs photo {e_photo:.1} m");
+        assert!(photo.explained_variance > 0.99 && fit_confidence(&photo) > 0.9, "{photo:?}");
+        // `transform` is the projective fit's affine approximation at the samples' centroid.
+        let d = Data::new(&s);
+        let (a, b) = (photo.transform.apply(d.cx, d.cy), hp.apply(d.cx, d.cy));
+        assert!((a.0 - b.0).hypot(a.1 - b.1) < 1e-6);
+        // Evaluating the homography reproduces the refined metrics.
+        let ev = evaluate_prepared_homography(&s, &prep, &hp);
+        assert!((ev.cost_m - photo.cost_m).abs() < 1e-9 && ev.homography == Some(hp));
+    }
+
+    /// Photo mode on an exactly similar map: no spurious projective terms.
+    #[test]
+    fn photo_mode_keeps_similarity_maps_similar() {
+        let truth = Affine::pixel_to_merc_similarity(2.0, 0.02, 1000.0, 1200.0, 3.0e6, -2.98e6);
+        let (s, dem) = synthetic_case(&|x, y| truth.apply(x, y), &refine_dem_box(&truth, 2000, 2400));
+        let init = Affine::pixel_to_merc_similarity(2.04, 0.0, 1000.0, 1200.0, 3.0e6 + 250.0, -2.98e6 - 200.0);
+        let r = refine_prepared_with(&s, &PreparedDem::new(&dem), &init, &RefineOptions { photo: true });
+        let m = r.homography.unwrap_or_else(|| r.transform.to_homography());
+        for (x, y) in [(0.0, 0.0), (2000.0, 0.0), (2000.0, 2400.0), (0.0, 2400.0), (1000.0, 1200.0)] {
+            let (a, b) = (m.apply(x, y), truth.apply(x, y));
+            assert!((a.0 - b.0).hypot(a.1 - b.1) < 8.0, "({x}, {y}): {r:?}");
+        }
     }
 }

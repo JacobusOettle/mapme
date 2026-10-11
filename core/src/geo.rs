@@ -408,6 +408,28 @@ impl Homography {
         Some(Homography { m })
     }
 
+    /// First-order (affine) approximation at (x, y): exact when `is_affine`.
+    pub fn local_affine(&self, x: f64, y: f64) -> Affine {
+        let m = &self.m;
+        let w = m[6] * x + m[7] * y + m[8];
+        let u = m[0] * x + m[1] * y + m[2];
+        let v = m[3] * x + m[4] * y + m[5];
+        let w2 = w * w;
+        let (a, b) = ((m[0] * w - u * m[6]) / w2, (m[1] * w - u * m[7]) / w2);
+        let (d, e) = ((m[3] * w - v * m[6]) / w2, (m[4] * w - v * m[7]) / w2);
+        let (px, py) = (u / w, v / w);
+        Affine { a, b, c: px - a * x - b * y, d, e, f: py - d * x - e * y }
+    }
+
+    /// Scale by 1/m[8] (so an affine homography reads [.., .., .., 0, 0, 1]).
+    pub fn normalized(&self) -> Homography {
+        let s = self.m[8];
+        if s == 0.0 || !s.is_finite() {
+            return *self;
+        }
+        Homography { m: self.m.map(|v| v / s) }
+    }
+
     pub fn mul(&self, o: &Homography) -> Homography {
         let a = &self.m;
         let b = &o.m;

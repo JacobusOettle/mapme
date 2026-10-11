@@ -14,6 +14,13 @@
 //!   (the best alone first when it clearly stands out) and the most
 //!   confident one wins.
 //!
+//! A request with `photo: true` (a photo of a paper map, flattened by its
+//! page borders) analyses an illumination- and white-balance-normalised copy
+//! of the raster (`contour::normalize_illumination`), detects grid lines
+//! against their local background, extracts contours with hysteresis, and
+//! lets the grid fit and the contour refinement end in a homography, which
+//! absorbs the perspective and aspect error the flattening left.
+//!
 //! When a stage needs DEM tiles that are neither present nor marked missing,
 //! the call returns `need_dem` and starts computing the contour products on
 //! a background thread while the app downloads.
@@ -21,16 +28,19 @@
 //! `georeference` takes `&self`; `progress` and `cancel` may be called from
 //! other threads while it runs. See docs/ARCHITECTURE.md for the JSON.
 
-use crate::contour::{auto_mask, extract_mask, model_from_rgb, ContourColorModel};
+use crate::contour::{auto_mask, extract_mask, model_from_rgb, normalize_illumination, photo_mask, ContourColorModel};
 use crate::control_points::{self, ControlPoint};
 use crate::dem::{merc_to_tile, resolution, tiles_covering, DemMosaic, DemStore, MercBox, TileId};
 use crate::geo::{latlon_to_merc, merc_to_latlon, Affine, Homography, LatLon};
-use crate::grid::{detect_lines, georeference_from_grid, GridLine, GridMethod, GridResult, LineAxis};
+use crate::grid::{
+    detect_lines, detect_lines_photo, georeference_from_grid_with, GridLine, GridMethod, GridOptions, GridResult,
+    LineAxis,
+};
 use crate::image::Rgb8;
 use crate::labels::{classify_pois, parse_coordinate, parse_scale, CoordValue, OcrObservation, PoiLabel};
 use crate::refine::{
-    confidence, evaluate_prepared, fit_confidence, refine_dem_box, refine_prepared, select_refined, PreparedDem,
-    RefineResult,
+    confidence, evaluate_prepared, evaluate_prepared_homography, fit_confidence, refine_dem_box, refine_prepared_with,
+    select_refined, PreparedDem, RefineOptions, RefineResult,
 };
 use crate::search::{coarse_search, map_field, required_dem_box, rotation_sweep, Candidate, MapField, SearchParams};
 use crate::skeleton::{contour_samples, default_sampling, ContourSamples};
@@ -101,6 +111,9 @@ pub struct GeorefRequest {
     pub methods: Vec<String>,
     /// Check a grid result against the terrain (adds `diagnostics.contour_check`).
     pub verify: bool,
+    /// The raster is a photo of a paper map, flattened by its page borders
+    /// (photo mode: lighting normalisation, homography fits).
+    pub photo: bool,
 }
 
 impl Default for GeorefRequest {
@@ -114,6 +127,7 @@ impl Default for GeorefRequest {
             allow_rotation: false,
             methods: vec!["grid".into(), "contours".into()],
             verify: false,
+            photo: false,
         }
     }
 }
@@ -129,6 +143,7 @@ struct RawRequest {
     allow_rotation: Option<bool>,
     methods: Option<Vec<String>>,
     verify: Option<bool>,
+    photo: Option<bool>,
 }
 
 impl TryFrom<RawRequest> for GeorefRequest {
@@ -152,6 +167,7 @@ impl TryFrom<RawRequest> for GeorefRequest {
             allow_rotation: r.allow_rotation.unwrap_or(d.allow_rotation),
             methods: r.methods.unwrap_or(d.methods),
             verify: r.verify.unwrap_or(d.verify),
+            photo: r.photo.unwrap_or(d.photo),
         })
     }
 }
@@ -333,8 +349,13 @@ pub fn failed_json(message: &str) -> String {
 // Session
 // ---------------------------------------------------------------------------
 
-/// Contour colour choice: None = automatic model.
-type ContourKey = Option<[u8; 3]>;
+/// What contour products are derived from: the colour choice (None =
+/// automatic model) and whether the raster is analysed as a photo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ContourKey {
+    rgb: Option<[u8; 3]>,
+    photo: bool,
+}
 
 /// Contour data derived from the raster for one colour choice.
 pub struct ContourProducts {
@@ -348,13 +369,21 @@ pub struct ContourProducts {
 
 impl ContourProducts {
     pub fn compute(img: &Rgb8, contour_rgb: Option<[u8; 3]>) -> ContourProducts {
+        ContourProducts::compute_with(img, contour_rgb, false)
+    }
+
+    /// `compute`; with `photo`, `img` is the normalised photo
+    /// (`normalize_illumination`) and the mask is grown by hysteresis.
+    pub fn compute_with(img: &Rgb8, contour_rgb: Option<[u8; 3]>, photo: bool) -> ContourProducts {
         let t = Instant::now();
-        let (mask, model) = match contour_rgb {
-            Some(rgb) => {
+        let (mask, model) = match (contour_rgb, photo) {
+            (Some(rgb), false) => {
                 let m = model_from_rgb(rgb);
                 (extract_mask(img, &m), m)
             }
-            None => auto_mask(img),
+            (None, false) => auto_mask(img),
+            (Some(rgb), true) => photo_mask(img, Some(&model_from_rgb(rgb))),
+            (None, true) => photo_mask(img, None),
         };
         let t_mask = ms_since(t);
         let (min_len, step) = default_sampling(img.w, img.h);
@@ -397,8 +426,11 @@ struct RefineKey {
 /// Georeferencing session bound to one map raster.
 pub struct Session {
     image: Arc<Rgb8>,
+    /// Illumination-normalised copy for photo mode (computed on first use).
+    photo_image: Arc<OnceLock<Arc<Rgb8>>>,
     dem: Mutex<DemStore>,
     lines: OnceLock<Vec<GridLine>>,
+    photo_lines: OnceLock<Vec<GridLine>>,
     contours: Mutex<HashMap<ContourKey, Arc<OnceLock<Arc<ContourProducts>>>>>,
     searches: Mutex<Vec<(SearchKey, Arc<Vec<Candidate>>)>>,
     refinements: Mutex<HashMap<RefineKey, RefineResult>>,
@@ -418,8 +450,10 @@ impl Session {
     pub fn new(image: Rgb8) -> Session {
         Session {
             image: Arc::new(image),
+            photo_image: Arc::new(OnceLock::new()),
             dem: Mutex::new(DemStore::new()),
             lines: OnceLock::new(),
+            photo_lines: OnceLock::new(),
             contours: Mutex::new(HashMap::new()),
             searches: Mutex::new(Vec::new()),
             refinements: Mutex::new(HashMap::new()),
@@ -479,6 +513,15 @@ impl Session {
         lock(&self.contours).entry(key).or_default().clone()
     }
 
+    /// The raster as analysed: the original, or for photos its normalised copy.
+    fn analysed(&self, photo: bool) -> Arc<Rgb8> {
+        if photo {
+            normalized(&self.photo_image, &self.image)
+        } else {
+            Arc::clone(&self.image)
+        }
+    }
+
     /// Compute the contour products on a background thread (while the app downloads DEM tiles).
     fn prefetch_contours(&self, key: ContourKey) {
         let cell = self.contour_cell(key);
@@ -486,8 +529,10 @@ impl Session {
             return;
         }
         let img = Arc::clone(&self.image);
+        let norm = Arc::clone(&self.photo_image);
         let _ = std::thread::Builder::new().name("mapme-contours".into()).spawn(move || {
-            let _ = cell.get_or_init(|| Arc::new(ContourProducts::compute(&img, key)));
+            let src = if key.photo { normalized(&norm, &img) } else { img };
+            let _ = cell.get_or_init(|| Arc::new(ContourProducts::compute_with(&src, key.rgb, key.photo)));
         });
     }
 
@@ -537,6 +582,11 @@ impl Session {
         };
         serde_json::to_string(&resp).unwrap_or_else(|e| failed_json(&format!("Could not encode the response: {e}")))
     }
+}
+
+/// The normalised photo in `cell`, computed from `img` on first use.
+fn normalized(cell: &OnceLock<Arc<Rgb8>>, img: &Rgb8) -> Arc<Rgb8> {
+    Arc::clone(cell.get_or_init(|| Arc::new(normalize_illumination(img))))
 }
 
 fn check_tile(t: TileId) -> Result<(), String> {
@@ -620,6 +670,9 @@ impl<'a> Run<'a> {
             .map(|g| LatLon::new(g.lat, g.lon));
         if req.gps.is_some() && gps.is_none() {
             diag.insert("gps_ignored".into(), json!("invalid coordinates"));
+        }
+        if req.photo {
+            diag.insert("photo".into(), json!(true));
         }
         let radius_m = if req.search_radius_m.is_finite() {
             req.search_radius_m.clamp(RADIUS_RANGE_M.0, RADIUS_RANGE_M.1)
@@ -726,12 +779,30 @@ impl<'a> Run<'a> {
 
     fn lines(&mut self) -> &'a [GridLine] {
         let s: &'a Session = self.s;
-        if s.lines.get().is_none() {
+        let photo = self.req.photo;
+        let cell = if photo { &s.photo_lines } else { &s.lines };
+        if cell.get().is_none() {
+            let img = self.analysed();
             let t = Instant::now();
-            let _ = s.lines.get_or_init(|| detect_lines(&s.image));
+            let _ = cell.get_or_init(|| if photo { detect_lines_photo(&img) } else { detect_lines(&img) });
             self.time("lines", t);
         }
-        s.lines.get().map(|v| v.as_slice()).unwrap_or(&[])
+        cell.get().map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// The raster to analyse (timing the photo normalisation when it runs).
+    fn analysed(&mut self) -> Arc<Rgb8> {
+        if self.req.photo && self.s.photo_image.get().is_none() {
+            let t = Instant::now();
+            let img = self.s.analysed(true);
+            self.time("normalize", t);
+            return img;
+        }
+        self.s.analysed(self.req.photo)
+    }
+
+    fn contour_key(&self) -> ContourKey {
+        ContourKey { rgb: self.req.contour_rgb, photo: self.req.photo }
     }
 
     fn grid(&mut self) -> Step<Option<GridResult>> {
@@ -743,7 +814,8 @@ impl<'a> Run<'a> {
         self.s.bump_progress(0.1);
         self.check_cancel()?;
         let t = Instant::now();
-        let g = georeference_from_grid(&self.s.image, lines, &self.req.ocr, self.gps);
+        let opts = GridOptions { photo: self.req.photo };
+        let g = georeference_from_grid_with(&self.s.image, lines, &self.req.ocr, self.gps, &opts);
         self.time("grid", t);
         self.s.bump_progress(0.15);
         let lines_h = lines.iter().filter(|l| l.axis == LineAxis::Horizontal).count();
@@ -753,6 +825,7 @@ impl<'a> Run<'a> {
             Some(g) => json!({
                 "found": true,
                 "method": g.method,
+                "model": if g.projective { "homography" } else { "affine" },
                 "rms_m": g.rms_m,
                 "n_lat": g.n_lat,
                 "n_lon": g.n_lon,
@@ -782,8 +855,8 @@ impl<'a> Run<'a> {
 
     fn grid_ok(&mut self, g: &GridResult) -> Step<GeorefResponse> {
         let (w, h) = self.size();
-        if self.req.verify && g.transform.is_affine() {
-            self.verify(&g.transform.to_affine())?;
+        if self.req.verify {
+            self.verify(&g.transform)?;
         }
         let (scale, _) = scale_and_rotation(&g.transform, w as f64 / 2.0, h as f64 / 2.0);
         // Line positions are good to a fraction of a pixel; the GCP fit RMS alone is optimistic.
@@ -825,15 +898,21 @@ impl<'a> Run<'a> {
     }
 
     /// Check a transform against the terrain: `diagnostics.contour_check`.
-    fn verify(&mut self, t: &Affine) -> Step<()> {
+    fn verify(&mut self, t: &Homography) -> Step<()> {
         let (w, h) = self.size();
-        let key = self.req.contour_rgb;
-        let Some(plan) = fine_plan(t, w, h) else {
+        let key = self.contour_key();
+        let approx = if t.is_affine() { t.to_affine() } else { t.local_affine(w as f64 / 2.0, h as f64 / 2.0) };
+        let Some(plan) = fine_plan(&approx, w, h) else {
             return Ok(());
         };
         self.need(&plan.tiles, "verify", key)?;
         let prod = self.products(key)?;
-        let check = match self.refine_one(&prod, key, &plan, t, true) {
+        let checked = if t.is_affine() {
+            self.refine_one(&prod, key, &plan, &approx, true)
+        } else {
+            self.evaluate_homography(&prod, &plan, t)
+        };
+        let check = match checked {
             Some((r, zoom)) => {
                 let fit = fit_confidence(&r);
                 json!({
@@ -890,9 +969,14 @@ impl<'a> Run<'a> {
         self.check_cancel()?;
         let cell = self.s.contour_cell(key);
         let fresh = cell.get().is_none();
+        let img = if fresh { Some(self.analysed()) } else { None };
         let t = Instant::now();
-        let img = &self.s.image;
-        let p = cell.get_or_init(|| Arc::new(ContourProducts::compute(img, key))).clone();
+        let p = cell
+            .get_or_init(|| {
+                let img = img.unwrap_or_else(|| self.s.analysed(key.photo));
+                Arc::new(ContourProducts::compute_with(&img, key.rgb, key.photo))
+            })
+            .clone();
         if fresh {
             // Includes waiting for a background computation started by need_dem.
             self.time("contour_prep", t);
@@ -901,7 +985,7 @@ impl<'a> Run<'a> {
             "contours".into(),
             json!({
                 "model": p.model,
-                "user_colour": key,
+                "user_colour": key.rgb,
                 "mask_fraction": round_dp(p.mask_fraction, 5),
                 "n_segments": p.samples.n_segs,
                 "n_samples": p.samples.len(),
@@ -1034,10 +1118,25 @@ impl<'a> Run<'a> {
         let r = if evaluate_only {
             evaluate_prepared(&prod.samples, &prep, t)
         } else {
-            refine_prepared(&prod.samples, &prep, t)
+            refine_prepared_with(&prod.samples, &prep, t, &RefineOptions { photo: key.photo })
         };
         self.time(if evaluate_only { "verify" } else { "refine" }, tm);
         lock(&self.s.refinements).insert(rkey, r.clone());
+        Some((r, zoom))
+    }
+
+    /// Evaluate a homography (photo-mode grid fit) on the best DEM for `plan`.
+    fn evaluate_homography(
+        &mut self,
+        prod: &ContourProducts,
+        plan: &FinePlan,
+        t: &Homography,
+    ) -> Option<(RefineResult, u8)> {
+        let tm = Instant::now();
+        let (dem, zoom) = self.s.fine_dem(plan)?;
+        let prep = PreparedDem::new_cropped(&dem, &plan.bbox);
+        let r = evaluate_prepared_homography(&prod.samples, &prep, t);
+        self.time("verify", tm);
         Some((r, zoom))
     }
 
@@ -1071,7 +1170,7 @@ impl<'a> Run<'a> {
 
     fn contours(&mut self, init: Option<&GridResult>) -> Step<Found> {
         let (w, h) = self.size();
-        let key = self.req.contour_rgb;
+        let key = self.contour_key();
         let no_contours = "No contour lines found on this map. Pick the contour colour, or calibrate manually.";
         let mut labelled: Option<(Candidate, RefineResult, u8)> = None;
 
@@ -1195,7 +1294,8 @@ impl<'a> Run<'a> {
 
     fn contour_ok(&mut self, r: &RefineResult, conf: f64, zoom: u8, from_labels: bool) -> GeorefResponse {
         let (w, h) = self.size();
-        let (_, cy) = r.transform.apply(w as f64 / 2.0, h as f64 / 2.0);
+        let t = r.homography.unwrap_or_else(|| r.transform.to_homography());
+        let (_, cy) = t.apply(w as f64 / 2.0, h as f64 / 2.0);
         let (lat, _) = merc_to_latlon(0.0, cy);
         let rms = contour_rms(r, zoom, lat);
         self.diag.insert(
@@ -1213,6 +1313,7 @@ impl<'a> Run<'a> {
                 "n_segments": r.n_segments,
                 "n_samples": r.n_samples,
                 "affine": r.affine,
+                "projective": r.homography.is_some(),
                 "iterations": r.iterations,
                 "converged": r.converged,
                 "dem_zoom": zoom,
@@ -1227,7 +1328,7 @@ impl<'a> Run<'a> {
         if conf < CONFIDENT {
             msg.push_str(" Low confidence: check the dot against your surroundings.");
         }
-        self.located(Method::Contours, &r.transform.to_homography(), conf, rms, msg)
+        self.located(Method::Contours, &t, conf, rms, msg)
     }
 
     fn located(&mut self, method: Method, t: &Homography, conf: f64, rms: f64, message: String) -> GeorefResponse {
@@ -1297,15 +1398,7 @@ pub fn scale_and_rotation(t: &Homography, x: f64, y: f64) -> (f64, f64) {
 
 /// First-order (affine) approximation of a homography at pixel (x, y).
 pub fn local_affine(t: &Homography, x: f64, y: f64) -> Affine {
-    let m = &t.m;
-    let w = m[6] * x + m[7] * y + m[8];
-    let u = m[0] * x + m[1] * y + m[2];
-    let v = m[3] * x + m[4] * y + m[5];
-    let w2 = w * w;
-    let (a, b) = ((m[0] * w - u * m[6]) / w2, (m[1] * w - u * m[7]) / w2);
-    let (d, e) = ((m[3] * w - v * m[6]) / w2, (m[4] * w - v * m[7]) / w2);
-    let (px, py) = (u / w, v / w);
-    Affine { a, b, c: px - a * x - b * y, d, e, f: py - d * x - e * y }
+    t.local_affine(x, y)
 }
 
 /// Smooth ramp 0 → 1 between `lo` and `hi`.
@@ -1348,16 +1441,17 @@ mod tests {
         assert_eq!(r, GeorefRequest::default());
         let r: GeorefRequest = serde_json::from_str(
             r#"{"gps": null, "ocr": null, "search_radius_m": null, "methods": null, "verify": null,
-                "allow_rotation": null, "contour_rgb": null, "dpi": null, "future_field": [1, 2]}"#,
+                "allow_rotation": null, "contour_rgb": null, "dpi": null, "photo": null, "future_field": [1, 2]}"#,
         )
         .unwrap();
         assert_eq!(r, GeorefRequest::default());
         let r: GeorefRequest = serde_json::from_str(
             r#"{"gps": {"lat": -25.8, "lon": 27.4, "accuracy_m": 8}, "dpi": 300, "contour_rgb": [168, 152.4, 300],
                 "search_radius_m": 15000, "allow_rotation": true, "methods": ["contours"], "verify": true,
-                "ocr": [{"text": "1:25 000", "bbox": [1, 2, 3, 4]}]}"#,
+                "photo": true, "ocr": [{"text": "1:25 000", "bbox": [1, 2, 3, 4]}]}"#,
         )
         .unwrap();
+        assert!(r.photo);
         assert_eq!(r.gps.unwrap().accuracy_m, Some(8.0));
         assert_eq!(r.contour_rgb, Some([168, 152, 255]));
         assert_eq!(r.ocr[0].confidence, 0.5);

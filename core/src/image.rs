@@ -1,5 +1,6 @@
 //! Minimal raster buffers and filters used by the georeferencing pipeline.
 
+use crate::geo::Homography;
 use rayon::prelude::*;
 
 /// Borrowed 8-bit RGBA (alpha ignored) image with an arbitrary row stride.
@@ -61,6 +62,100 @@ impl Rgb8 {
         let i = (y * self.w + x) * 3;
         [self.data[i], self.data[i + 1], self.data[i + 2]]
     }
+
+    /// One channel (0 = R, 1 = G, 2 = B) as f32 0..255.
+    pub fn channel(&self, c: usize) -> GrayF32 {
+        let c = c.min(2);
+        GrayF32 { w: self.w, h: self.h, data: self.data.par_chunks_exact(3).map(|p| p[c] as f32).collect() }
+    }
+
+    /// Image from three equally sized channel planes (values rounded and clamped to 0..255).
+    pub fn from_channels(r: &GrayF32, g: &GrayF32, b: &GrayF32) -> Option<Rgb8> {
+        let (w, h) = (r.w, r.h);
+        if [g, b].iter().any(|p| p.w != w || p.h != h) || r.data.len() != w * h {
+            return None;
+        }
+        let mut data = vec![0u8; w * h * 3];
+        data.par_chunks_exact_mut(3).enumerate().for_each(|(i, px)| {
+            for (o, p) in px.iter_mut().zip([r, g, b]) {
+                *o = p.data[i].round().clamp(0.0, 255.0) as u8;
+            }
+        });
+        Some(Rgb8 { w, h, data })
+    }
+
+    /// Bilinear sample at continuous pixel coordinates (pixel centres at
+    /// integer + 0.5, the convention of `warp_perspective`); None outside
+    /// the image.
+    #[inline]
+    pub fn sample(&self, u: f64, v: f64) -> Option<[f32; 3]> {
+        if !(u >= 0.0 && v >= 0.0 && u <= self.w as f64 && v <= self.h as f64) || self.w == 0 || self.h == 0 {
+            return None;
+        }
+        let (x, y) = ((u - 0.5).max(0.0), (v - 0.5).max(0.0));
+        let x0 = (x.floor() as usize).min(self.w - 1);
+        let y0 = (y.floor() as usize).min(self.h - 1);
+        let (x1, y1) = ((x0 + 1).min(self.w - 1), (y0 + 1).min(self.h - 1));
+        let (fx, fy) = ((x - x0 as f64).min(1.0) as f32, (y - y0 as f64).min(1.0) as f32);
+        let (a, b, c, d) = (self.rgb(x0, y0), self.rgb(x1, y0), self.rgb(x0, y1), self.rgb(x1, y1));
+        let mut out = [0.0f32; 3];
+        for (k, o) in out.iter_mut().enumerate() {
+            let top = a[k] as f32 * (1.0 - fx) + b[k] as f32 * fx;
+            let bottom = c[k] as f32 * (1.0 - fx) + d[k] as f32 * fx;
+            *o = top * (1.0 - fy) + bottom * fy;
+        }
+        Some(out)
+    }
+}
+
+/// Perspective warp: output pixel centre (x + 0.5, y + 0.5) is mapped by `h`
+/// (output pixel → source pixel, continuous coordinates) and the source is
+/// sampled bilinearly; points outside the source get `background`.
+pub fn warp_perspective(src: &Rgb8, h: &Homography, out_w: usize, out_h: usize, background: [u8; 3]) -> Rgb8 {
+    let mut data = vec![0u8; out_w * out_h * 3];
+    if out_w == 0 {
+        return Rgb8 { w: out_w, h: out_h, data };
+    }
+    let m = h.m;
+    data.par_chunks_mut(out_w * 3).enumerate().for_each(|(y, row)| {
+        let yc = y as f64 + 0.5;
+        for (x, px) in row.chunks_exact_mut(3).enumerate() {
+            let xc = x as f64 + 0.5;
+            let w = m[6] * xc + m[7] * yc + m[8];
+            let rgb = if w.abs() > 1e-12 {
+                let u = (m[0] * xc + m[1] * yc + m[2]) / w;
+                let v = (m[3] * xc + m[4] * yc + m[5]) / w;
+                src.sample(u, v)
+            } else {
+                None
+            };
+            match rgb {
+                Some(c) => {
+                    for (o, v) in px.iter_mut().zip(c) {
+                        *o = v.round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+                None => px.copy_from_slice(&background),
+            }
+        }
+    });
+    Rgb8 { w: out_w, h: out_h, data }
+}
+
+/// Unsharp mask per channel: `v + amount·(v − gaussian_blur(v, sigma))`.
+pub fn unsharp_mask(img: &Rgb8, sigma: f64, amount: f32) -> Rgb8 {
+    if sigma <= 0.0 || amount == 0.0 || !amount.is_finite() || img.w == 0 || img.h == 0 {
+        return img.clone();
+    }
+    let planes: Vec<GrayF32> = (0..3)
+        .map(|c| {
+            let mut p = img.channel(c);
+            let b = p.gaussian_blur(sigma);
+            p.data.par_iter_mut().zip(b.data.par_iter()).for_each(|(v, b)| *v += amount * (*v - b));
+            p
+        })
+        .collect();
+    Rgb8::from_channels(&planes[0], &planes[1], &planes[2]).unwrap_or_else(|| img.clone())
 }
 
 /// Binary mask (0 or 1 per pixel).
@@ -361,6 +456,67 @@ mod tests {
         let (gx, gy) = g.sobel();
         assert!((gx.get(5, 5) - 16.0).abs() < 1e-4); // 2 * 8
         assert!((gy.get(5, 5) - 8.0).abs() < 1e-4);
+    }
+
+    fn gradient_rgb(w: usize, h: usize) -> Rgb8 {
+        let mut data = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            for x in 0..w {
+                data.extend_from_slice(&[(x * 7 % 256) as u8, (y * 5 % 256) as u8, ((x + y) % 256) as u8]);
+            }
+        }
+        Rgb8::from_rgb(w, h, data).unwrap()
+    }
+
+    #[test]
+    fn warp_identity_translation_and_background() {
+        let src = gradient_rgb(40, 30);
+        let id = warp_perspective(&src, &Homography::IDENTITY, 40, 30, [1, 2, 3]);
+        assert_eq!(id.data, src.data);
+        // Output pixel (x, y) shows source pixel (x + 10, y + 5).
+        let t = Homography { m: [1.0, 0.0, 10.0, 0.0, 1.0, 5.0, 0.0, 0.0, 1.0] };
+        let out = warp_perspective(&src, &t, 40, 30, [1, 2, 3]);
+        assert_eq!(out.rgb(3, 4), src.rgb(13, 9));
+        assert_eq!(out.rgb(29, 24), src.rgb(39, 29));
+        assert_eq!(out.rgb(35, 10), [1, 2, 3]);
+        assert_eq!(out.rgb(5, 28), [1, 2, 3]);
+        // Half-pixel shift: bilinear average of two neighbours.
+        let t = Homography { m: [1.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] };
+        let out = warp_perspective(&src, &t, 40, 30, [0, 0, 0]);
+        let (a, b) = (src.rgb(6, 3)[0] as f32, src.rgb(7, 3)[0] as f32);
+        assert_eq!(out.rgb(6, 3)[0], ((a + b) / 2.0).round() as u8);
+    }
+
+    #[test]
+    fn warp_perspective_follows_the_homography() {
+        let src = gradient_rgb(64, 48);
+        let h = Homography { m: [0.9, 0.05, 3.0, -0.04, 1.1, 2.0, 1e-3, -5e-4, 1.0] };
+        let out = warp_perspective(&src, &h, 50, 40, [9, 9, 9]);
+        for (x, y) in [(5usize, 5usize), (20, 30), (45, 12)] {
+            let (u, v) = h.apply(x as f64 + 0.5, y as f64 + 0.5);
+            let want = src.sample(u, v).unwrap();
+            for (got, want) in out.rgb(x, y).iter().zip(want) {
+                assert!((*got as f32 - want).abs() <= 0.5, "{x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn channels_round_trip_and_unsharp_keeps_flat_areas() {
+        let src = gradient_rgb(20, 10);
+        let back = Rgb8::from_channels(&src.channel(0), &src.channel(1), &src.channel(2)).unwrap();
+        assert_eq!(back.data, src.data);
+        let flat = Rgb8::from_rgb(16, 16, vec![120; 16 * 16 * 3]).unwrap();
+        assert_eq!(unsharp_mask(&flat, 1.5, 0.7).data, flat.data);
+        // An edge gets steeper (overshoot on both sides).
+        let mut data = vec![200u8; 16 * 16 * 3];
+        for y in 0..16 {
+            for x in 8..16 {
+                data[(y * 16 + x) * 3..(y * 16 + x) * 3 + 3].copy_from_slice(&[100, 100, 100]);
+            }
+        }
+        let s = unsharp_mask(&Rgb8::from_rgb(16, 16, data).unwrap(), 1.0, 1.0);
+        assert!(s.rgb(7, 8)[0] > 200 && s.rgb(8, 8)[0] < 100);
     }
 
     #[test]

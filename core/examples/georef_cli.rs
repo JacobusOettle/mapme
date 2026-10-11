@@ -3,7 +3,7 @@
 //! ```text
 //! cargo run --release --example georef_cli -- <image.jpg|png> [--gps lat,lon] [--ocr ocr.json]
 //!     [--dem-dir dir] [--dpi N] [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b]
-//!     [--rotate] [--verify]
+//!     [--rotate] [--verify] [--photo]
 //! ```
 //!
 //! Runs the same request / `need_dem` loop as the app: tiles are read from
@@ -21,7 +21,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 const USAGE: &str = "usage: georef_cli <image.jpg|png> [--gps lat,lon] [--ocr ocr.json] [--dem-dir dir] [--dpi N] \
-                     [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b] [--rotate] [--verify]";
+                     [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b] [--rotate] [--verify] [--photo]";
 
 /// Most `need_dem` rounds before giving up.
 const MAX_ROUNDS: usize = 8;
@@ -77,6 +77,7 @@ fn run() -> Result<bool, String> {
             }
             "--rotate" => req.allow_rotation = true,
             "--verify" => req.verify = true,
+            "--photo" => req.photo = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(true);
