@@ -56,6 +56,9 @@ const MAP_BLUR_SIGMA: f64 = 1.0;
 /// Build the map field from the full-resolution contour mask.
 pub fn map_field(mask: &Mask) -> MapField {
     let ppc = field_px_per_cell(mask.w, mask.h);
+    if mask.w == 0 || mask.h == 0 {
+        return MapField { w: 0, h: 0, px_per_cell: ppc as f64, re: Vec::new(), im: Vec::new() };
+    }
     let density = box_downsample_mask(mask, ppc);
     let g = density.gaussian_blur(MAP_BLUR_SIGMA);
     let (gx, gy) = g.sobel();
@@ -162,9 +165,9 @@ const TILED_MIN_SIDE: f64 = 40.0;
 /// Largest FFT side; bigger windows are tiled.
 const FFT_CAP: usize = 1024;
 /// Gaussian sigma (template cells) applied after area-resampling the map field.
-const TEMPLATE_SIGMA: f64 = 0.5;
+const TEMPLATE_SIGMA: f64 = 0.3;
 /// Gaussian sigma (DEM cells) applied to the DEM orientation field.
-const DEM_SIGMA: f64 = 1.0;
+const DEM_SIGMA: f64 = 0.3;
 /// Candidates closer than this (ground metres) are the same location.
 pub const DISTINCT_M: f64 = 2000.0;
 /// Peaks kept per (template, rotation) after non-maximum suppression.
@@ -181,10 +184,15 @@ pub const MAX_BOX_HALF_M: f64 = 60_000.0;
 const MIN_RATIO_DENOM: f32 = 2.0;
 /// Fine stage of a sweep: search radius (ground metres) around each hypothesis.
 const SWEEP_LOCAL_RADIUS_M: f64 = 1500.0;
+/// Peaks with less correlation than this are not candidates (a map without
+/// contours correlates ~0 everywhere; wrong locations still reach ~0.15).
+const MIN_CANDIDATE_NCC: f32 = 0.05;
+/// Memory allowed for caching template spectra across rotations.
+const HAT_CACHE_BYTES: usize = 192 << 20;
 
-fn scale_list(p: &SearchParams) -> Vec<f64> {
+fn scale_list(p: &SearchParams, step: f64) -> Vec<f64> {
     let (lo, hi) = (p.scale_min.max(1e-3), p.scale_max.max(p.scale_min.max(1e-3)));
-    let n = ((hi / lo).ln() / SCALE_STEP.ln()).ceil().max(0.0) as usize + 1;
+    let n = ((hi / lo).ln() / step.ln() - 1e-9).ceil().max(0.0) as usize + 1;
     if n == 1 {
         return vec![lo];
     }
@@ -504,7 +512,7 @@ fn grid_field(dem: &DemMosaic, x0: i64, y0: i64, w: usize, h: usize) -> GridFiel
     GridField { x0, y0, w, h, d, valid: dv }
 }
 
-/// One FFT tile of a frame.
+/// One FFT tile of a frame: a sub-rectangle and its FFT plan.
 struct Tile {
     /// Offset in the frame (cells).
     x0: usize,
@@ -512,7 +520,47 @@ struct Tile {
     w: usize,
     h: usize,
     fft: Fft2,
-    d_hat: Vec<C32>,
+}
+
+/// FFT tiling of a level's frames (identical for every rotation): one tile
+/// if it fits, else overlapping tiles so that every placement of the largest
+/// template lies wholly inside some tile.
+fn tile_layout(fw: usize, fh: usize, max_t: (usize, usize)) -> Vec<Tile> {
+    let axis = |n: usize, t: usize| -> Vec<(usize, usize)> {
+        if next_fast_len(n) <= FFT_CAP || t >= FFT_CAP {
+            return vec![(0, n)];
+        }
+        let stride = FFT_CAP + 1 - t;
+        let mut v = Vec::new();
+        let mut s = 0;
+        loop {
+            let len = FFT_CAP.min(n - s);
+            v.push((s, len));
+            if s + len >= n {
+                break;
+            }
+            s += stride;
+        }
+        v
+    };
+    let mut tiles = Vec::new();
+    for &(y0, h) in &axis(fh, max_t.1) {
+        for &(x0, w) in &axis(fw, max_t.0) {
+            tiles.push(Tile { x0, y0, w, h, fft: Fft2::new(next_fast_len(w), next_fast_len(h)) });
+        }
+    }
+    tiles
+}
+
+/// Forward FFT of a template zero-padded to a tile's FFT size.
+fn template_hat(t: &Template, tile: &Tile) -> Vec<C32> {
+    let (fw, fh) = (tile.fft.w, tile.fft.h);
+    let mut buf = vec![C32::new(0.0, 0.0); fw * fh];
+    for y in 0..t.h {
+        buf[y * fw..y * fw + t.w].copy_from_slice(&t.data[y * t.w..(y + 1) * t.w]);
+    }
+    tile.fft.forward(&mut buf);
+    buf
 }
 
 /// The DEM field resampled into the map's frame for one rotation: frame cell
@@ -527,7 +575,8 @@ struct Frame {
     /// Integral images ((w+1)×(h+1)) of |D|² and validity.
     e_int: Vec<f64>,
     v_int: Vec<f64>,
-    tiles: Vec<Tile>,
+    /// FFT of the field in each tile of the level's layout.
+    d_hats: Vec<Vec<C32>>,
 }
 
 impl Frame {
@@ -558,9 +607,9 @@ fn integral(vals: &[f64], w: usize, h: usize) -> Vec<f64> {
     out
 }
 
-/// Resample the grid field into the frame of rotation θ (size fw × fh), with
-/// FFT tiles sized for templates up to `max_t` cells.
-fn build_frame(g: &GridField, gc: (f64, f64), theta: f64, fw: usize, fh: usize, max_t: (usize, usize)) -> Frame {
+/// Resample the grid field into the frame of rotation θ (size fw × fh) and
+/// transform it on the level's tile layout.
+fn build_frame(g: &GridField, gc: (f64, f64), theta: f64, fw: usize, fh: usize, layout: &[Tile]) -> Frame {
     let zero = is_zero_rotation(theta.to_degrees());
     // North-up frames are an exact integer-offset crop of the grid field.
     let fc = if zero {
@@ -600,39 +649,20 @@ fn build_frame(g: &GridField, gc: (f64, f64), theta: f64, fw: usize, fh: usize, 
     let vals: Vec<f64> = valid.iter().map(|&v| v as u8 as f64).collect();
     let e_int = integral(&energy, fw, fh);
     let v_int = integral(&vals, fw, fh);
-    // Tiles: one FFT window if it fits, else overlapping tiles so that every
-    // placement of the largest template lies wholly inside some tile.
-    let tile_axis = |n: usize, t: usize| -> Vec<(usize, usize)> {
-        if next_fast_len(n) <= FFT_CAP || t >= FFT_CAP {
-            return vec![(0, n)];
-        }
-        let stride = FFT_CAP + 1 - t;
-        let mut v = Vec::new();
-        let mut s = 0;
-        loop {
-            let len = FFT_CAP.min(n - s);
-            v.push((s, len));
-            if s + len >= n {
-                break;
-            }
-            s += stride;
-        }
-        v
-    };
-    let mut tiles = Vec::new();
-    for &(ty0, th) in &tile_axis(fh, max_t.1) {
-        for &(tx0, tw) in &tile_axis(fw, max_t.0) {
-            let (nw, nh) = (next_fast_len(tw), next_fast_len(th));
-            let fft = Fft2::new(nw, nh);
+    let d_hats = layout
+        .iter()
+        .map(|tile| {
+            let (nw, nh) = (tile.fft.w, tile.fft.h);
             let mut buf = vec![C32::new(0.0, 0.0); nw * nh];
-            for y in 0..th {
-                buf[y * nw..y * nw + tw].copy_from_slice(&d[(ty0 + y) * fw + tx0..(ty0 + y) * fw + tx0 + tw]);
+            for y in 0..tile.h {
+                let src = (tile.y0 + y) * fw + tile.x0;
+                buf[y * nw..y * nw + tile.w].copy_from_slice(&d[src..src + tile.w]);
             }
-            fft.forward(&mut buf);
-            tiles.push(Tile { x0: tx0, y0: ty0, w: tw, h: th, fft, d_hat: buf });
-        }
-    }
-    Frame { w: fw, h: fh, theta, gc, fc, e_int, v_int, tiles }
+            tile.fft.forward(&mut buf);
+            buf
+        })
+        .collect();
+    Frame { w: fw, h: fh, theta, gc, fc, e_int, v_int, d_hats }
 }
 
 /// A correlation peak (map centre position in Mercator), for diagnostics.
@@ -655,6 +685,7 @@ pub struct Peak {
     pub th: usize,
     scale_idx: usize,
     rot_idx: usize,
+    scale_step: f64,
 }
 
 impl Peak {
@@ -682,8 +713,15 @@ fn surface_stats(ncc: &[f32]) -> (f32, f32) {
 
 /// Correlate one template over a frame; returns the NCC surface over all
 /// placements (fw−tw+1)×(fh−th+1), −∞ where invalid or outside the disc of
-/// `radius` frame cells around the GPS position.
-fn correlate(t: &Template, f: &Frame, radius: f64) -> (usize, usize, Vec<f32>) {
+/// `radius` frame cells around the GPS position. `hats` are the template's
+/// cached spectra per tile (computed here when None).
+fn correlate(
+    t: &Template,
+    hats: Option<&[Vec<C32>]>,
+    f: &Frame,
+    layout: &[Tile],
+    radius: f64,
+) -> (usize, usize, Vec<f32>) {
     if t.w > f.w || t.h > f.h {
         return (0, 0, Vec::new());
     }
@@ -693,17 +731,16 @@ fn correlate(t: &Template, f: &Frame, radius: f64) -> (usize, usize, Vec<f32>) {
     let n_cells = (t.w * t.h) as f64;
     let floor = ENERGY_FLOOR * n_cells;
     let norm = t.norm.max(1e-12);
-    for tile in &f.tiles {
+    for (k, tile) in layout.iter().enumerate() {
         if t.w > tile.w || t.h > tile.h {
             continue;
         }
-        let (fw, fh) = (tile.fft.w, tile.fft.h);
-        let mut buf = vec![C32::new(0.0, 0.0); fw * fh];
-        for y in 0..t.h {
-            buf[y * fw..y * fw + t.w].copy_from_slice(&t.data[y * t.w..(y + 1) * t.w]);
-        }
-        tile.fft.forward(&mut buf);
-        buf.par_iter_mut().zip(tile.d_hat.par_iter()).for_each(|(a, d)| *a = d * a.conj());
+        let fw = tile.fft.w;
+        let mut buf = match hats {
+            Some(h) => h[k].clone(),
+            None => template_hat(t, tile),
+        };
+        buf.par_iter_mut().zip(f.d_hats[k].par_iter()).for_each(|(a, d)| *a = d * a.conj());
         tile.fft.inverse(&mut buf);
         let (tpw, tph) = (tile.w - t.w + 1, tile.h - t.h + 1);
         let rows: Vec<(usize, Vec<(usize, f32)>)> = (0..tph)
@@ -808,12 +845,12 @@ pub fn coarse_search(
 ) -> Vec<Candidate> {
     let rots = rotation_list(params);
     if rots.len() <= 1 {
-        let peaks = search_peaks_with(field, dem, img_w, img_h, params, TARGET_SIDE, cancel, progress);
+        let peaks = search_peaks_with(field, dem, img_w, img_h, params, FULL_PASS, cancel, progress);
         return select_candidates(&peaks, img_w, img_h, params);
     }
     // Rotation sweep, stage 1: every rotation with smaller templates.
     let stage1 = |f: f32| progress(0.8 * f);
-    let peaks = search_peaks_with(field, dem, img_w, img_h, params, SWEEP_TARGET_SIDE, cancel, &stage1);
+    let peaks = search_peaks_with(field, dem, img_w, img_h, params, SWEEP_PASS, cancel, &stage1);
     let mut cands = select_candidates(&peaks, img_w, img_h, params);
     // Stage 2: around each hypothesis, finer rotations and scales at full resolution.
     let mut sorted = rots.iter().map(|r| r.rem_euclid(360.0)).collect::<Vec<_>>();
@@ -833,7 +870,7 @@ pub fn coarse_search(
             top_k: 1,
         };
         let sub = |f: f32| progress(0.8 + 0.2 * (k as f32 + f) / n as f32);
-        let lp = search_peaks_with(field, dem, img_w, img_h, &local, TARGET_SIDE, cancel, &sub);
+        let lp = search_peaks_with(field, dem, img_w, img_h, &local, FULL_PASS, cancel, &sub);
         if let Some(best) = lp.iter().max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
         {
             let (lat, _) = merc_to_latlon(best.mx, best.my);
@@ -865,8 +902,21 @@ pub fn search_peaks(
     cancel: &(dyn Fn() -> bool + Sync),
     progress: &(dyn Fn(f32) + Sync),
 ) -> Vec<Peak> {
-    search_peaks_with(field, dem, img_w, img_h, params, TARGET_SIDE, cancel, progress)
+    search_peaks_with(field, dem, img_w, img_h, params, FULL_PASS, cancel, progress)
 }
+
+/// Resolution settings of one search pass.
+#[derive(Debug, Clone, Copy)]
+struct Pass {
+    /// Preferred minimum template side (cells) when picking the DEM level.
+    target_side: f64,
+    /// Geometric step between scales.
+    scale_step: f64,
+}
+
+const FULL_PASS: Pass = Pass { target_side: TARGET_SIDE, scale_step: SCALE_STEP };
+/// First stage of a rotation sweep: smaller templates, 8 % scale steps.
+const SWEEP_PASS: Pass = Pass { target_side: SWEEP_TARGET_SIDE, scale_step: SCALE_STEP * SCALE_STEP };
 
 #[allow(clippy::too_many_arguments)]
 fn search_peaks_with(
@@ -875,10 +925,11 @@ fn search_peaks_with(
     img_w: usize,
     img_h: usize,
     params: &SearchParams,
-    target_side: f64,
+    pass: Pass,
     cancel: &(dyn Fn() -> bool + Sync),
     progress: &(dyn Fn(f32) + Sync),
 ) -> Vec<Peak> {
+    let target_side = pass.target_side;
     if img_w == 0 || img_h == 0 || dem.w() < 4 || dem.h() < 4 || field.w == 0 || field.h == 0 {
         return Vec::new();
     }
@@ -891,7 +942,7 @@ fn search_peaks_with(
     // tiling and the template keeps ≥ TILED_MIN_SIDE cells.
     let radius_cells0 = params.search_radius_m.max(0.0) * kmg / r0;
     let mut plan: Vec<(usize, f64, usize)> = Vec::new(); // (scale index, s_merc, level)
-    for (si, &s) in scale_list(params).iter().enumerate() {
+    for (si, &s) in scale_list(params, pass.scale_step).iter().enumerate() {
         let s_merc = s * kmg;
         let m0 = img_w.min(img_h) as f64 * s_merc / r0;
         if m0 < MIN_SIDE {
@@ -975,19 +1026,28 @@ fn search_peaks_with(
         }
         let grid = grid_field(ldem, gx0, gy0, gw, gh);
         let rad_cells = DISTINCT_M * kmg / res;
+        let layout = tile_layout(fw, fh, (max_w, max_h));
+        // With several rotations, transform each template once per level
+        // (within a memory budget) instead of once per rotation.
+        let hat_bytes: usize = layout.iter().map(|t| t.fft.w * t.fft.h * 8).sum::<usize>() * templates.len();
+        let hats: Option<Vec<Vec<Vec<C32>>>> = (rots.len() > 1 && hat_bytes <= HAT_CACHE_BYTES).then(|| {
+            templates.par_iter().map(|(_, t)| layout.iter().map(|tile| template_hat(t, tile)).collect()).collect()
+        });
         for (ri, &rot) in rots.iter().enumerate() {
             if cancel() {
                 return Vec::new();
             }
-            let frame = build_frame(&grid, gc, rot.to_radians(), fw, fh, (max_w, max_h));
+            let frame = build_frame(&grid, gc, rot.to_radians(), fw, fh, &layout);
             tick();
             let fpeaks: Vec<Peak> = templates
                 .par_iter()
-                .flat_map_iter(|(si, t)| {
+                .enumerate()
+                .flat_map_iter(|(ti, (si, t))| {
                     if cancel() {
                         return Vec::new();
                     }
-                    let (pw, ph, ncc) = correlate(t, &frame, rc);
+                    let cached = hats.as_ref().map(|h| h[ti].as_slice());
+                    let (pw, ph, ncc) = correlate(t, cached, &frame, &layout, rc);
                     let (mu, sd) = surface_stats(&ncc);
                     let out: Vec<Peak> = find_peaks(&ncc, pw, ph, PEAKS_PER_TEMPLATE, rad_cells)
                         .into_iter()
@@ -1006,6 +1066,7 @@ fn search_peaks_with(
                                 th: t.h,
                                 scale_idx: *si,
                                 rot_idx: ri,
+                                scale_step: pass.scale_step,
                             }
                         })
                         .collect();
@@ -1041,6 +1102,9 @@ fn select_candidates(peaks: &[Peak], img_w: usize, img_h: usize, params: &Search
     for &i in &order {
         if chosen.len() >= params.top_k.max(1) {
             break;
+        }
+        if peaks[i].score < MIN_CANDIDATE_NCC {
+            continue;
         }
         let p = (peaks[i].mx, peaks[i].my);
         if chosen.iter().all(|&j| ground_dist(p, (peaks[j].mx, peaks[j].my)) >= DISTINCT_M) {
@@ -1078,7 +1142,7 @@ fn select_candidates(peaks: &[Peak], img_w: usize, img_h: usize, params: &Search
                     let den = (a - 2.0 * c + b) as f64;
                     if den < 0.0 {
                         let off = (0.5 * (a - b) as f64 / den).clamp(-0.5, 0.5);
-                        s_merc *= SCALE_STEP.powf(off);
+                        s_merc *= pk.scale_step.powf(off);
                     }
                 }
             }
@@ -1109,7 +1173,7 @@ mod tests {
     #[test]
     fn scales_are_geometric() {
         let p = SearchParams { scale_min: 1.0, scale_max: 2.0, ..Default::default() };
-        let s = scale_list(&p);
+        let s = scale_list(&p, SCALE_STEP);
         assert!((s[0] - 1.0).abs() < 1e-12 && (s[s.len() - 1] - 2.0).abs() < 1e-12);
         for w in s.windows(2) {
             assert!(w[1] / w[0] <= SCALE_STEP + 1e-9 && w[1] / w[0] > 1.03);
@@ -1160,7 +1224,8 @@ mod tests {
         // "map right" (+u) along bearing 90° + θ.
         let g = GridField { x0: 0, y0: 0, w: 4, h: 4, d: vec![C32::new(0.0, 0.0); 16], valid: vec![false; 16] };
         let th = 30f64.to_radians();
-        let f = build_frame(&g, (100.0, 200.0), th, 40, 30, (8, 8));
+        let layout = tile_layout(40, 30, (8, 8));
+        let f = build_frame(&g, (100.0, 200.0), th, 40, 30, &layout);
         let (x, y) = f.to_level(f.fc.0, f.fc.1);
         assert!((x - 100.0).abs() < 1e-9 && (y - 200.0).abs() < 1e-9);
         let (x, y) = f.to_level(f.fc.0 + 10.0, f.fc.1);

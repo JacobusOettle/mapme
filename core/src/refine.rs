@@ -730,8 +730,10 @@ fn ramp(x: f64, lo: f64, hi: f64) -> f64 {
 /// * median within-segment std: ≤ 4 m → 1, ≥ 12 m → 0 (DEM noise is ~2–3 m);
 /// * contour-interval SNR (neighbouring lines must differ by one interval,
 ///   above the residual noise): ≥ 2.0 → 1, ≤ 1.0 → 0. Grootkloof (5 m
-///   contours, SRTM) gives 2.7; wrong fits on smooth or flat terrain give
-///   < 0.7, because they squeeze many lines into little relief;
+///   contours, SRTM) gives 2.8; wrong fits give < 0.8, because they squeeze
+///   many lines into little relief or scatter them over unrelated terrain;
+/// * a plausible estimated contour interval: ≥ 1.6 m → 1, ≤ 0.8 m → 0
+///   (topographic maps use 1–50 m; wrong fits on smooth terrain imply ~0.5 m);
 /// * DEM coverage: ≥ 0.8 → 1, ≤ 0.3 → 0;
 /// * enough evidence: ≥ 20 segments and ≥ 30 m relief, else scaled down.
 pub fn fit_confidence(r: &RefineResult) -> f64 {
@@ -741,9 +743,10 @@ pub fn fit_confidence(r: &RefineResult) -> f64 {
     let ev = ramp(r.explained_variance, 0.80, 0.97);
     let sd = 1.0 - ramp(r.median_seg_std_m, 4.0, 12.0);
     let snr = ramp(r.interval_snr, 1.0, 2.0);
+    let interval = ramp(r.contour_interval_m, 0.8, 1.6);
     let cov = ramp(r.dem_coverage, 0.3, 0.8);
     let evidence = ramp(r.n_segments as f64, 5.0, 20.0) * ramp(r.relief_m, 10.0, 30.0);
-    (ev * sd * snr * cov * evidence).clamp(0.0, 1.0)
+    (ev * sd * snr * interval * cov * evidence).clamp(0.0, 1.0)
 }
 
 /// Overall confidence (0..1) that a contour match is right, combining the

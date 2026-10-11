@@ -207,6 +207,9 @@ fn remove_staircases(p: &mut Padded, idx: &[usize]) {
 
 /// Thin a binary mask to a one-pixel-wide 8-connected skeleton.
 pub fn thin(mask: &Mask) -> Mask {
+    if mask.w == 0 || mask.h == 0 {
+        return mask.clone();
+    }
     let mut p = Padded::from_mask(mask);
     zhang_suen(&mut p);
     let idx = p.set_indices();
@@ -444,11 +447,13 @@ pub fn samples_from_segments(segs: &[Vec<(u32, u32)>], step: usize) -> ContourSa
     s
 }
 
-/// Segment length / sampling step suited to the image size: about 1/40 of
-/// the image diagonal (150 px on a 300-dpi A3 sheet) and every 3rd pixel there.
+/// Segment length / sampling step suited to the image size: about 1/80 of
+/// the image diagonal (76 px on a 300-dpi A3 sheet: long enough to drop text
+/// and symbols, short enough to keep dense contours cut by roads and rivers)
+/// and every 3rd pixel there.
 pub fn default_sampling(w: usize, h: usize) -> (usize, usize) {
     let diag = ((w * w + h * h) as f64).sqrt();
-    let min_len = ((diag / 40.0).round() as usize).max(30);
+    let min_len = ((diag / 80.0).round() as usize).max(30);
     let step = ((diag / 2000.0).round() as usize).clamp(1, 6);
     (min_len, step)
 }
@@ -610,7 +615,7 @@ mod tests {
 
     #[test]
     fn sampling_defaults() {
-        assert_eq!(default_sampling(3507, 4960), (152, 3));
+        assert_eq!(default_sampling(3507, 4960), (76, 3));
         let (l, s) = default_sampling(800, 600);
         assert!(l >= 30 && s >= 1);
     }

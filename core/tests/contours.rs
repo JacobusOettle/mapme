@@ -673,3 +673,89 @@ fn synthetic_missing_tiles() {
 fn synthetic_large_radius() {
     run_synthetic(&Synth { name: "40km", radius_m: 40_000.0, offset_m: (-20000.0, 15000.0), ..Default::default() });
 }
+
+/// Degenerate inputs never panic and never produce confident answers.
+#[test]
+fn degenerate_inputs_are_handled() {
+    let _g = serial();
+    let params = params_at(CENTER.0, CENTER.1);
+    // A blank sheet (no contours at all).
+    let blank = Rgb8::from_rgb(1200, 1600, vec![250u8; 1200 * 1600 * 3]).unwrap();
+    let p = prepare(&blank);
+    assert_eq!(p.samples.len(), 0);
+    let o = locate(&p, store(), &params);
+    report("blank", &o, &p);
+    assert!(o.candidates.is_empty() && o.confidence == 0.0);
+    // A tiny image: no scale is searchable.
+    let tiny = prepare(&Rgb8::from_rgb(40, 30, vec![200u8; 40 * 30 * 3]).unwrap());
+    assert!(locate(&tiny, store(), &params).candidates.is_empty());
+    // Zero-sized inputs.
+    let empty = Mask::new(0, 0);
+    assert_eq!(mapme_core::skeleton::thin(&empty).data.len(), 0);
+    assert_eq!(map_field(&empty).w, 0);
+    assert!(contour_samples(&empty, 10, 2).is_empty());
+    // No DEM at all (every coarse tile missing).
+    let g = grootkloof();
+    let mut none = DemStore::new();
+    for t in tiles_covering(11, &required_dem_box(&params, g.w, g.h)) {
+        none.mark_missing(t);
+    }
+    let o = locate(g, &none, &params);
+    assert!(o.candidates.is_empty() || o.confidence <= 0.3);
+    // Cancellation returns nothing; progress ends near 1.
+    let dem = store().mosaic(11, &required_dem_box(&params, g.w, g.h));
+    let c = coarse_search(&g.field, &dem, g.w, g.h, &params, &|| true, &|_| {});
+    assert!(c.is_empty());
+    let last = std::sync::Mutex::new(0.0f32);
+    let c = coarse_search(&g.field, &dem, g.w, g.h, &params, &|| false, &|f| {
+        let mut l = last.lock().unwrap();
+        *l = l.max(f);
+    });
+    assert!(!c.is_empty());
+    let l = *last.lock().unwrap();
+    assert!(l > 0.95 && l <= 1.0, "{l}");
+    // Refinement and evaluation on an empty sample set.
+    let r = mapme_core::refine::refine(&ContourSamples::default(), &dem, &c[0].transform);
+    assert_eq!(mapme_core::refine::fit_confidence(&r), 0.0);
+}
+
+#[test]
+#[ignore]
+fn tune_search() {
+    let p = grootkloof();
+    let tc = truth().apply(p.w as f64 / 2.0, p.h as f64 / 2.0);
+    let lc = (-25.85f64).to_radians().cos();
+    let mut line = String::new();
+    for (name, lat, lon) in [
+        ("c", CENTER.0, CENTER.1),
+        ("ne", CENTER.0 + 0.0764, CENTER.1 + 0.0846),
+        ("sw", CENTER.0 - 0.1018, CENTER.1 - 0.1128),
+        ("w55", CENTER.0, CENTER.1 - 0.55),
+    ] {
+        let params = params_at(lat, lon);
+        let dem = store().mosaic(11, &required_dem_box(&params, p.w, p.h));
+        let peaks = mapme_core::search::search_peaks(&p.field, &dem, p.w, p.h, &params, &|| false, &|_| {});
+        let (mut tz, mut fz) = (f32::MIN, f32::MIN);
+        let mut best: Option<&mapme_core::search::Peak> = None;
+        for pk in &peaks {
+            let d = ((pk.mx - tc.0).powi(2) + (pk.my - tc.1).powi(2)).sqrt() * lc;
+            if d < 2000.0 {
+                tz = tz.max(pk.z());
+            } else {
+                fz = fz.max(pk.z());
+            }
+            if best.is_none_or(|b| pk.z() > b.z()) {
+                best = Some(pk);
+            }
+        }
+        let b = best.unwrap();
+        let second = peaks
+            .iter()
+            .filter(|q| ((q.mx - b.mx).powi(2) + (q.my - b.my).powi(2)).sqrt() * lc >= 2000.0)
+            .map(|q| q.z())
+            .fold(f32::MIN, f32::max);
+        let err = ((b.mx - tc.0).powi(2) + (b.my - tc.1).powi(2)).sqrt() * lc;
+        line.push_str(&format!("{name}: tz {tz:.2} fz {fz:.2} r {:.2} err {err:.0} | ", b.z() / second.max(2.0)));
+    }
+    eprintln!("TUNE {line}");
+}
