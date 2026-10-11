@@ -16,18 +16,19 @@
 //! the ground distance (haversine) to the truth's lat/lon gives the median,
 //! 90th percentile and maximum. No single homography fits the folded sheet:
 //! the best one over the control points is off by 37 m median, 66 m p90 and
-//! 181 m max (`homography_floor_m`).
+//! 181 m max (`homography_floor_m`), so the bounds here sit just above that
+//! floor; a warp for the folds (`warp` in the response) is what goes below it.
 //!
 //! Run with `cargo test --release --test realphoto -- --nocapture`;
-//! `realphoto_report` (ignored) prints the whole table and
-//! `dump_realphoto_debug` (ignored) writes debug images to `$PHOTO_DUMP`.
+//! `realphoto_report` (ignored) prints the table of every path and quad, and
+//! `realphoto_dump` (ignored) writes debug images to `$PHOTO_DUMP`.
 
 mod common;
 use common::fixture_dir;
 use mapme_core::contour::{normalize_illumination, photo_mask};
 use mapme_core::geo::{haversine_m, latlon_to_merc, merc_to_latlon, Homography, LatLon};
 use mapme_core::georef::Session;
-use mapme_core::grid::{detect_lines_photo, GridLine, LineAxis};
+use mapme_core::grid::{detect_lines_photo, georeference_from_grid_with, GridLine, GridOptions, GridResult, LineAxis};
 use mapme_core::image::Rgb8;
 use mapme_core::labels::OcrObservation;
 use serde_json::{json, Value};
@@ -63,18 +64,30 @@ struct PhotoOcr {
     confidence: f32,
 }
 
+/// A printed graticule line traced in the photo.
+struct TruthLine {
+    axis: LineAxis,
+    /// Latitude (horizontal lines) or longitude (vertical lines).
+    value: f64,
+    points: Vec<Pt>,
+}
+
 struct RealPhoto {
     photo: Rgb8,
     page: [Pt; 4],
-    frame: [Pt; 4],
     cps: Vec<Cp>,
     ocr: Vec<PhotoOcr>,
+    graticule: Vec<TruthLine>,
     floor: Value,
 }
 
 fn quad_of(v: &Value) -> [Pt; 4] {
     let a = v.as_array().expect("quad");
     [0, 1, 2, 3].map(|i| (a[i][0].as_f64().unwrap(), a[i][1].as_f64().unwrap()))
+}
+
+fn json_file(name: &str) -> Value {
+    serde_json::from_slice(&std::fs::read(photo_dir().join(name)).unwrap()).unwrap()
 }
 
 fn real() -> &'static RealPhoto {
@@ -86,7 +99,7 @@ fn real() -> &'static RealPhoto {
         let info = dec.info().unwrap();
         assert_eq!(info.pixel_format, jpeg_decoder::PixelFormat::RGB24);
         let photo = Rgb8::from_rgb(info.width as usize, info.height as usize, px).unwrap();
-        let truth: Value = serde_json::from_slice(&std::fs::read(photo_dir().join("truth.json")).unwrap()).unwrap();
+        let truth = json_file("truth.json");
         let cps = truth["control_points"]
             .as_array()
             .unwrap()
@@ -98,8 +111,7 @@ fn real() -> &'static RealPhoto {
                 lon: c["lon"].as_f64().unwrap(),
             })
             .collect();
-        let ocr: Value = serde_json::from_slice(&std::fs::read(photo_dir().join("ocr.json")).unwrap()).unwrap();
-        let ocr = ocr["observations"]
+        let ocr = json_file("ocr.json")["observations"]
             .as_array()
             .unwrap()
             .iter()
@@ -109,11 +121,30 @@ fn real() -> &'static RealPhoto {
                 confidence: o["confidence"].as_f64().unwrap_or(0.5) as f32,
             })
             .collect();
+        let lines = |key: &str, value: &str, axis: LineAxis| -> Vec<TruthLine> {
+            truth["graticule"][key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|l| TruthLine {
+                    axis,
+                    value: l[value].as_f64().unwrap(),
+                    points: l["points"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|p| (p[0].as_f64().unwrap(), p[1].as_f64().unwrap()))
+                        .collect(),
+                })
+                .collect()
+        };
+        let mut graticule = lines("lat_lines", "lat", LineAxis::Horizontal);
+        graticule.extend(lines("lon_lines", "lon", LineAxis::Vertical));
         RealPhoto {
             page: quad_of(&truth["page_quad"]),
-            frame: quad_of(&truth["frame_quad"]),
             cps,
             ocr,
+            graticule,
             floor: truth["homography_floor_m"].clone(),
             photo,
         }
@@ -138,30 +169,33 @@ fn perturbed(q: &[Pt; 4], frac: f64, diag: f64) -> [Pt; 4] {
 
 /// The photo flattened by a page quad.
 struct Flat {
+    frac: f64,
     image: Rgb8,
-    /// Flattened pixel → photo pixel.
-    to_photo: Homography,
     /// Photo pixel → flattened pixel.
     from_photo: Homography,
 }
 
-/// Flatten like a document scanner (CIPerspectiveCorrection): output size
-/// from the longer of each pair of opposite edges.
-fn flatten(photo: &Rgb8, quad: &[Pt; 4]) -> Flat {
+/// The photo flattened like a document scanner (CIPerspectiveCorrection)
+/// by the page quad perturbed by `frac`: output size from the longer of
+/// each pair of opposite edges.
+fn flat(frac: f64) -> Flat {
+    let r = real();
+    let quad = perturbed(&r.page, frac, (r.photo.w as f64).hypot(r.photo.h as f64));
     let len = |a: Pt, b: Pt| (a.0 - b.0).hypot(a.1 - b.1);
     let w = len(quad[0], quad[1]).max(len(quad[3], quad[2])).round();
     let h = len(quad[0], quad[3]).max(len(quad[1], quad[2])).round();
     let src = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)];
-    let to_photo = Homography::fit(&src, quad).expect("quad homography");
-    let image = mapme_core::image::warp_perspective(photo, &to_photo, w as usize, h as usize, [0, 0, 0]);
-    Flat { image, from_photo: to_photo.inverse().expect("inverse"), to_photo }
+    let to_photo = Homography::fit(&src, &quad).expect("quad homography");
+    let image = mapme_core::image::warp_perspective(&r.photo, &to_photo, w as usize, h as usize, [0, 0, 0]);
+    Flat { frac, image, from_photo: to_photo.inverse().expect("inverse") }
 }
 
 impl Flat {
     /// The photo OCR moved into the flattened image (bounding box of each
     /// transformed quad).
-    fn ocr(&self, r: &RealPhoto) -> Vec<OcrObservation> {
-        r.ocr
+    fn ocr(&self) -> Vec<OcrObservation> {
+        real()
+            .ocr
             .iter()
             .map(|o| {
                 let pts = o.quad.map(|(x, y)| self.from_photo.apply(x, y));
@@ -176,8 +210,9 @@ impl Flat {
 
     /// Ground errors (metres) of a flattened-pixel → Mercator model at every
     /// control point.
-    fn errors(&self, r: &RealPhoto, model: &dyn Fn(f64, f64) -> Pt) -> Vec<f64> {
-        r.cps
+    fn errors(&self, model: &dyn Fn(f64, f64) -> Pt) -> Vec<f64> {
+        real()
+            .cps
             .iter()
             .map(|c| {
                 let (u, v) = self.from_photo.apply(c.x, c.y);
@@ -186,6 +221,14 @@ impl Flat {
                 haversine_m(LatLon::new(lat, lon), LatLon::new(c.lat, c.lon))
             })
             .collect()
+    }
+
+    fn label(&self) -> String {
+        if self.frac == 0.0 {
+            "page quad".into()
+        } else {
+            format!("quad {} {:.1} %", if self.frac > 0.0 { "in" } else { "out" }, self.frac.abs() * 100.0)
+        }
     }
 }
 
@@ -197,10 +240,8 @@ struct Stats {
 }
 
 fn stats(mut e: Vec<f64>) -> Stats {
+    assert!(!e.is_empty());
     e.sort_by(|a, b| a.total_cmp(b));
-    if e.is_empty() {
-        return Stats { median: f64::NAN, p90: f64::NAN, max: f64::NAN };
-    }
     let q = |p: f64| e[((e.len() - 1) as f64 * p).round() as usize];
     Stats { median: q(0.5), p90: q(0.9), max: *e.last().unwrap() }
 }
@@ -233,25 +274,13 @@ fn homography(r: &Value) -> Option<Homography> {
     Some(Homography { m: m.try_into().ok()? })
 }
 
-/// A located response's ground errors at the control points.
-fn response_stats(f: &Flat, r: &Value) -> Option<Stats> {
-    let h = homography(r)?;
-    Some(stats(f.errors(real(), &|x, y| h.apply(x, y))))
-}
-
 /// Quad perturbations exercised (fraction of the photo diagonal).
 const PERTURBATIONS: [f64; 5] = [0.0, 0.005, -0.005, 0.01, -0.01];
 
-fn label(frac: f64) -> String {
-    if frac == 0.0 {
-        "page quad".into()
-    } else {
-        format!("quad {} {:.1} %", if frac > 0.0 { "in" } else { "out" }, frac.abs() * 100.0)
-    }
-}
-
 /// A point inside the map (the GPS of a user standing on the sheet).
 const ON_MAP: (f64, f64) = (-25.8405, 27.3920);
+/// About 45 km west of the map, outside the default 20 km search radius.
+const FAR: (f64, f64) = (-25.8405, 26.9420);
 /// Map centre.
 const CENTER: (f64, f64) = (-25.8499, 27.4000);
 
@@ -259,53 +288,113 @@ fn gps(p: (f64, f64)) -> Value {
     json!({"lat": p.0, "lon": p.1, "accuracy_m": 10.0})
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Path {
+    /// Grid labels (OCR) and lines, GPS at the map centre.
+    Grid,
+    /// Contours against the DEM, GPS on the map.
+    Contours,
+    /// Contours with a GPS fix far from the map.
+    Far,
+}
+
+impl Path {
+    fn request(self, f: &Flat) -> Value {
+        match self {
+            Path::Grid => json!({"gps": gps(CENTER), "ocr": f.ocr(), "photo": true}),
+            Path::Contours => json!({"methods": ["contours"], "gps": gps(ON_MAP), "photo": true}),
+            Path::Far => json!({"methods": ["contours"], "gps": gps(FAR), "photo": true}),
+        }
+    }
+}
+
+/// One georeference of a flattened photo, scored against the truth.
 struct Outcome {
+    path: Path,
+    quad: String,
     r: Value,
+    /// Ground errors of a located response.
     stats: Option<Stats>,
     core_s: f64,
     rounds: usize,
 }
 
-fn run(f: &Flat, req: &Value) -> Outcome {
+impl Outcome {
+    fn status(&self) -> &str {
+        self.r["status"].as_str().unwrap_or("?")
+    }
+
+    fn confidence(&self) -> f64 {
+        self.r["confidence"].as_f64().unwrap_or(0.0)
+    }
+
+    fn row(&self) -> String {
+        let s = self.stats.unwrap_or(Stats { median: f64::NAN, p90: f64::NAN, max: f64::NAN });
+        let model = if self.r["diagnostics"]["refined"]["projective"] == true
+            || self.r["diagnostics"]["grid"]["model"] == "homography"
+        {
+            "homography"
+        } else if self.status() == "ok" {
+            "affine"
+        } else {
+            "-"
+        };
+        format!(
+            "{:8} {:15} {:6} {:9} {:10} conf {:4} | median {:5.1} p90 {:5.1} max {:5.1} m | {:5.0} ms, {} calls",
+            format!("{:?}", self.path).to_lowercase(),
+            self.quad,
+            self.status(),
+            self.r["method"].as_str().unwrap_or("-"),
+            model,
+            self.r["confidence"].as_f64().map_or("-".into(), |c| format!("{c:.2}")),
+            s.median,
+            s.p90,
+            s.max,
+            self.core_s * 1e3,
+            self.rounds,
+        )
+    }
+}
+
+fn run(path: Path, f: &Flat) -> Outcome {
     let t = Instant::now();
     let s = Session::new(f.image.clone());
     let t_new = t.elapsed().as_secs_f64();
-    let (r, rounds, core_s) = run_loop(&s, req);
-    let stats = if r["status"] == "ok" { response_stats(f, &r) } else { None };
-    Outcome { stats, r, core_s: core_s + t_new, rounds }
+    let (r, rounds, core_s) = run_loop(&s, &path.request(f));
+    let stats = (r["status"] == "ok").then(|| homography(&r)).flatten().map(|h| stats(f.errors(&|x, y| h.apply(x, y))));
+    Outcome { path, quad: f.label(), r, stats, core_s: core_s + t_new, rounds }
 }
 
-fn grid_request(f: &Flat) -> Value {
-    json!({"gps": gps(CENTER), "ocr": f.ocr(real()), "photo": true})
+/// Every quad perturbation through `path`; prints the table and returns it.
+fn run_all(path: Path, fracs: &[f64]) -> Vec<Outcome> {
+    let _g = serial();
+    let out: Vec<Outcome> = fracs.iter().map(|&frac| run(path, &flat(frac))).collect();
+    for o in &out {
+        eprintln!("[real photo] {}", o.row());
+    }
+    out
 }
 
-fn contour_request(at: (f64, f64)) -> Value {
-    json!({"methods": ["contours"], "gps": gps(at), "photo": true})
+/// Check every outcome; all failures are reported together.
+fn check(out: &[Outcome], ok: impl Fn(&Outcome) -> Result<(), String>) {
+    let bad: Vec<String> =
+        out.iter().filter_map(|o| ok(o).err().map(|e| format!("{}: {e}\n  {}", o.quad, o.row()))).collect();
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
-fn report(path: &str, frac: f64, o: &Outcome) {
-    let s = o.stats.unwrap_or(Stats { median: f64::NAN, p90: f64::NAN, max: f64::NAN });
-    eprintln!(
-        "[real photo] {path:8} {:16} {:6} {:9} conf {:5} median {:6.1} p90 {:6.1} max {:6.1} m  {:5.0} ms ({} calls) \
-         model {} proj {}",
-        label(frac),
-        o.r["status"].as_str().unwrap_or("?"),
-        o.r["method"].as_str().unwrap_or("-"),
-        o.r["confidence"].as_f64().map_or("-".into(), |c| format!("{c:.2}")),
-        s.median,
-        s.p90,
-        s.max,
-        o.core_s * 1e3,
-        o.rounds,
-        o.r["diagnostics"]["grid"]["model"],
-        o.r["diagnostics"]["refined"]["projective"],
-    );
-}
-
-fn flat(frac: f64) -> Flat {
-    let r = real();
-    let diag = (r.photo.w as f64).hypot(r.photo.h as f64);
-    flatten(&r.photo, &perturbed(&r.page, frac, diag))
+/// A located response within `median` / `p90` / `max` metres.
+fn located(o: &Outcome, method: &str, min_conf: f64, bounds: Stats) -> Result<(), String> {
+    if o.status() != "ok" || o.r["method"] != method {
+        return Err(format!("expected {method}: {}", o.r["message"]));
+    }
+    let s = o.stats.ok_or("no transform")?;
+    if s.median > bounds.median || s.p90 > bounds.p90 || s.max > bounds.max {
+        return Err(format!("errors {s:?} exceed {bounds:?}"));
+    }
+    if o.confidence() < min_conf {
+        return Err(format!("confidence {} < {min_conf}", o.confidence()));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -321,291 +410,187 @@ fn realphoto_metric_matches_homography_floor() {
     let src: Vec<Pt> = r.cps.iter().map(|c| f.from_photo.apply(c.x, c.y)).collect();
     let dst: Vec<Pt> = r.cps.iter().map(|c| latlon_to_merc(c.lat, c.lon)).collect();
     let h = Homography::fit(&src, &dst).unwrap();
-    let s = stats(f.errors(r, &|x, y| h.apply(x, y)));
+    let s = stats(f.errors(&|x, y| h.apply(x, y)));
     eprintln!("[real photo] best homography: {s:?}; fixture floor {}", r.floor);
     assert!((s.median - r.floor["median"].as_f64().unwrap()).abs() < 8.0, "{s:?}");
     assert!(s.max < 1.3 * r.floor["max"].as_f64().unwrap(), "{s:?}");
     assert_eq!(r.cps.len(), 670);
-    assert!(r.frame.iter().all(|&(x, y)| x > 0.0 && y > 0.0));
+    assert_eq!(r.graticule.len(), 8);
 }
 
 // ---------------------------------------------------------------------------
-// Report (all paths × quad perturbations)
+// Grid path
 // ---------------------------------------------------------------------------
 
+/// Grid labels + lines: a homography through the 15 graticule intersections
+/// (5 latitude × 3 longitude lines), at the single-homography floor.
+#[test]
+fn realphoto_grid() {
+    let out = run_all(Path::Grid, &PERTURBATIONS);
+    check(&out, |o| {
+        located(o, "grid", 0.85, Stats { median: 45.0, p90: 120.0, max: 400.0 })?;
+        let g = &o.r["diagnostics"]["grid"];
+        if g["model"] != "homography" || g["n_gcps"].as_u64() < Some(12) {
+            return Err(format!("grid fit {g}"));
+        }
+        Ok(())
+    });
+}
+
+/// The grid fit of the flattened photo, as the session computes it.
+fn grid_fit(f: &Flat) -> (Vec<GridLine>, Option<GridResult>) {
+    let lines = detect_lines_photo(&normalize_illumination(&f.image));
+    let opts = GridOptions { photo: true };
+    let g = georeference_from_grid_with(&f.image, &lines, &f.ocr(), Some(LatLon::new(CENTER.0, CENTER.1)), &opts);
+    (lines, g)
+}
+
+/// (Position along the line, distance) from the printed graticule line to
+/// an identified line at the truth polyline's points (flattened pixels).
+fn line_offsets(f: &Flat, truth: &TruthLine, line: &GridLine) -> Vec<(f64, f64)> {
+    truth
+        .points
+        .iter()
+        .map(|&(x, y)| {
+            let (u, v) = f.from_photo.apply(x, y);
+            match truth.axis {
+                LineAxis::Horizontal => (u, (line.pos_at(u) - v).abs()),
+                LineAxis::Vertical => (v, (line.pos_at(v) - u).abs()),
+            }
+        })
+        .collect()
+}
+
+/// The grid fit identifies all 8 printed graticule lines with their right
+/// values and follows them along the folded paper: bent by up to ~14 px,
+/// within ~1 px of the printed line (median) and a few pixels where a fold
+/// creases it sharply.
+#[test]
+fn realphoto_grid_lines_follow_the_graticule() {
+    let _g = serial();
+    let f = flat(0.0);
+    let (_, g) = grid_fit(&f);
+    let g = g.expect("grid fit");
+    assert_eq!(g.utm_zone, None);
+    assert_eq!(g.lines.len(), 8, "{:?}", g.lines.iter().map(|l| l.value).collect::<Vec<_>>());
+    let mut bad = Vec::new();
+    for l in &g.lines {
+        let t = real()
+            .graticule
+            .iter()
+            .find(|t| t.axis == l.line.axis && (t.value - l.value).abs() < 1e-6)
+            .unwrap_or_else(|| panic!("{:?} line at {} is not on the graticule", l.line.axis, l.value));
+        let off = line_offsets(&f, t, &l.line);
+        let s = stats(off.iter().map(|o| o.1).collect());
+        let bend = l.line.bend.map_or(0.0, |b| b.max_abs());
+        let worst = off.iter().fold((0.0, 0.0), |w, &o| if o.1 > w.1 { o } else { w });
+        eprintln!(
+            "[real photo] {:?} {:.4}: labelled {}, bend {bend:4.1} px, seen {:?}, off the printed line by median \
+             {:.1} p90 {:.1} max {:.1} px (at {:.0})",
+            l.line.axis,
+            l.value,
+            l.labelled,
+            l.line.bend.map(|b| (b.lo.round(), b.hi.round())),
+            s.median,
+            s.p90,
+            s.max,
+            worst.0
+        );
+        if !(s.median < 2.0 && s.p90 < 10.0) {
+            bad.push(format!("{:?} {}: {s:?}", l.line.axis, l.value));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:?}");
+    let max_bend = g.lines.iter().filter_map(|l| l.line.bend).map(|b| b.max_abs()).fold(0.0, f64::max);
+    assert!(max_bend > 5.0, "the folded sheet's grid lines should bend: {max_bend}");
+}
+
+// ---------------------------------------------------------------------------
+// Contour path
+// ---------------------------------------------------------------------------
+
+/// Contours against the DEM from a GPS fix on the map: the coarse search
+/// finds the sheet, the refinement ends in a homography at the floor.
+#[test]
+fn realphoto_contours() {
+    let out = run_all(Path::Contours, &PERTURBATIONS);
+    check(&out, |o| {
+        located(o, "contours", 0.7, Stats { median: 55.0, p90: 140.0, max: 450.0 })?;
+        if o.r["diagnostics"]["refined"]["projective"] != true {
+            return Err(format!("not projective: {}", o.r["diagnostics"]["refined"]));
+        }
+        Ok(())
+    });
+}
+
+/// A GPS fix 45 km away: the map is outside the search area, so no
+/// confident answer.
+#[test]
+fn realphoto_far_gps_fails_honestly() {
+    let out = run_all(Path::Far, &[0.0, -0.01]);
+    check(&out, |o| match o.status() {
+        "failed" => Ok(()),
+        _ if o.confidence() < 0.5 => Ok(()),
+        s => Err(format!("{s} with confidence {}", o.confidence())),
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Report and debug images
+// ---------------------------------------------------------------------------
+
+/// Every path × quad perturbation as one table (`REAL_PATHS=grid,contours,far`
+/// picks paths, `REAL_VERBOSE=1` adds each response's message and diagnostics).
 #[test]
 #[ignore]
 fn realphoto_report() {
-    let _g = serial();
-    let only: Option<f64> = std::env::var("REAL_FRAC").ok().and_then(|v| v.parse().ok());
-    let paths: Vec<String> =
-        std::env::var("REAL_PATHS").map(|v| v.split(',').map(str::to_string).collect()).unwrap_or_else(|_| {
-            vec!["grid".into(), "contours".into()]
-        });
-    for frac in PERTURBATIONS {
-        if only.is_some_and(|o| o != frac) {
+    let paths = std::env::var("REAL_PATHS").unwrap_or_else(|_| "grid,contours,far".into());
+    let verbose = std::env::var("REAL_VERBOSE").is_ok();
+    let fracs: Vec<f64> = std::env::var("REAL_FRACS")
+        .map(|v| v.split(',').filter_map(|f| f.parse().ok()).collect())
+        .unwrap_or_else(|_| PERTURBATIONS.to_vec());
+    eprintln!("[real photo] flat-model floor (best single homography): {}", real().floor);
+    for path in [Path::Grid, Path::Contours, Path::Far] {
+        if !paths.contains(&format!("{path:?}").to_lowercase()) {
             continue;
         }
-        let f = flat(frac);
-        for p in &paths {
-            let req = match p.as_str() {
-                "grid" => grid_request(&f),
-                "contours" => contour_request(ON_MAP),
-                "far" => contour_request((ON_MAP.0, ON_MAP.1 - 0.45)),
-                _ => continue,
-            };
-            let o = run(&f, &req);
-            report(p, frac, &o);
-            if let Ok(dir) = std::env::var("PHOTO_DUMP") {
-                let m = f.to_photo.m;
-                let out = json!({"response": o.r, "rect_to_photo": m, "w": f.image.w, "h": f.image.h});
-                std::fs::write(format!("{dir}/resp_{p}_{frac}.json"), out.to_string()).unwrap();
-            }
-            if std::env::var("REAL_VERBOSE").is_ok() {
-                eprintln!("    message: {}\n    timings: {}\n    diagnostics: {}", o.r["message"], o.r["timings_ms"], o.r["diagnostics"]);
-                if p == "grid" {
-                    print_gcps(&f);
-                }
-            }
+        for o in run_all(path, &fracs).iter().filter(|_| verbose) {
+            eprintln!("{}\n    {}\n    {}\n    {}", o.row(), o.r["message"], o.r["timings_ms"], o.r["diagnostics"]);
         }
     }
 }
 
-/// The grid fit's GCPs against the truth (photo pixels of the graticule
-/// intersections).
-fn print_gcps(f: &Flat) {
-    let r = real();
-    let norm = normalize_illumination(&f.image);
-    let lines = detect_lines_photo(&norm);
-    let g = mapme_core::grid::georeference_from_grid_with(
-        &f.image,
-        &lines,
-        &f.ocr(r),
-        Some(LatLon::new(CENTER.0, CENTER.1)),
-        &mapme_core::grid::GridOptions { photo: true },
-    );
-    for o in f.ocr(r) {
-        if mapme_core::labels::parse_coordinate(&o.text).is_none() {
-            continue;
-        }
-        let (cx, cy) = o.center();
-        let near: Vec<String> = lines
-            .iter()
-            .map(|l| match l.axis {
-                LineAxis::Horizontal => (l.pos_at(cx) - cy, "h"),
-                LineAxis::Vertical => (l.pos_at(cy) - cx, "v"),
-            })
-            .filter(|d| d.0.abs() < 120.0)
-            .map(|d| format!("{}{:+.0}", d.1, d.0))
-            .collect();
-        eprintln!("    label {:14} centre ({cx:6.0}, {cy:6.0}) size {:.0}x{:.0} lines {near:?}", o.text, o.bbox[2], o.bbox[3]);
-    }
-    let Some(g) = g else {
-        eprintln!("    no grid fit");
-        return;
-    };
-    let truth: Value = serde_json::from_slice(&std::fs::read(photo_dir().join("truth.json")).unwrap()).unwrap();
-    let inter = truth["graticule"]["intersections"].as_array().unwrap();
-    for p in &g.gcps {
-        let t = inter.iter().find(|i| {
-            (i["lat"].as_f64().unwrap() - p.lat).abs() < 1e-6 && (i["lon"].as_f64().unwrap() - p.lon).abs() < 1e-6
-        });
-        let d = t.map(|t| {
-            let (x, y) = f.from_photo.apply(t["x"].as_f64().unwrap(), t["y"].as_f64().unwrap());
-            (x - p.x, y - p.y)
-        });
-        eprintln!("    gcp ({:7.1}, {:7.1}) {:.5} {:.5}  vs truth {:?}", p.x, p.y, p.lat, p.lon, d.map(|d| (d.0.round(), d.1.round())));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Debug images
-// ---------------------------------------------------------------------------
-
-fn write_png(path: &str, w: usize, h: usize, rgb: &[u8]) {
+fn write_png(path: &str, img: &Rgb8) {
     let f = std::fs::File::create(path).unwrap();
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w as u32, h as u32);
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(f), img.w as u32, img.h as u32);
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
-    enc.write_header().unwrap().write_image_data(rgb).unwrap();
+    enc.write_header().unwrap().write_image_data(&img.data).unwrap();
 }
 
-fn draw_line(img: &mut Rgb8, l: &GridLine, col: [u8; 3]) {
-    let (w, h) = (img.w, img.h);
-    match l.axis {
-        LineAxis::Horizontal => {
-            for x in 0..w {
-                let y = l.pos_at(x as f64).round();
-                if y >= 0.0 && (y as usize) < h {
-                    let i = (y as usize * w + x) * 3;
-                    img.data[i..i + 3].copy_from_slice(&col);
-                }
-            }
-        }
-        LineAxis::Vertical => {
-            for y in 0..h {
-                let x = l.pos_at(y as f64).round();
-                if x >= 0.0 && (x as usize) < w {
-                    let i = (y * w + x as usize) * 3;
-                    img.data[i..i + 3].copy_from_slice(&col);
-                }
-            }
-        }
-    }
-}
-
-/// Contour diagnostics: the contour samples (as `real_samples.json`, for
-/// checking against the truth field offline) and the refinement cost of the
-/// best homography over the control points vs the pipeline's result.
+/// Debug images of the flattened photo (`REAL_FRAC`, default 0) in
+/// `$PHOTO_DUMP` (default the temp dir): the normalised image, the contour
+/// mask, its traced segments and the identified grid lines (red, others
+/// blue).
 #[test]
 #[ignore]
-fn diag_realphoto_contours() {
-    use mapme_core::georef::ContourProducts;
-    use mapme_core::refine::{evaluate_prepared_homography, refine_dem_box, PreparedDem};
+fn realphoto_dump() {
     let frac: f64 = std::env::var("REAL_FRAC").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-    let dir = std::env::var("PHOTO_DUMP").unwrap_or_else(|_| "/tmp".into());
-    let r = real();
+    let dir = std::env::var("PHOTO_DUMP").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    let out = |name: &str| dir.join(name).to_string_lossy().to_string();
     let f = flat(frac);
     let norm = normalize_illumination(&f.image);
-    let t = Instant::now();
-    let prod = ContourProducts::compute_with(&norm, None, true);
-    eprintln!(
-        "products {} ms: {} segments {} samples, mask {:.4}",
-        t.elapsed().as_millis(),
-        prod.samples.n_segs,
-        prod.samples.len(),
-        prod.mask_fraction
-    );
-    let js: Vec<[f32; 3]> = prod.samples.pts.iter().zip(&prod.samples.seg).map(|(p, &s)| [p[0], p[1], s as f32]).collect();
-    std::fs::write(format!("{dir}/real_samples.json"), serde_json::to_string(&js).unwrap()).unwrap();
-    let src: Vec<Pt> = r.cps.iter().map(|c| f.from_photo.apply(c.x, c.y)).collect();
-    let dst: Vec<Pt> = r.cps.iter().map(|c| latlon_to_merc(c.lat, c.lon)).collect();
-    let floor = Homography::fit(&src, &dst).unwrap();
-    let (w, h) = (f.image.w, f.image.h);
-    let bbox = refine_dem_box(&floor.local_affine(w as f64 / 2.0, h as f64 / 2.0), w, h);
-    let store = common::dem_store();
-    let dem = store.mosaic(13, &bbox);
-    let prep = PreparedDem::new_cropped(&dem, &bbox);
-    let show = |name: &str, hm: &Homography| {
-        let e = evaluate_prepared_homography(&prod.samples, &prep, hm);
-        let s = stats(f.errors(r, &|x, y| hm.apply(x, y)));
-        eprintln!(
-            "{name:10} cost {:.2} m, seg std {:.2}, inliers {:.3}, expl {:.4}, snr {:.2}; error median {:.1} p90 {:.1} max {:.1}",
-            e.cost_m, e.median_seg_std_m, e.inlier_fraction, e.explained_variance, e.interval_snr, s.median, s.p90, s.max
-        );
-    };
-    show("floor", &floor);
-    let o = run(&f, &contour_request(ON_MAP));
-    if let Some(hm) = homography(&o.r) {
-        show("pipeline", &hm);
-    }
-    let o = run(&f, &grid_request(&f));
-    if let Some(hm) = homography(&o.r) {
-        show("grid", &hm);
-    }
-}
-
-/// Debug aid: grid lines and the grid fit on the synthetic photo of
-/// tests/photo.rs (corner error `SYNTH_ERR`, default 0.005).
-#[test]
-#[ignore]
-fn diag_synthetic_grid() {
-    let err: f64 = std::env::var("SYNTH_ERR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.005);
-    let map = common::load_map();
-    let cam = common::photo_camera(&map);
-    let photo = common::synth_photo(&map, &cam, 7);
-    let c = common::photo_case(&map, &photo, &cam, err);
-    let norm = normalize_illumination(&c.image);
-    let t = Instant::now();
-    let lines = detect_lines_photo(&norm);
-    eprintln!("{}x{}: {} lines in {} ms", c.image.w, c.image.h, lines.len(), t.elapsed().as_millis());
-    for l in &lines {
-        let ext = if l.axis == LineAxis::Horizontal { norm.w as f64 } else { norm.h as f64 };
-        eprintln!(
-            "  {:?} pos(mid) {:.1} tilt {:.2} cov {:.2} bend {:.1} seen {:?}",
-            l.axis,
-            l.pos_at(ext / 2.0),
-            l.tilt_deg(),
-            l.coverage,
-            l.bend.map_or(0.0, |b| b.max_abs()),
-            l.bend.map(|b| (b.lo.round(), b.hi.round()))
-        );
-    }
-    let g = mapme_core::grid::georeference_from_grid_with(
-        &c.image,
-        &lines,
-        &c.ocr(),
-        Some(LatLon::new(CENTER.0, CENTER.1)),
-        &mapme_core::grid::GridOptions { photo: true },
-    );
-    match g {
-        Some(g) => eprintln!(
-            "grid {:?} rms {:.1} lat {} lon {} gcps {} max err {:.1} m",
-            g.method,
-            g.rms_m,
-            g.n_lat,
-            g.n_lon,
-            g.gcps.len(),
-            c.max_error_m(&g.transform)
-        ),
-        None => eprintln!("no grid fit"),
-    }
-    let (mask, _) = photo_mask(&norm, None);
-    let (min_len, step) = mapme_core::skeleton::default_sampling(norm.w, norm.h);
-    let segs = mapme_core::skeleton::contour_samples(&mask, min_len, step).n_segs;
-    eprintln!("mask {:.4}, {segs} segments (min_len {min_len})", mask.fraction());
-    if let Ok(dir) = std::env::var("PHOTO_DUMP") {
-        let m: Vec<u8> = mask.data.iter().flat_map(|&v| if v != 0 { [0u8; 3] } else { [255u8; 3] }).collect();
-        write_png(&format!("{dir}/synth_mask.png"), mask.w, mask.h, &m);
-        write_png(&format!("{dir}/synth_norm.png"), norm.w, norm.h, &norm.data);
-        let segs = mapme_core::skeleton::contour_segments(&mask, min_len);
-        let mut sk = Rgb8 { w: norm.w, h: norm.h, data: vec![255; norm.w * norm.h * 3] };
-        for (si, s) in segs.iter().enumerate() {
-            let col = [(si * 97 % 200) as u8, (si * 57 % 200) as u8, (si * 31 % 200) as u8];
-            for &(x, y) in s {
-                let i = (y as usize * sk.w + x as usize) * 3;
-                sk.data[i..i + 3].copy_from_slice(&col);
-            }
-        }
-        write_png(&format!("{dir}/synth_segments.png"), sk.w, sk.h, &sk.data);
-        let cm = mapme_core::contour::colour_line_mask(&norm, &mapme_core::contour::default_model());
-        let cs = mapme_core::skeleton::contour_segments(&cm, min_len);
-        eprintln!("colour mask {:.4}: {} segments", cm.fraction(), cs.len());
-        let mut sk = Rgb8 { w: norm.w, h: norm.h, data: vec![255; norm.w * norm.h * 3] };
-        for (si, s) in cs.iter().enumerate() {
-            let col = [(si * 97 % 200) as u8, (si * 57 % 200) as u8, (si * 31 % 200) as u8];
-            for &(x, y) in s {
-                let i = (y as usize * sk.w + x as usize) * 3;
-                sk.data[i..i + 3].copy_from_slice(&col);
-            }
-        }
-        write_png(&format!("{dir}/synth_segments_colour.png"), sk.w, sk.h, &sk.data);
-    }
-}
-
-/// Normalised photo, contour mask and detected grid lines of the flattened
-/// photo as PNGs in `$PHOTO_DUMP` (default /tmp). `REAL_FRAC` picks the quad.
-#[test]
-#[ignore]
-fn dump_realphoto_debug() {
-    let frac: f64 = std::env::var("REAL_FRAC").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-    let dir = std::env::var("PHOTO_DUMP").unwrap_or_else(|_| "/tmp".into());
-    let f = flat(frac);
-    write_png(&format!("{dir}/real_flat.png"), f.image.w, f.image.h, &f.image.data);
-    let t = Instant::now();
-    let norm = normalize_illumination(&f.image);
-    eprintln!("normalise {} ms", t.elapsed().as_millis());
-    write_png(&format!("{dir}/real_norm.png"), norm.w, norm.h, &norm.data);
-    let t = Instant::now();
+    write_png(&out("real_norm.png"), &norm);
     let (mask, model) = photo_mask(&norm, None);
-    eprintln!("mask {} ms, model {model:?}, fraction {:.4}", t.elapsed().as_millis(), mask.fraction());
-    let m: Vec<u8> = mask.data.iter().flat_map(|&v| if v != 0 { [0u8; 3] } else { [255u8; 3] }).collect();
-    write_png(&format!("{dir}/real_mask.png"), mask.w, mask.h, &m);
-    let (min_len, step) = mapme_core::skeleton::default_sampling(norm.w, norm.h);
+    let blank = || Rgb8 { w: norm.w, h: norm.h, data: vec![255; norm.w * norm.h * 3] };
+    let mut m = blank();
+    for (i, _) in mask.data.iter().enumerate().filter(|(_, &v)| v != 0) {
+        m.data[i * 3..i * 3 + 3].fill(0);
+    }
+    write_png(&out("real_mask.png"), &m);
+    let (min_len, _) = mapme_core::skeleton::default_sampling(norm.w, norm.h);
     let segs = mapme_core::skeleton::contour_segments(&mask, min_len);
-    let samples = mapme_core::skeleton::contour_samples(&mask, min_len, step);
-    eprintln!("{} segments, {} samples (min_len {min_len}, step {step})", segs.len(), samples.len());
-    let mut sk = Rgb8 { w: norm.w, h: norm.h, data: vec![255; norm.w * norm.h * 3] };
+    let mut sk = blank();
     for (si, s) in segs.iter().enumerate() {
         let col = [(si * 97 % 200) as u8, (si * 57 % 200) as u8, (si * 31 % 200) as u8];
         for &(x, y) in s {
@@ -613,43 +598,22 @@ fn dump_realphoto_debug() {
             sk.data[i..i + 3].copy_from_slice(&col);
         }
     }
-    write_png(&format!("{dir}/real_segments.png"), sk.w, sk.h, &sk.data);
-    let t = Instant::now();
-    let lines = detect_lines_photo(&norm);
-    eprintln!("lines {} ms: {}", t.elapsed().as_millis(), lines.len());
+    write_png(&out("real_segments.png"), &sk);
+    eprintln!("model {model:?}, mask {:.4}, {} segments (min_len {min_len})", mask.fraction(), segs.len());
+    let (lines, g) = grid_fit(&f);
+    let valued: Vec<GridLine> = g.map(|g| g.lines.iter().map(|l| l.line).collect()).unwrap_or_default();
     let mut li = norm.clone();
-    let mut js = Vec::new();
     for l in &lines {
-        let ext = if l.axis == LineAxis::Horizontal { norm.w as f64 } else { norm.h as f64 };
-        eprintln!(
-            "  {:?} pos(mid) {:.1} tilt {:.2} cov {:.2} bend {:.1} seen {:?}",
-            l.axis,
-            l.pos_at(ext / 2.0),
-            l.tilt_deg(),
-            l.coverage,
-            l.bend.map_or(0.0, |b| b.max_abs()),
-            l.bend.map(|b| (b.lo.round(), b.hi.round()))
-        );
-        draw_line(&mut li, l, [255, 0, 0]);
-        let pts: Vec<Pt> = (0..(ext as usize)).step_by(10).map(|s| l.point_at(s as f64)).collect();
-        js.push(json!({"axis": format!("{:?}", l.axis), "coverage": l.coverage, "points": pts,
-                       "seen": l.bend.map(|b| [b.lo, b.hi])}));
-    }
-    write_png(&format!("{dir}/real_lines.png"), li.w, li.h, &li.data);
-    std::fs::write(format!("{dir}/real_lines.json"), serde_json::to_string(&js).unwrap()).unwrap();
-    for (name, flattened) in [("sharp", false), ("flat", true)] {
-        let pts = mapme_core::grid::photo_scan_points(&norm, flattened);
-        let mut img = Rgb8 { w: norm.w, h: norm.h, data: vec![255; norm.w * norm.h * 3] };
-        for (x, y, fam) in pts {
-            let (x, y) = (x.round() as usize, y.round() as usize);
-            if x < img.w && y < img.h {
-                let i = (y * img.w + x) * 3;
-                let c = if fam == 0 { [200, 0, 0] } else { [0, 0, 200] };
-                for k in 0..3 {
-                    img.data[i + k] = img.data[i + k].min(c[k]);
-                }
+        let col = if valued.contains(l) { [255, 0, 0] } else { [0, 0, 255] };
+        let n = if l.axis == LineAxis::Horizontal { li.w } else { li.h };
+        for s in 0..n {
+            let (x, y) = l.point_at(s as f64);
+            if x >= 0.0 && y >= 0.0 && (x as usize) < li.w && (y as usize) < li.h {
+                let i = (y as usize * li.w + x as usize) * 3;
+                li.data[i..i + 3].copy_from_slice(&col);
             }
         }
-        write_png(&format!("{dir}/real_points_{name}.png"), img.w, img.h, &img.data);
     }
+    write_png(&out("real_lines.png"), &li);
+    eprintln!("{} lines, {} identified; images in {}", lines.len(), valued.len(), dir.display());
 }

@@ -13,9 +13,13 @@
 //!
 //! *Photos* (`GridOptions::photo`, `detect_lines_photo`): lines are found on
 //! a sharpened copy and against their local background, may converge, and
-//! with enough GCPs a homography replaces the affine when it fits clearly
-//! better (the perspective a flattened photo keeps).
+//! are traced knot by knot, so they may bend where the paper does not lie
+//! flat (`GridLine::bend`). Per-axis fits may be projective, and with enough
+//! GCPs a homography replaces the affine when it fits clearly better (the
+//! perspective a flattened photo keeps). `GridResult::lines` returns the
+//! identified lines with their values.
 
+use crate::contour::photo_grey_ink;
 use crate::geo::{
     latlon_to_merc, latlon_to_utm, merc_to_latlon, utm_to_latlon, Affine, Homography, LatLon, Utm, EARTH_RADIUS,
 };
@@ -56,13 +60,13 @@ pub const BEND_KNOTS: usize = 24;
 
 /// How a traced line deviates from its straight chord: offsets across the
 /// line (pixels along image y for horizontal lines, x for vertical ones,
-/// added to the chord's position) at `BEND_KNOTS` evenly spaced knots along
-/// it, interpolated linearly between knots and held constant beyond them.
+/// added to the chord's position) at `BEND_KNOTS` knots spread evenly over
+/// the image (knot k at `s = k·ds` along the line: x for horizontal lines,
+/// y for vertical ones), interpolated linearly between knots and constant
+/// beyond the first and last.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Bend {
-    /// Along-line coordinate (x for horizontal lines, y for vertical ones)
-    /// of the first knot, and the knot spacing (pixels).
-    pub s0: f64,
+    /// Knot spacing (pixels).
     pub ds: f64,
     pub offsets: [f32; BEND_KNOTS],
     /// Along-line range in which the line was actually seen (pixels).
@@ -73,10 +77,10 @@ pub struct Bend {
 impl Bend {
     /// Offset at `s` along the line.
     pub fn offset_at(&self, s: f64) -> f64 {
-        if !(self.ds > 0.0) {
+        if self.ds.is_nan() || self.ds <= 0.0 {
             return 0.0;
         }
-        let u = ((s - self.s0) / self.ds).clamp(0.0, (BEND_KNOTS - 1) as f64);
+        let u = (s / self.ds).clamp(0.0, (BEND_KNOTS - 1) as f64);
         let k = (u.floor() as usize).min(BEND_KNOTS - 2);
         let f = u - k as f64;
         self.offsets[k] as f64 * (1.0 - f) + self.offsets[k + 1] as f64 * f
@@ -105,16 +109,12 @@ impl GridLine {
     /// Position across the line at `s` along it: y at x = s for horizontal
     /// lines, x at y = s for vertical lines (following the bend, if any).
     pub fn pos_at(&self, s: f64) -> f64 {
-        self.chord_pos_at(s) + self.bend.map_or(0.0, |b| b.offset_at(s))
-    }
-
-    /// `pos_at` of the straight chord, ignoring the bend.
-    pub fn chord_pos_at(&self, s: f64) -> f64 {
         let (sn, cs) = self.theta.sin_cos();
-        match self.axis {
+        let chord = match self.axis {
             LineAxis::Horizontal => (self.rho - cs * s) / sn,
             LineAxis::Vertical => (self.rho - sn * s) / cs,
-        }
+        };
+        chord + self.bend.map_or(0.0, |b| b.offset_at(s))
     }
 
     /// Point of the line at `s` along it (image x, y).
@@ -139,16 +139,19 @@ impl GridLine {
         if (self.bend.is_none() && o.bend.is_none()) || self.axis == o.axis {
             return Some(p);
         }
+        // Grid lines are within a few degrees of the image axes, so this
+        // contracts fast.
         let (h, v) = if self.axis == LineAxis::Horizontal { (self, o) } else { (o, self) };
-        let (mut x, mut y) = p;
+        let mut x = p.0;
         for _ in 0..20 {
-            let (nx, ny) = (v.pos_at(h.pos_at(x)), h.pos_at(v.pos_at(h.pos_at(x))));
-            let done = (nx - x).abs() < 1e-4 && (ny - y).abs() < 1e-4;
-            (x, y) = (nx, ny);
+            let nx = v.pos_at(h.pos_at(x));
+            let done = (nx - x).abs() < 1e-4;
+            x = nx;
             if done {
                 break;
             }
         }
+        let y = h.pos_at(x);
         (x.is_finite() && y.is_finite()).then_some((x, y))
     }
 
@@ -188,11 +191,9 @@ const BAND_PX: f64 = 14.0;
 const INLIER_PX: f64 = 1.5;
 /// Parallel lines closer than this are one line (double frame lines, thick borders).
 const MERGE_PX: f64 = 16.0;
-/// Photos: grey ink has at most 1/5 as much colour (max − min channel) as
-/// ink (255 − max channel), and the darkest pixel of a grid-line crossing
-/// at least this much ink (on the Grootkloof photo this keeps 85 % of the
-/// grid-line pixels and 16 % of the contour pixels).
-const PHOTO_INK_PER_CHROMA: u32 = 5;
+/// Photos: the darkest pixel of a grid-line crossing has at least this much
+/// grey ink (`contour::photo_grey_ink`; on the Grootkloof photo this keeps
+/// 85 % of the grid-line pixels and 16 % of the contour pixels).
 const PHOTO_DARK_PEAK: u8 = 60;
 /// A photo line whose median colourfulness (`line_tint`) exceeds this is a
 /// run of contours, not a grey grid line.
@@ -227,11 +228,9 @@ const MAX_GAP: f64 = 0.4;
 enum InkClass {
     /// Black / grey, low saturation.
     Dark,
-    /// Black / grey on a normalised photo (`contour::normalize_illumination`):
-    /// black ink blurred into the white paper stays grey, while brown
-    /// contours keep about twice as much colour per unit of ink and are
-    /// lighter. Contours are dense on photos (a few pixels apart) and would
-    /// otherwise crowd out the grid lines.
+    /// Black / grey on a normalised photo (`contour::photo_grey_ink`):
+    /// contours are dense on photos (a few pixels apart) and, as dark as
+    /// blurred grid lines, would otherwise crowd them out.
     PhotoDark,
     /// Strongly saturated colour (blue or magenta grids).
     Colour,
@@ -278,14 +277,7 @@ fn ink_plane(img: &Rgb8, class: InkClass) -> Vec<u8> {
                         0
                     }
                 }
-                InkClass::PhotoDark => {
-                    let ink = 255 - mx as u32;
-                    if chroma * PHOTO_INK_PER_CHROMA <= ink + 10 {
-                        ink as u8
-                    } else {
-                        0
-                    }
-                }
+                InkClass::PhotoDark => photo_grey_ink([px[0], px[1], px[2]]),
                 InkClass::Colour => {
                     if chroma >= 30 && chroma * 5 >= mx as u32 * 2 {
                         chroma as u8
@@ -426,27 +418,19 @@ fn window_sum(acc: &[u32], r: usize) -> Vec<u32> {
 }
 
 /// A line of one family: `p = p0 + (s − mid)·slope` (s = scan index,
-/// `mid = (n_scans − 1)/2`), plus for traced photo lines the offsets from
-/// that chord at the knots `s_k = k·(n_scans − 1)/(BEND_KNOTS − 1)` and the
-/// range of scans where the line was seen.
+/// `mid = (n_scans − 1)/2`), plus for traced photo lines the bend from that
+/// chord (in scan coordinates, which are the image's along-line pixels).
 #[derive(Debug, Clone, Copy)]
 struct Found {
     p0: f64,
     slope: f64,
     coverage: f64,
-    bend: Option<([f32; BEND_KNOTS], f64, f64)>,
+    bend: Option<Bend>,
 }
 
 impl Found {
-    fn pos(&self, mid: f64, s: f64, n: usize) -> f64 {
-        let chord = self.p0 + (s - mid) * self.slope;
-        match &self.bend {
-            Some((off, _, _)) => {
-                let ds = (n as f64 - 1.0) / (BEND_KNOTS - 1) as f64;
-                chord + Bend { s0: 0.0, ds, offsets: *off, lo: 0.0, hi: 0.0 }.offset_at(s)
-            }
-            None => chord,
-        }
+    fn pos(&self, mid: f64, s: f64) -> f64 {
+        self.p0 + (s - mid) * self.slope + self.bend.map_or(0.0, |b| b.offset_at(s))
     }
 }
 
@@ -501,15 +485,6 @@ fn hough_lines(pts: &ScanPoints, extent: usize, min_cov: f64, photo: bool) -> Ve
         if (lo..hi).all(|j| best[j] < v || (best[j] == v && j >= b)) {
             let t = (best_k[b] as f64 * COARSE_STEP_DEG).to_radians().tan();
             peaks.push((b as f64 - margin as f64, t));
-            if photo && std::env::var("GRID_DEBUG").is_ok() {
-                eprintln!("DBG peak n={n} p0={:.1} t={:.4} v={} thr={}", b as f64 - margin as f64, t, v, thr);
-            }
-        }
-    }
-    if photo && std::env::var("GRID_DEBUG").is_ok() {
-        for &(p0, t0) in &peaks {
-            let f = trace_line(pts, mid, p0, t0);
-            eprintln!("DBG trace n={n} p0={p0:.1} -> {:?}", f.map(|f| (f.p0, f.slope, f.coverage)));
         }
     }
     let mut lines: Vec<Found> = peaks
@@ -530,11 +505,11 @@ fn hough_lines(pts: &ScanPoints, extent: usize, min_cov: f64, photo: bool) -> Ve
         let dup = kept.iter().any(|k| {
             if let (Some(lb), Some(kb)) = (&l.bend, &k.bend) {
                 // Bent lines: compare where both were seen.
-                let (lo, hi) = (lb.1.max(kb.1), lb.2.min(kb.2));
+                let (lo, hi) = (lb.lo.max(kb.lo), lb.hi.min(kb.hi));
                 hi - lo >= 0.1 * span
                     && (0..=8).all(|i| {
                         let s = lo + (hi - lo) * i as f64 / 8.0;
-                        (l.pos(mid, s, n) - k.pos(mid, s, n)).abs() < MERGE_PX
+                        (l.pos(mid, s) - k.pos(mid, s)).abs() < MERGE_PX
                     })
             } else {
                 let d0 = (l.p0 - mid * l.slope) - (k.p0 - mid * k.slope);
@@ -549,11 +524,32 @@ fn hough_lines(pts: &ScanPoints, extent: usize, min_cov: f64, photo: bool) -> Ve
     kept
 }
 
+/// Line points within `half_px` of a coarse line `p = p0 + (s − mid)·t0`,
+/// as (s − mid, residual to the coarse line), ordered by scan.
+fn band_points(pts: &ScanPoints, mid: f64, p0: f64, t0: f64, half_px: f64) -> Vec<(f32, f32)> {
+    let mut band = Vec::new();
+    for s in 0..pts.n_scans() {
+        let ds = s as f64 - mid;
+        let pred = p0 + ds * t0;
+        let sc = pts.scan(s);
+        let lo = sc.partition_point(|&c| (c as f64) < pred - half_px);
+        for &c in &sc[lo..] {
+            let q = c as f64 - pred;
+            if q > half_px {
+                break;
+            }
+            band.push((ds as f32, q as f32));
+        }
+    }
+    band
+}
+
 /// Coverage of a line by its inlier scans: only solid stretches count
 /// (isolated text strokes or symbols that happen to touch the line do not,
 /// and neither do they bridge a hole between unrelated boxes that line up).
 /// `inl` lists the inlier scans (relative to `mid`) in order. Returns the
-/// covered fraction and the largest hole (scans), or None when nothing is solid.
+/// covered fraction of the `n` scans, the largest hole between solid
+/// stretches (scans) and the range they span (None when nothing is solid).
 fn solid_coverage(inl: impl Iterator<Item = f32>, n: usize) -> (f64, f32, Option<(f32, f32)>) {
     let min_seg = (n as f64 / 150.0).max(8.0) as usize;
     // (first scan, last scan, inlier scans)
@@ -625,7 +621,7 @@ fn knot_candidates(band: &[(f32, f32)], sc: f32, half: f32, min_count: u32) -> V
         }
         out.push(((bi + end) as f64 / 2.0 / BINS_PER_PX + 0.5 / BINS_PER_PX - span, dt, v));
     }
-    out.sort_by(|a, b| b.2.cmp(&a.2));
+    out.sort_by_key(|c| std::cmp::Reverse(c.2));
     out.truncate(PHOTO_KNOT_CANDIDATES);
     out
 }
@@ -642,21 +638,7 @@ fn knot_candidates(band: &[(f32, f32)], sc: f32, half: f32, min_count: u32) -> V
 /// chord plus the offsets from it.
 fn trace_line(pts: &ScanPoints, mid: f64, p0: f64, t0: f64) -> Option<Found> {
     let n = pts.n_scans();
-    // (s − mid, residual to the coarse line), ordered by scan.
-    let mut band: Vec<(f32, f32)> = Vec::new();
-    for s in 0..n {
-        let ds = s as f64 - mid;
-        let pred = p0 + ds * t0;
-        let sc = pts.scan(s);
-        let lo = sc.partition_point(|&c| (c as f64) < pred - PHOTO_BAND_PX);
-        for &c in &sc[lo..] {
-            let q = c as f64 - pred;
-            if q > PHOTO_BAND_PX {
-                break;
-            }
-            band.push((ds as f32, q as f32));
-        }
-    }
+    let band = band_points(pts, mid, p0, t0, PHOTO_BAND_PX);
     if band.len() < 16 {
         return None;
     }
@@ -710,9 +692,9 @@ fn trace_line(pts: &ScanPoints, mid: f64, p0: f64, t0: f64) -> Option<Found> {
         match back[k][i] {
             Some((kb, ib)) => {
                 let cb = cands[kb][ib];
-                for m in kb + 1..k {
+                for (m, knot) in knots.iter_mut().enumerate().take(k).skip(kb + 1) {
                     let f = (m - kb) as f64 / (k - kb) as f64;
-                    knots[m] = (cb.0 * (1.0 - f) + c.0 * f, cb.1 * (1.0 - f) + c.1 * f, false);
+                    *knot = (cb.0 * (1.0 - f) + c.0 * f, cb.1 * (1.0 - f) + c.1 * f, false);
                 }
                 (k, i) = (kb, ib);
             }
@@ -797,36 +779,17 @@ fn trace_line(pts: &ScanPoints, mid: f64, p0: f64, t0: f64) -> Option<Found> {
         let s = knot_s(k) as f64;
         (q[k] - (a + b * s)) as f32
     });
-    let bend_max = offsets.iter().fold(0.0f64, |m, &o| m.max(o.abs() as f64));
-    if slope.atan().to_degrees().abs() > MAX_ANGLE_DEG + FINE_RANGE_DEG || bend_max > PHOTO_MAX_BEND_PX {
+    let bend = Bend { ds: h, offsets, lo: lo as f64 + mid, hi: hi as f64 + mid };
+    if slope.atan().to_degrees().abs() > MAX_ANGLE_DEG + FINE_RANGE_DEG || bend.max_abs() > PHOTO_MAX_BEND_PX {
         return None;
     }
-    Some(Found {
-        p0: p0 + a,
-        slope,
-        coverage,
-        bend: Some((offsets, lo as f64 + mid, hi as f64 + mid)),
-    })
+    Some(Found { p0: p0 + a, slope, coverage, bend: Some(bend) })
 }
 
 /// Fine angle search + least squares around a coarse line.
 fn refine_line(pts: &ScanPoints, mid: f64, p0: f64, t0: f64) -> Option<(f64, f64, f64)> {
     let n = pts.n_scans();
-    // (s − mid, residual to the coarse line)
-    let mut band: Vec<(f32, f32)> = Vec::new();
-    for s in 0..n {
-        let ds = s as f64 - mid;
-        let pred = p0 + ds * t0;
-        let sc = pts.scan(s);
-        let lo = sc.partition_point(|&c| (c as f64) < pred - BAND_PX);
-        for &c in &sc[lo..] {
-            let q = c as f64 - pred;
-            if q > BAND_PX {
-                break;
-            }
-            band.push((ds as f32, q as f32));
-        }
-    }
+    let band = band_points(pts, mid, p0, t0, BAND_PX);
     if band.len() < 16 {
         return None;
     }
@@ -878,33 +841,14 @@ fn refine_line(pts: &ScanPoints, mid: f64, p0: f64, t0: f64) -> Option<(f64, f64
         b = (sn * sxy - sx * sy) / den;
         a = (sy - b * sx) / sn;
     }
-    // Coverage counts only solid stretches of line; isolated text strokes or
-    // symbols that happen to touch the line do not, and neither do they
-    // bridge a hole between unrelated boxes that line up.
-    let min_seg = (n as f64 / 150.0).max(8.0) as usize;
-    // (first scan, last scan, inlier scans); band is ordered by scan.
-    let mut segs: Vec<(f32, f32, usize)> = Vec::new();
-    for &(ds, q) in &band {
-        if (q as f64 - (a + b * ds as f64)).abs() > INLIER_PX {
-            continue;
-        }
-        match segs.last_mut() {
-            Some(s) if ds == s.1 => {}
-            Some(s) if ds - s.1 <= 3.0 => {
-                s.1 = ds;
-                s.2 += 1;
-            }
-            _ => segs.push((ds, ds, 1)),
-        }
-    }
-    segs.retain(|s| s.2 >= min_seg);
-    let covered: usize = segs.iter().map(|s| s.2).sum();
-    let max_gap = segs.windows(2).map(|w| w[1].0 - w[0].1).fold(0.0f32, f32::max);
+    let inliers =
+        band.iter().filter(|&&(ds, q)| (q as f64 - (a + b * ds as f64)).abs() <= INLIER_PX).map(|&(ds, _)| ds);
+    let (coverage, max_gap, _) = solid_coverage(inliers, n);
     let slope = t0 + b;
     if slope.atan().to_degrees().abs() > MAX_ANGLE_DEG + FINE_RANGE_DEG || max_gap as f64 > MAX_GAP * n as f64 {
         return None;
     }
-    Some((p0 + a, slope, covered as f64 / n as f64))
+    Some((p0 + a, slope, coverage))
 }
 
 fn detect_class(img: &Rgb8, class: InkClass, min_cov: f64, photo: bool) -> Vec<GridLine> {
@@ -912,19 +856,10 @@ fn detect_class(img: &Rgb8, class: InkClass, min_cov: f64, photo: bool) -> Vec<G
     let spec = class.spec();
     let (hp, vp) = rayon::join(|| column_points(&ink, img.w, img.h, spec), || row_points(&ink, img.w, spec));
     drop(ink);
-    let (hl, vl) =
-        rayon::join(|| hough_lines(&hp, img.h, min_cov, photo), || hough_lines(&vp, img.w, min_cov, photo));
-    let line = |axis: LineAxis, n: usize, f: Found| {
-        let mid = (n as f64 - 1.0) / 2.0;
-        let mut l = GridLine::from_slope(axis, mid, f.p0, f.slope, f.coverage);
-        l.bend = f.bend.map(|(offsets, lo, hi)| Bend {
-            s0: 0.0,
-            ds: (n as f64 - 1.0) / (BEND_KNOTS - 1) as f64,
-            offsets,
-            lo,
-            hi,
-        });
-        l
+    let (hl, vl) = rayon::join(|| hough_lines(&hp, img.h, min_cov, photo), || hough_lines(&vp, img.w, min_cov, photo));
+    let line = |axis: LineAxis, n: usize, f: Found| GridLine {
+        bend: f.bend,
+        ..GridLine::from_slope(axis, (n as f64 - 1.0) / 2.0, f.p0, f.slope, f.coverage)
     };
     let lines = hl
         .into_iter()
@@ -933,15 +868,7 @@ fn detect_class(img: &Rgb8, class: InkClass, min_cov: f64, photo: bool) -> Vec<G
     if matches!(class, InkClass::PhotoDark) {
         // A run of brown contours lined up for a while can pass for a grey
         // line; along a whole line the difference in colour is clear.
-        lines
-            .filter(|l| {
-                let t = line_tint(img, l);
-                if std::env::var("GRID_DEBUG").is_ok() {
-                    eprintln!("DBG tint {:?} {:.1} cov {:.2}: {t:.3}", l.axis, l.pos_at(img.w.min(img.h) as f64 / 2.0), l.coverage);
-                }
-                t <= PHOTO_MAX_LINE_TINT
-            })
-            .collect()
+        lines.filter(|l| line_tint(img, l) <= PHOTO_MAX_LINE_TINT).collect()
     } else {
         lines.collect()
     }
@@ -1012,7 +939,8 @@ pub fn detect_lines(img: &Rgb8) -> Vec<GridLine> {
 fn detect_lines_with(img: &Rgb8, photo: bool) -> Vec<GridLine> {
     let (lines, colour) = rayon::join(
         || {
-            let (class, cov) = if photo { (InkClass::PhotoDark, PHOTO_MIN_COVERAGE) } else { (InkClass::Dark, MIN_COVERAGE) };
+            let (class, cov) =
+                if photo { (InkClass::PhotoDark, PHOTO_MIN_COVERAGE) } else { (InkClass::Dark, MIN_COVERAGE) };
             detect_class(img, class, cov, photo)
         },
         || detect_class(img, InkClass::Colour, COLOUR_MIN_COVERAGE, photo),
@@ -1061,27 +989,6 @@ pub fn detect_lines_photo(img: &Rgb8) -> Vec<GridLine> {
         || detect_lines_with(&flatten_local_background(&sharp, PHOTO_BACKGROUND_RADIUS), true),
     );
     merge_lines(direct, flat, img.w as f64, img.h as f64)
-}
-
-/// Debug aid: the dark thin-run centres `detect_lines_photo` works on, as
-/// `(x, y, family)` (0: along rows, for vertical lines; 1: down columns, for
-/// horizontal lines), on the sharpened image or (`flattened`) against the
-/// local background.
-#[doc(hidden)]
-pub fn photo_scan_points(img: &Rgb8, flattened: bool) -> Vec<(f32, f32, u8)> {
-    let sharp = unsharp_mask(img, PHOTO_SHARPEN.0, PHOTO_SHARPEN.1);
-    let src = if flattened { flatten_local_background(&sharp, PHOTO_BACKGROUND_RADIUS) } else { sharp };
-    let ink = ink_plane(&src, InkClass::PhotoDark);
-    let spec = InkClass::PhotoDark.spec();
-    let (hp, vp) = (column_points(&ink, src.w, src.h, spec), row_points(&ink, src.w, spec));
-    let mut out = Vec::new();
-    for y in 0..vp.n_scans() {
-        out.extend(vp.scan(y).iter().map(|&x| (x, y as f32, 0u8)));
-    }
-    for x in 0..hp.n_scans() {
-        out.extend(hp.scan(x).iter().map(|&y| (x as f32, y, 1u8)));
-    }
-    out
 }
 
 /// Contrast of each pixel against its local background, per channel:
@@ -1164,6 +1071,27 @@ pub struct GridResult {
     /// True when `transform` is a homography (photo mode), else an affine.
     #[serde(default)]
     pub projective: bool,
+    /// The grid lines the fit identified, with their values (line fits
+    /// only): `gcps` are their intersections. On photos the lines follow
+    /// the paper's bends, so they also constrain a correction for paper
+    /// that does not lie flat along their whole length.
+    #[serde(default)]
+    pub lines: Vec<ValuedLine>,
+    /// Zone and hemisphere of a UTM grid (`ValuedLine::value` in metres);
+    /// None for a graticule (degrees).
+    #[serde(default)]
+    pub utm_zone: Option<(u8, bool)>,
+}
+
+/// A grid line with its grid value.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ValuedLine {
+    pub line: GridLine,
+    /// Latitude (horizontal lines) or longitude (vertical lines) in degrees
+    /// on a graticule; northing or easting in metres on a UTM grid.
+    pub value: f64,
+    /// A label named the line (else it lies on a round value between them).
+    pub labelled: bool,
 }
 
 const MIN_GROUND_M_PER_PX: f64 = 0.05;
@@ -1181,16 +1109,18 @@ const MAX_FAMILY_TILT_DEG: f64 = 0.75;
 /// deviate more from the family median…
 const PHOTO_FAMILY_TILT_DEG: f64 = 2.5;
 /// …their positions are a projective, not linear, function of the grid
-/// value (tolerance as a fraction of the line spacing)…
+/// value and paper that does not lie flat shifts them (tolerance as a
+/// fraction of the pixels between grid values one label step apart)…
 const PHOTO_AXIS_TOL: f64 = 0.06;
-/// Photos: the fit RMS (ground metres) that costs as much as one more line in
-/// the choice between fits.
-const PHOTO_RMS_PER_SCORE: f64 = 8.0;
 /// …and the page's aspect ratio is a guess, so the GCP fit need not be
 /// conformal (tolerance on the axis-scale ratio, like the 0.06 of scans).
 const PHOTO_CONFORMAL_TOL: f64 = 0.35;
-/// Photos: an axis fit through at least this many lines may be projective.
+/// Photos: an axis fit through at least this many labelled lines may be
+/// projective (`projective_fit`).
 const PHOTO_PROJECTIVE_AXIS_LINES: usize = 4;
+/// Photos: the GCP fit RMS (ground metres) that costs as much as one more
+/// line in the choice between fits.
+const PHOTO_RMS_PER_SCORE: f64 = 8.0;
 /// Photos: with at least this many GCPs a homography is fitted too…
 pub const PHOTO_MIN_HOMOGRAPHY_GCPS: usize = 6;
 /// …and used when its RMS (ground metres) is at most this fraction of the
@@ -1742,11 +1672,8 @@ impl AxisLines<'_> {
         // Photos: a line counts less when only its position (within the
         // looser photo tolerance) puts it on a round value: a frame line
         // must not outweigh a label.
-        let line_score = if self.photo {
-            n_labelled as f64 + 0.5 * (lines.len() - n_labelled) as f64
-        } else {
-            lines.len() as f64
-        };
+        let line_score =
+            if self.photo { n_labelled as f64 + 0.5 * (lines.len() - n_labelled) as f64 } else { lines.len() as f64 };
         let mut inliers: Vec<usize> = inl.iter().map(|x| x.0).collect();
         inliers.dedup();
         Some(AxisFit {
@@ -1769,8 +1696,7 @@ impl AxisLines<'_> {
         if self.photo {
             // Projective only through labelled lines (unlabelled ones on
             // round values could bend the fit towards a frame line).
-            let lab: Vec<(f64, f64)> =
-                pts.iter().zip(&f.labelled).filter(|(_, &l)| l).map(|(p, _)| *p).collect();
+            let lab: Vec<(f64, f64)> = pts.iter().zip(&f.labelled).filter(|(_, &l)| l).map(|(p, _)| *p).collect();
             if lab.len() >= PHOTO_PROJECTIVE_AXIS_LINES {
                 let (a, b, c, t0) = projective_fit(&lab)?;
                 return self.evaluate_model(a, b, c, t0);
@@ -1913,15 +1839,6 @@ fn solve_axis_lines(cands: &[Cand], lines: &[GridLine], ax: Ax, sys: Sys, ctx: &
         }
         refined.push(best);
     }
-    if ctx.photo && std::env::var("GRID_DEBUG").is_ok() {
-        eprintln!("DBG axis {ax:?} ts {:?} spacing {spacing:.1} unit {unit:?}", al.ts.iter().map(|t| t.round()).collect::<Vec<_>>());
-        for f in refined.0.iter().flatten() {
-            eprintln!(
-                "DBG   fit b {:.4} c {:.2e} score {:.2} cost {:.1} lines {:?} labelled {:?}",
-                f.b, f.c, f.score, f.cost, f.lines.iter().map(|l| (l.0, al.ts[l.0].round())).collect::<Vec<_>>(), f.labelled
-            );
-        }
-    }
     refined
 }
 
@@ -2014,6 +1931,7 @@ struct Solution {
     n_lon: usize,
     gcps: Vec<Gcp>,
     used: Vec<usize>,
+    lines: Vec<ValuedLine>,
     score: f64,
 }
 
@@ -2144,6 +2062,14 @@ fn combine(
     let mut used: Vec<usize> = lon_obs.iter().chain(&lat_obs).copied().collect();
     used.sort_unstable();
     used.dedup();
+    let valued = |f: &AxisFit, ls: &[GridLine]| -> Vec<ValuedLine> {
+        f.lines
+            .iter()
+            .zip(&f.labelled)
+            .map(|(&(li, value), &labelled)| ValuedLine { line: ls[li], value, labelled })
+            .collect()
+    };
+    let lines = if from_lines { [valued(fx, lines_x), valued(fy, lines_y)].concat() } else { Vec::new() };
     Some(Solution {
         affine,
         transform,
@@ -2153,6 +2079,7 @@ fn combine(
         n_lon: lon_obs.len(),
         gcps,
         used,
+        lines,
         // Photos: a looser line tolerance lets a stray stroke stand in for a
         // grid line; the 2-D fit of the intersections tells them apart.
         score: fx.score + fy.score - if ctx.photo { rms_m / PHOTO_RMS_PER_SCORE } else { 0.0 },
@@ -2247,15 +2174,15 @@ pub fn georeference_from_grid_with(
     let max_tilt = if opts.photo { PHOTO_FAMILY_TILT_DEG } else { MAX_FAMILY_TILT_DEG };
     let lines_x = grid_family(lines, LineAxis::Vertical, max_tilt);
     let lines_y = grid_family(lines, LineAxis::Horizontal, max_tilt);
-    let mut best: Option<Solution> = None;
+    let mut best: Option<(Sys, Solution)> = None;
     for (sys, cands) in [(Sys::Geo, &geo), (Sys::Utm, &utm)] {
         if let Some(s) = solve_system(sys, cands, &lines_x, &lines_y, &ctx) {
-            if best.as_ref().is_none_or(|b| s.better_than(b)) {
-                best = Some(s);
+            if best.as_ref().is_none_or(|b| s.better_than(&b.1)) {
+                best = Some((sys, s));
             }
         }
     }
-    let s = best?;
+    let (sys, s) = best?;
     Some(GridResult {
         projective: !s.transform.is_affine(),
         transform: s.transform,
@@ -2265,6 +2192,11 @@ pub fn georeference_from_grid_with(
         n_lon: s.n_lon,
         gcps: s.gcps,
         used_labels: s.used,
+        lines: s.lines,
+        utm_zone: match sys {
+            Sys::Geo => None,
+            Sys::Utm => ctx.utm.map(|u| (u.zone, u.north)),
+        },
     })
 }
 

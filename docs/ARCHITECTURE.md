@@ -119,26 +119,41 @@ into the paper. With `photo: true` the request:
 * **grid**: lines are detected on a sharpened copy (unsharp mask σ 1.5) both
   directly and against their local background (`grid::flatten_local_background`,
   a two-sided top-hat that keeps thin strokes and drops tints and edges), and
-  merged. Line families may converge (±2.5° around their median), per-axis
-  line fits tolerate 4 % of the line spacing (positions are projective in the
-  grid value), and the conformality check accepts the scanner's aspect error.
-  With ≥ 6 GCPs a homography is fitted too and used when its RMS is ≤ 75 % of
-  the affine's and ≥ 0.5 m lower (`diagnostics.grid.model = "homography"`).
-* **contours**: the mask is the default (or picked) colour model on the
-  normalised photo, grown by hysteresis into a relaxed model (faint, blurred
-  parts of lines connected to clear ones), cleaned with a 3×3 majority vote,
-  and stripped of regions too thick to be a line (dense contours blurred into
-  a blob, fills). The coarse search is unchanged (similarity templates tolerate
-  the residual perspective and aspect error; the right location keeps a peak
-  ratio ≈ 1.4–2.2). The refinement (`refine::RefineOptions { photo: true }`)
-  runs similarity as usual, then an affine coarse-to-fine from pyramid level 2
-  that may be anisotropic (≤ 1.35), then a projective stage from level 1:
+  merged; only grey ink counts (brown contours are dense and, blurred, as dark
+  as a grid line). Each line is traced knot by knot (24 knots; dynamic
+  programming over local line candidates, bounded turn per knot), so it may
+  bend where the paper does not lie flat (`GridLine::bend`,
+  `diagnostics.grid.max_bend_px`), and GCPs are the bent lines' intersections.
+  Line families may converge (±2.5° around their median), per-axis line fits
+  tolerate 6 % of the labels' spacing and may be projective in the grid value
+  (through ≥ 4 labelled lines), and the conformality check accepts the
+  scanner's aspect error. With ≥ 6 GCPs a homography is fitted too and used
+  when its RMS is ≤ 75 % of the affine's and ≥ 0.5 m lower
+  (`diagnostics.grid.model = "homography"`). A photo grid fit is accepted up
+  to 60 m RMS (folds bend the grid). `GridResult::lines` keeps the identified
+  lines with their values.
+* **contours**: the mask is the luminance *valleys* of the normalised photo
+  (across the line a pixel is no brighter than both neighbours and ≥ 5 levels
+  darker than the paper beyond them) that are not black ink and lie on the
+  relaxed default (or picked) contour colour, by a vote of ≥ 2 pixels of
+  their 3×3 neighbourhood (the hue of faint lines is noisy). Unlike a colour
+  threshold, this keeps dense contours ~2.5 px apart separate instead of
+  blurring them into blobs whose skeleton follows no contour. The coarse
+  search is unchanged (similarity templates tolerate the residual perspective
+  and aspect error; the right location keeps a peak ratio ≈ 1.4–2.2). The
+  refinement (`refine::RefineOptions { photo: true }`) runs similarity as
+  usual, then an affine coarse-to-fine from pyramid level 2 that may be
+  anisotropic (≤ 1.35), started from the similarity and from it stretched by
+  ±3.5 % along x against y (the plausible result with the lowest cost wins:
+  from the similarity alone it can stall in a near-isotropic minimum), then a
+  projective stage from level 1:
   8 parameters about the samples' centroid in coordinates normalised by their
   half-diagonal, merc = rm + (a·u + b·v + c, d·u + e·v + f) / (1 + g·u + h·v),
   analytic Jacobian, the same robust variable-projection LM. It is kept when
   it lowers the robust cost by ≥ 3 % and stays sane (|g|, |h| ≤ 0.15, no fold
   over the samples' extent, plausible local scale and anisotropy);
-  `diagnostics.refined.projective` tells.
+  `diagnostics.refined.projective` tells. `refine::sample_fits` gives every
+  contour sample's elevation residual and slope under a fitted transform.
 
 The response's `pixel_to_mercator` is then a true homography (last row not
 `[0, 0, 1]`); `scale_m_per_px` and `rotation_deg` are taken from its local
@@ -147,7 +162,12 @@ itself. On synthetic photos of the Grootkloof sheet (`tests/photo.rs`: camera
 tilted ~15°, shadow ×0.55…1, warm cast, blur σ 1.2, noise; flattened from
 corners 0.5 % and 2.5 % off, inwards and outwards) the grid path is within
 ~2 m and the contour path within ~10–30 m over the whole map frame (an affine
-from the same GCPs is off by 20 m and 115 m).
+from the same GCPs is off by 20 m and 115 m). On the real phone photo of the
+printed sheet, folded in four (`tests/realphoto.rs`, flattened from the page
+corners and from corners 0.5–1 % off), both paths reach the flat-model floor
+(the best single homography through the 670 truth points: 37 m median,
+66 m p90): the grid path ~32 m median, ~90 m p90, the contour path ~36–40 m
+median, ~87–98 m p90; only a warp goes below that.
 
 The core is pull-based for DEM data. When it needs tiles it does not have, it
 answers `need_dem` with the tile list. The app downloads them (cached on disk),
@@ -301,7 +321,8 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
   src/ffi.rs          C ABI
   include/mapme_core.h
   tests/              integration tests on fixtures/grootkloof (photo.rs: synthetic
-                      photos of the sheet, flattened from imperfect corners)
+                      photos of the sheet, flattened from imperfect corners;
+                      realphoto.rs: the real phone photo of the folded sheet)
 fixtures/grootkloof/  the real map (PDF + extracted JPEG), DEM tiles, OCR fixture, truth
 ios/                  XcodeGen project (project.yml), app, unit tests, UI tests
 scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
