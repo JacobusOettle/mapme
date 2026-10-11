@@ -674,6 +674,80 @@ fn synthetic_large_radius() {
     run_synthetic(&Synth { name: "40km", radius_m: 40_000.0, offset_m: (-20000.0, 15000.0), ..Default::default() });
 }
 
+/// Area-downsample an RGB image by an integer factor (a lower-dpi render).
+fn downsample_rgb(img: &Rgb8, f: usize) -> Rgb8 {
+    let (w, h) = (img.w / f, img.h / f);
+    let mut data = vec![0u8; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..3 {
+                let mut s = 0u32;
+                for dy in 0..f {
+                    for dx in 0..f {
+                        s += img.data[((y * f + dy) * img.w + x * f + dx) * 3 + c] as u32;
+                    }
+                }
+                data[(y * w + x) * 3 + c] = (s / (f * f) as u32) as u8;
+            }
+        }
+    }
+    Rgb8::from_rgb(w, h, data).unwrap()
+}
+
+fn crop_rgb(img: &Rgb8, x0: usize, y0: usize, w: usize, h: usize) -> Rgb8 {
+    let mut data = Vec::with_capacity(w * h * 3);
+    for y in y0..y0 + h {
+        data.extend_from_slice(&img.data[(y * img.w + x0) * 3..(y * img.w + x0 + w) * 3]);
+    }
+    Rgb8::from_rgb(w, h, data).unwrap()
+}
+
+/// Lower-resolution renders and a partial "screenshot" of the real sheet.
+/// `px_to_full` maps the variant's pixels to the full sheet's pixels.
+fn check_variant(name: &str, img: &Rgb8, px_to_full: Affine) {
+    let p = prepare(img);
+    let params = params_at(CENTER.0 + 0.05, CENTER.1 - 0.06);
+    let o = locate(&p, store(), &params);
+    report(name, &o, &p);
+    let r = o.refined.as_ref().expect("a candidate");
+    // Error over the variant's own extent, against the truth composed with the pixel map.
+    let t = truth().compose(&px_to_full);
+    let lc = (-25.85f64).to_radians().cos();
+    let mut worst = 0.0f64;
+    for (x, y) in [(0.0, 0.0), (p.w as f64, 0.0), (0.0, p.h as f64), (p.w as f64, p.h as f64)] {
+        let (a, b) = (r.transform.apply(x, y), t.apply(x, y));
+        worst = worst.max(((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt() * lc);
+    }
+    eprintln!("[{name}] refined corner error {worst:.1} m");
+    assert!(worst < 40.0, "{name}: {worst:.1} m");
+    assert!(o.confidence >= 0.7, "{name}: confidence {:.3}", o.confidence);
+}
+
+#[test]
+fn grootkloof_at_150_and_100_dpi() {
+    let _g = serial();
+    let full = load_map();
+    for f in [2usize, 3] {
+        let img = downsample_rgb(&full, f);
+        let s = f as f64;
+        check_variant(&format!("{}dpi", 300 / f), &img, Affine { a: s, b: 0.0, c: 0.0, d: 0.0, e: s, f: 0.0 });
+    }
+}
+
+#[test]
+fn grootkloof_partial_screenshot() {
+    let _g = serial();
+    let full = load_map();
+    // The middle third of the sheet (~2.2 × 3.1 km), as a phone screenshot would show it.
+    let (x0, y0, w, h) = (1170usize, 1650usize, 1170usize, 1650usize);
+    let img = crop_rgb(&full, x0, y0, w, h);
+    check_variant("screenshot", &img, Affine::translation(x0 as f64, y0 as f64));
+    // A smaller piece (~1.7 × 2.3 km).
+    let (x0, y0, w, h) = (1300usize, 1900usize, 900usize, 1200usize);
+    let img = crop_rgb(&full, x0, y0, w, h);
+    check_variant("small screenshot", &img, Affine::translation(x0 as f64, y0 as f64));
+}
+
 /// Degenerate inputs never panic and never produce confident answers.
 #[test]
 fn degenerate_inputs_are_handled() {
