@@ -1,5 +1,6 @@
 import PhotosUI
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 /// Home screen: imported maps (nearest / "you are on this map" first), import buttons.
@@ -9,6 +10,9 @@ struct LibraryView: View {
     @State private var showFileImporter = false
     @State private var showPhotoPicker = false
     @State private var photoItem: PhotosPickerItem?
+    @State private var showScanner = false
+    /// The scanned page, imported once the document camera has finished closing.
+    @State private var scannedPage: UIImage?
     @State private var showSettings = false
     @State private var renameTarget: MapDocument?
     @State private var renameText = ""
@@ -37,7 +41,8 @@ struct LibraryView: View {
             Theme.background.ignoresSafeArea()
             if entries.isEmpty {
                 LibraryEmptyState(onImportFile: { showFileImporter = true },
-                                  onImportPhoto: { showPhotoPicker = true })
+                                  onImportPhoto: { showPhotoPicker = true },
+                                  onScan: DocumentScannerView.isSupported ? { showScanner = true } : nil)
                     .transition(.opacity)
             } else {
                 ScrollView {
@@ -81,6 +86,19 @@ struct LibraryView: View {
         } message: { _ in
             Text("The map, its tiles and its location are removed from this device.")
         }
+        .fullScreenCover(isPresented: $showScanner, onDismiss: {
+            guard let page = scannedPage else { return }
+            scannedPage = nil
+            model.importScannedPage(page)
+        }) {
+            DocumentScannerView(onScan: { page in
+                scannedPage = page
+                showScanner = false
+            }, onCancel: {
+                showScanner = false
+            })
+            .ignoresSafeArea()
+        }
         .sheet(item: $calibrationTarget) { map in
             CalibrationView(mapID: map.id, onDone: { calibrationTarget = nil })
                 .environment(model)
@@ -123,6 +141,13 @@ struct LibraryView: View {
             } label: {
                 Label("Calibrate manually", systemImage: "hand.tap")
             }
+            if map.canAdjustCorners {
+                Button {
+                    model.adjustCorners(mapID: map.id)
+                } label: {
+                    Label("Adjust Corners", systemImage: "perspective")
+                }
+            }
             Divider()
             Button(role: .destructive) {
                 deleteTarget = map
@@ -147,6 +172,13 @@ struct LibraryView: View {
         }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
+                if DocumentScannerView.isSupported {
+                    Button {
+                        showScanner = true
+                    } label: {
+                        Label("Scan Paper Map", systemImage: "camera.viewfinder")
+                    }
+                }
                 Button {
                     showFileImporter = true
                 } label: {

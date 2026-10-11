@@ -12,8 +12,11 @@ ready for Android.
 * **Locates maps by itself**: from the coordinate grid printed on the map or,
   when there is none, by matching the map's **contour lines** against real
   terrain elevation data around you. Manual calibration as a fallback.
-* **Red dot, accuracy halo and heading cone**, with *North up*, *Heading up*
-  (map turns as you turn) and *Free rotate* modes.
+* **Apple Maps-style position puck** with a heading beam and accuracy halo;
+  follow, follow-with-heading (map turns as you turn) and a compass.
+* **Photos of paper maps**: scan with the document camera or pick a photo; the
+  page is flattened from its corners and located in photo mode (lighting
+  normalised, full perspective fit).
 * **Dotted trail** of where you walked (GPX export), **nearby points of
   interest** from the map's own labels plus OpenStreetMap, with distance and
   direction.
@@ -22,15 +25,21 @@ ready for Android.
 
 ## Screenshots
 
-The Grootkloof PDF in the iPhone simulator with a simulated GPS fix
-(-25.8401, 27.3920): located from its grid labels (±1 m), red dot and heading
-cone next to spot height 1488. Every push refreshes these on the
+The Grootkloof PDF in the iPhone simulator with a simulated walk: located from
+its grid labels (±1 m), your position puck with its heading beam, the dotted
+trail you walked, Apple Maps-style controls and the stats card. The last row is
+a synthetic *photo* of the paper map going through the corner editor and photo
+mode. Every push refreshes these on the
 [`ci-screenshots`](https://github.com/JacobusOettle/mapme/tree/ci-screenshots)
-branch (also attached to each iOS run as the `screenshots` artifact).
+branch (with the IPA of that build).
 
-| North up | Heading up | Nearby |
+| Following | Heading up | Stats card |
 |---|---|---|
-| <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshots__01-map-north-up_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshots__02-heading-up_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshots__03-nearby_0.png" width="240"> |
+| <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshots__01-map_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshots__02-heading_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshots__03-panel_0.png" width="240"> |
+
+| Nearby | Photo: adjust corners | Photo: located |
+|---|---|---|
+| <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshots__04-nearby_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/PhotoImportUITests.testPhotoOfPaperMap__05-photo-corners_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/PhotoImportUITests.testPhotoOfPaperMap__06-photo-map_0.png" width="240"> |
 
 ## Install on your iPhone
 

@@ -1,11 +1,16 @@
 import QuartzCore
 import UIKit
 
+/// CATiledLayer whose tiles fade in quickly (the default is 0.25 s).
+final class FadingTiledLayer: CATiledLayer {
+    override class func fadeDuration() -> CFTimeInterval { 0.18 }
+}
+
 /// The map raster as a CATiledLayer-backed view (Apple PhotoScroller pattern). Its bounds are the
 /// base image size (1 map pixel = 1 point); the canvas places it with `center` + `transform`.
 /// Tiles are drawn on CATiledLayer's background threads from the pre-built pyramid in TileStore.
 final class TiledMapView: UIView {
-    override class var layerClass: AnyClass { CATiledLayer.self }
+    override class var layerClass: AnyClass { FadingTiledLayer.self }
 
     /// Immutable snapshot read by the drawing threads.
     private struct RenderState {

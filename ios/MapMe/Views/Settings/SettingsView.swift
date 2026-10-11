@@ -87,12 +87,18 @@ private struct SettingsDisplaySection: View {
             }
 
             Picker(selection: $settings.orientationMode) {
-                ForEach(MapOrientationMode.allCases) { mode in
+                ForEach(MapOrientationMode.selectable) { mode in
                     Label(mode.label, systemImage: mode.symbolName).tag(mode)
                 }
             } label: {
                 SettingsLabel("Map orientation", symbol: "location.north.line.fill", color: .indigo)
             }
+
+            Toggle(isOn: $settings.allowMapRotation) {
+                SettingsLabel("Allow map rotation", symbol: "rotate.right.fill", color: .teal)
+            }
+
+            LocationColorRow()
 
             Toggle(isOn: $settings.nightMap) {
                 SettingsLabel("Night map", symbol: "moon.stars.fill", color: .purple)
@@ -121,6 +127,45 @@ private struct SettingsDisplaySection: View {
     }
 }
 
+/// Red or blue position puck, picked from two swatches.
+private struct LocationColorRow: View {
+    @Environment(AppModel.self) private var model
+
+    init() {}
+
+    var body: some View {
+        let selected = model.settings.locationColor
+        HStack {
+            SettingsLabel("Location color", symbol: "location.fill", color: Color(uiColor: selected.uiColor))
+            Spacer()
+            HStack(spacing: 12) {
+                ForEach(LocationColor.allCases) { option in
+                    let on = option == selected
+                    Button {
+                        withAnimation(.snappy) { model.settings.locationColor = option }
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .fill(Color.white)
+                                .frame(width: 26, height: 26)
+                            Circle()
+                                .fill(Color(uiColor: option.uiColor).gradient)
+                                .frame(width: 19, height: 19)
+                        }
+                        .padding(3)
+                        .overlay(Circle().stroke(on ? Color(uiColor: option.uiColor) : Color.clear, lineWidth: 2))
+                        .shadow(color: Color.black.opacity(0.25), radius: 2, y: 1)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(option.label)
+                    .accessibilityAddTraits(on ? .isSelected : [])
+                }
+            }
+        }
+        .sensoryFeedback(.selection, trigger: selected)
+    }
+}
+
 /// "Your position: …" in the chosen coordinate format.
 private struct SettingsCoordinatePreview: View {
     @Environment(AppModel.self) private var model
@@ -132,7 +177,7 @@ private struct SettingsCoordinatePreview: View {
             Text("Your position: " + GeoFormat.coordinate(LatLon(fix.coordinate), format: model.settings.coordinateFormat))
                 .monospacedDigit()
         } else {
-            Text("Night map dims the paper for use in the dark. Heading up rotates the map as you turn.")
+            Text("Night map dims the paper for use in the dark. Heading up opens maps following your heading, so the map turns as you turn.")
         }
     }
 }
@@ -294,7 +339,7 @@ private struct LocatingExplainerView: View {
                         .foregroundStyle(Theme.warn)
                     Text("\u{2022} Import the map while you are on or near it, so contour matching knows where to look.")
                     Text("\u{2022} Unusual contour colours? Open Calibrate, pick the contour colour, and locate again.")
-                    Text("\u{2022} PDFs and screenshots work best. Photos of paper maps come later.")
+                    Text("\u{2022} Photographing a paper map? Lay it flat, fill the frame and include the whole page so its corners can be found.")
                 }
                 .font(.subheadline)
                 .foregroundStyle(Theme.textSecondary)

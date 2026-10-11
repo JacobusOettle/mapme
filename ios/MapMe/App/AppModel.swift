@@ -3,6 +3,7 @@ import CoreLocation
 import Foundation
 import Observation
 import SwiftUI
+import UIKit
 
 /// State of a running (or just finished) import + locate job, shown full-screen
 /// by ImportProgressView.
@@ -28,6 +29,24 @@ struct ImportJob: Identifiable, Equatable {
     var message: String?
 }
 
+/// A photo waiting in the corner editor: the import (or re-flattening) is paused until the user
+/// confirms the page corners or cancels.
+struct PendingPhoto: Identifiable {
+    let id = UUID()
+    var name: String
+    /// The upright photo; corners are in its pixels.
+    var image: CGImage
+    /// Downscaled copy for display.
+    var preview: UIImage
+    var initial: PhotoQuad
+    /// The page outline found automatically, if any.
+    var detected: PhotoQuad?
+    /// Re-adjusting an existing map rather than importing a new one.
+    var isAdjusting: Bool
+
+    var imageSize: CGSize { CGSize(width: image.width, height: image.height) }
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -40,8 +59,14 @@ final class AppModel {
     var path: [UUID] = []
     /// Non-nil while an import/locate job is shown.
     var importJob: ImportJob?
+    /// Non-nil while the corner editor is shown for a photo of a paper map.
+    var pendingPhoto: PendingPhoto?
+
+    /// The import flow (corner editor or progress) is on screen.
+    var isImportFlowActive: Bool { importJob != nil || pendingPhoto != nil }
 
     @ObservationIgnored private var importTask: Task<Void, Never>?
+    @ObservationIgnored private var cornerContinuation: CheckedContinuation<PhotoQuad?, Never>?
     @ObservationIgnored let importer: MapImporter
     @ObservationIgnored let georeferencer: GeoreferenceService
     @ObservationIgnored let poiService: POIService
@@ -64,29 +89,143 @@ final class AppModel {
     func onLaunch() async {
         location.requestPermission()
         location.start()
+        #if DEBUG
+        if importSamplePhotoIfRequested() { return }
+        #endif
         await importSampleIfRequested()
     }
 
     // MARK: - Import
 
     /// A PDF or image arrived from the Files picker, "Open in…", AirDrop or a share sheet.
+    /// Photos of paper maps go through the corner editor.
     func handleIncoming(url: URL) {
+        let picker = cornerPicker
         startImport(name: url.deletingPathExtension().lastPathComponent) { importer, progress in
-            try await importer.importFile(at: url, progress: progress)
+            try await importer.importFile(at: url, mode: .detectPhoto(picker), progress: progress)
         }
     }
 
-    /// An image picked from Photos.
+    /// An image picked from Photos (a screenshot, a saved map or a photo of a paper map).
     func importImage(data: Data, name: String) {
+        let picker = cornerPicker
         startImport(name: name) { importer, progress in
-            try await importer.importImageData(data, suggestedName: name, progress: progress)
+            try await importer.importImageData(data, suggestedName: name, mode: .detectPhoto(picker), progress: progress)
         }
+    }
+
+    /// A page from the document camera (VisionKit has already flattened it).
+    func importScannedPage(_ page: UIImage) {
+        let name = "Scan " + Date().formatted(date: .abbreviated, time: .shortened)
+        startImport(name: name) { importer, progress in
+            progress(0.01, "Saving the scan…")
+            let data = try await Task.detached(priority: .userInitiated) { () throws -> Data in
+                guard let data = page.jpegData(compressionQuality: MapImporter.flattenedJPEGQuality) else {
+                    throw ImportError.unreadable("the scanned page")
+                }
+                return data
+            }.value
+            return try await importer.importImageData(data, suggestedName: name, mode: .scannedPage, progress: progress)
+        }
+    }
+
+    /// Library: "Adjust Corners" on a photo map. Opens the corner editor on the original photo with
+    /// the saved corners; Done flattens the page again, rebuilds the tiles and locates the map again.
+    /// Cancel leaves the map untouched.
+    func adjustCorners(mapID: UUID) {
+        guard let map = library.map(id: mapID), map.canAdjustCorners else { return }
+        stopRunningImport()
+        let job = ImportJob(name: map.name, phase: .importing, step: "Loading the photo…", fraction: 0.02, mapID: map.id)
+        importJob = job
+        let jobID = job.id
+        let importer = self.importer
+        let picker = cornerPicker
+        importTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let request = try await importer.loadPhoto(for: map)
+                guard !Task.isCancelled, self.importJob?.id == jobID else { return }
+                guard let corners = await picker(request) else { throw CancellationError() }
+                try Task.checkCancellation()
+                let imported = try await importer.reflatten(map, photo: request.image, corners: corners) { fraction, step in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.importJob?.id == jobID else { return }
+                        self.importJob?.fraction = 0.4 * fraction
+                        self.importJob?.step = step
+                    }
+                }
+                // Tiles and thumbnail changed on disk under the same names.
+                TileStore(map: imported.document, library: self.library).purgeMemory()
+                MapThumbnailCache.shared.invalidate(self.library.thumbnailURL(for: imported.document))
+                guard !Task.isCancelled, self.importJob?.id == jobID else { return }
+                await self.locate(map: imported.document, image: imported.baseImage)
+            } catch is CancellationError {
+                // Whoever cancelled the task (Cancel, a newer import, relocate) owns the screen now.
+                if !Task.isCancelled, self.importJob?.id == jobID { self.importJob = nil }
+            } catch {
+                guard self.importJob?.id == jobID else { return }
+                self.importJob?.phase = .failed
+                self.importJob?.message = error.localizedDescription
+            }
+        }
+    }
+
+    // MARK: - Corner editor
+
+    /// Corner editor: Done. The paused import continues with these corners.
+    func confirmCorners(_ corners: PhotoQuad) {
+        importJob?.step = "Flattening the map…"
+        resolveCorners(corners)
+    }
+
+    /// Corner editor: Cancel. Drops the import (an adjusted map stays as it was).
+    func cancelCorners() {
+        importTask?.cancel()
+        importTask = nil
+        importJob = nil
+        resolveCorners(nil)
+    }
+
+    /// Corner editor: "Auto" when nothing was found at import time.
+    func detectCorners(in photo: PendingPhoto) async -> PhotoQuad? {
+        await PhotoQuadDetector.detect(in: photo.image)
+    }
+
+    /// Shows the corner editor and waits for the user; nil when cancelled.
+    private var cornerPicker: PhotoCornerPicker {
+        { [weak self] request in
+            guard let self else { return nil }
+            return await self.requestCorners(request)
+        }
+    }
+
+    private func requestCorners(_ request: PhotoCornerRequest) async -> PhotoQuad? {
+        resolveCorners(nil)
+        let pending = PendingPhoto(name: request.name, image: request.image, preview: UIImage(cgImage: request.preview),
+                                   initial: request.initial, detected: request.detected, isAdjusting: request.isAdjusting)
+        return await withCheckedContinuation { (continuation: CheckedContinuation<PhotoQuad?, Never>) in
+            cornerContinuation = continuation
+            pendingPhoto = pending
+        }
+    }
+
+    private func resolveCorners(_ corners: PhotoQuad?) {
+        let continuation = cornerContinuation
+        cornerContinuation = nil
+        pendingPhoto = nil
+        continuation?.resume(returning: corners)
+    }
+
+    /// Cancel the running import/locate task, including one paused in the corner editor.
+    private func stopRunningImport() {
+        importTask?.cancel()
+        resolveCorners(nil)
     }
 
     /// Run the georeferencer again for an existing map (e.g. after the user picked a contour colour).
     func relocate(mapID: UUID) {
         guard let map = library.map(id: mapID) else { return }
-        importTask?.cancel()
+        stopRunningImport()
         // Reuse the visible job's id so the progress cover updates in place instead of re-presenting.
         let job = ImportJob(id: importJob?.id ?? UUID(), name: map.name, phase: .locating, step: "Loading map…",
                             fraction: 0.05, mapID: map.id)
@@ -111,6 +250,7 @@ final class AppModel {
         georeferencer.cancel()
         importTask = nil
         importJob = nil
+        resolveCorners(nil)
     }
 
     /// Close the progress screen and open the map.
@@ -123,7 +263,7 @@ final class AppModel {
     }
 
     private func startImport(name: String, _ work: @escaping (MapImporter, @escaping (Double, String) -> Void) async throws -> ImportedMap) {
-        importTask?.cancel()
+        stopRunningImport()
         let job = ImportJob(name: name)
         importJob = job
         let jobID = job.id
@@ -144,7 +284,8 @@ final class AppModel {
                 self.importJob?.name = imported.document.name
                 await self.locate(map: imported.document, image: imported.baseImage)
             } catch is CancellationError {
-                if self.importJob?.id == jobID { self.importJob = nil }
+                // Whoever cancelled the task (Cancel, a newer import, relocate) owns the screen now.
+                if !Task.isCancelled, self.importJob?.id == jobID { self.importJob = nil }
             } catch {
                 guard self.importJob?.id == jobID else { return }
                 self.importJob?.phase = .failed
@@ -163,7 +304,8 @@ final class AppModel {
             dpi: map.renderDPI,
             gps: location.location,
             contourRGB: map.contourRGB,
-            searchRadiusKm: settings.searchRadiusKm
+            searchRadiusKm: settings.searchRadiusKm,
+            photo: map.isPhoto
         ) { [weak self] stage, fraction in
             Task { @MainActor [weak self] in
                 guard let self, self.importJob != nil, self.importJob?.id == jobID else { return }
@@ -198,6 +340,26 @@ final class AppModel {
     }
 
     // MARK: - UI testing / demo
+
+    #if DEBUG
+    /// `-importSamplePhoto` launch argument: photograph the bundled sample map (synthetically: tilted
+    /// on a table, uneven light) and import it through the photo flow, corner editor included.
+    private func importSamplePhotoIfRequested() -> Bool {
+        guard ProcessInfo.processInfo.arguments.contains("-importSamplePhoto") else { return false }
+        let picker = cornerPicker
+        let name = "Grootkloof photo"
+        startImport(name: name) { importer, progress in
+            progress(0.01, "Photographing the sample map…")
+            let photo = try await Task.detached(priority: .userInitiated) {
+                try SyntheticPhoto.sample()
+            }.value
+            return try await importer.importImageData(photo.jpeg, suggestedName: name,
+                                                      mode: .detectPhoto(picker, fallbackCorners: photo.corners),
+                                                      progress: progress)
+        }
+        return true
+    }
+    #endif
 
     /// `-importSample` launch argument: import the bundled sample map (Debug builds embed it).
     private func importSampleIfRequested() async {

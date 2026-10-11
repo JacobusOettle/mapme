@@ -4,7 +4,8 @@ import Observation
 import UIKit
 
 /// CoreLocation wrapper: position + compass heading.
-/// Launch arguments for tests/screenshots: `-mockLocation <lat>,<lon>`, `-mockHeading <deg>`, `-mockWalk`.
+/// Launch arguments for tests/screenshots: `-mockLocation <lat>,<lon>`, `-mockHeading <deg>`, `-mockWalk`,
+/// `-mockWalkSpeed <m/s>` (default 1.5).
 /// Use from the main thread (delegate callbacks arrive on main because the manager is created there).
 @Observable
 final class LocationService: NSObject {
@@ -31,6 +32,8 @@ final class LocationService: NSObject {
         var start: LatLon
         var heading: Double?
         var walk: Bool
+        /// Walking speed in m/s.
+        var speed: Double = 1.5
         var elapsed: TimeInterval = 0
         var position: LatLon
     }
@@ -174,8 +177,12 @@ final class LocationService: NSObject {
         if let h = args.firstIndex(of: "-mockHeading"), h + 1 < args.count, let deg = Double(args[h + 1]) {
             heading = deg
         }
+        var speed = 1.5
+        if let s = args.firstIndex(of: "-mockWalkSpeed"), s + 1 < args.count, let v = Double(args[s + 1]), v.isFinite, v > 0 {
+            speed = min(v, 50)
+        }
         let start = LatLon(lat: lat, lon: lon)
-        return Mock(start: start, heading: heading, walk: args.contains("-mockWalk"), position: start)
+        return Mock(start: start, heading: heading, walk: args.contains("-mockWalk"), speed: speed, position: start)
     }
 
     private func startMock() {
@@ -191,12 +198,12 @@ final class LocationService: NSObject {
         mockTimer = timer
     }
 
-    /// Walks a gentle loop (~1.5 m/s, 300 m radius) that starts at the mock position.
+    /// Walks a gentle loop (`-mockWalkSpeed`, default 1.5 m/s; 300 m radius) that starts at the mock position.
     private func advanceMock(by dt: TimeInterval) {
         guard var mock else { return }
         mock.elapsed += dt
         let radius = 300.0
-        let speed = 1.5
+        let speed = mock.speed
         let theta = mock.elapsed * speed / radius
         // Circle centre lies due east of the start, so the walk begins heading north.
         let centre = Geodesy.destination(mock.start, bearing: 90, distance: radius)

@@ -1,10 +1,11 @@
 import XCTest
 
-/// Drives the app on the bundled Grootkloof sample with a mocked GPS fix and attaches screenshots
+/// Drives the app on the bundled Grootkloof sample with a mocked GPS walk and attaches screenshots
 /// (kept in the .xcresult; CI exports them as artifacts).
 final class ScreenshotTests: XCTestCase {
-    /// Inside the Grootkloof sheet (Magaliesberg).
-    static let mockArguments = ["-mockLocation", "-25.8405,27.3920", "-mockHeading", "35", "-mockWalk"]
+    /// Inside the Grootkloof sheet (Magaliesberg), walking a loop at 7 m/s so a long trail builds up quickly.
+    static let mockArguments = ["-mockLocation", "-25.8405,27.3920", "-mockHeading", "35", "-mockWalk",
+                                "-mockWalkSpeed", "7"]
 
     override func setUpWithError() throws {
         continueAfterFailure = true
@@ -30,7 +31,7 @@ final class ScreenshotTests: XCTestCase {
 
         // Import + locate the sample (fresh install), or go straight to the map if it was imported before.
         let openMap = app.buttons["openMapButton"]
-        let orientation = app.buttons["orientationButton"]
+        let trackingButton = app.buttons["trackingButton"]
         let deadline = Date().addingTimeInterval(180)
         var reachedMap = false
         while Date() < deadline {
@@ -39,7 +40,7 @@ final class ScreenshotTests: XCTestCase {
                 reachedMap = true
                 break
             }
-            if orientation.exists {
+            if trackingButton.exists {
                 reachedMap = true
                 break
             }
@@ -50,30 +51,61 @@ final class ScreenshotTests: XCTestCase {
             XCTFail("The sample map was not imported within 180 s")
             return
         }
-
-        // Let tiles load and the mock walk start.
-        Thread.sleep(forTimeInterval: 4)
-        attachScreenshot(app, "01-map-north-up")
-
-        if orientation.waitForExistence(timeout: 10) {
-            orientation.tap()
-            Thread.sleep(forTimeInterval: 2.5)
-        } else {
-            XCTFail("orientationButton not found")
+        guard trackingButton.waitForExistence(timeout: 15) else {
+            attachScreenshot(app, "00-no-map")
+            XCTFail("trackingButton not found")
+            return
         }
-        attachScreenshot(app, "02-heading-up")
 
+        // Follow mode (north up), with a long dotted trail walked behind the puck.
+        setTracking(trackingButton, to: "follow")
+        Thread.sleep(forTimeInterval: 15)
+        attachScreenshot(app, "01-map")
+
+        // Follow with heading: the map turns with the walker and the compass appears.
+        setTracking(trackingButton, to: "heading")
+        Thread.sleep(forTimeInterval: 3)
+        XCTAssertTrue(app.buttons["compassButton"].waitForExistence(timeout: 5), "The compass did not appear in heading mode")
+        attachScreenshot(app, "02-heading")
+
+        // Expand the stats panel.
         let nearby = app.buttons["nearbyButton"]
+        let panel = app.descendants(matching: .any).matching(identifier: "statsPanel").firstMatch
+        if panel.waitForExistence(timeout: 10) {
+            panel.swipeUp()
+            Thread.sleep(forTimeInterval: 1.5)
+        } else {
+            XCTFail("statsPanel not found")
+        }
+        if !nearby.waitForExistence(timeout: 3) {
+            // Drag the panel's top edge up by hand.
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.86))
+            start.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45)))
+            Thread.sleep(forTimeInterval: 1.5)
+        }
+        attachScreenshot(app, "03-panel")
+
         if nearby.waitForExistence(timeout: 10) {
             nearby.tap()
             Thread.sleep(forTimeInterval: 2)
         } else {
             XCTFail("nearbyButton not found")
         }
-        attachScreenshot(app, "03-nearby")
+        attachScreenshot(app, "04-nearby")
     }
 
     // MARK: - Helpers
+
+    /// Taps the tracking button (none → follow → heading → follow) until it reports `value`.
+    @MainActor
+    private func setTracking(_ button: XCUIElement, to value: String) {
+        for _ in 0..<4 {
+            if (button.value as? String) == value { return }
+            button.tap()
+            Thread.sleep(forTimeInterval: 0.8)
+        }
+        XCTAssertEqual(button.value as? String, value, "Tracking mode did not reach \(value)")
+    }
 
     /// Mock mode never asks, but a real permission alert must not block the run.
     @MainActor

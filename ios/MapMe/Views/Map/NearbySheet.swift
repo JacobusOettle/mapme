@@ -31,17 +31,11 @@ struct NearbySheet: View {
         VStack(spacing: 0) {
             header(count: all.count, fix: fix, units: units)
                 .padding(.horizontal, 20)
-                .padding(.top, 18)
+                .padding(.top, 20)
                 .padding(.bottom, 12)
 
-            Picker("Filter", selection: $category.animation(.snappy)) {
-                ForEach(NearbyFilter.allCases) { f in
-                    Text(f.title).tag(f)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16)
-            .padding(.bottom, 8)
+            filterChips
+                .padding(.bottom, 6)
 
             if all.isEmpty {
                 emptyState(
@@ -59,13 +53,13 @@ struct NearbySheet: View {
                 list(rows, units: units)
             }
         }
-        .background(Theme.background.opacity(0.55))
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .presentationBackground(.ultraThinMaterial)
-        .presentationCornerRadius(28)
+        .presentationCornerRadius(30)
         .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+        .nearbySheetBackground()
         .sensoryFeedback(.selection, trigger: selectTick)
+        .sensoryFeedback(.selection, trigger: category)
         .alert("Rename waypoint", isPresented: $showRename) {
             TextField("Name", text: $renameText)
             Button("Cancel", role: .cancel) { renameTarget = nil }
@@ -80,12 +74,12 @@ struct NearbySheet: View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Nearby")
-                    .font(.system(.title2, design: .rounded).weight(.bold))
-                    .foregroundStyle(Theme.textPrimary)
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(.primary)
                 HStack(spacing: 6) {
                     if let fix {
                         Circle()
-                            .fill(Theme.userRed)
+                            .fill(Color(uiColor: model.settings.locationColor.uiColor))
                             .frame(width: 7, height: 7)
                         Text(Self.fixText(fix, units: units))
                     } else {
@@ -93,32 +87,52 @@ struct NearbySheet: View {
                             .font(.caption2)
                         Text("Waiting for GPS — map order")
                     }
+                    if count > 0 {
+                        Text("· \(count) places")
+                    }
                 }
                 .font(.footnote)
-                .foregroundStyle(Theme.textSecondary)
+                .foregroundStyle(.secondary)
                 .monospacedDigit()
             }
             Spacer(minLength: 8)
-            if count > 0 {
-                Text("\(count)")
-                    .font(.footnote.weight(.bold))
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.textSecondary)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(Theme.surfaceRaised, in: Capsule())
-            }
             Button {
                 dismiss()
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Theme.textSecondary)
-                    .frame(width: 30, height: 30)
-                    .background(Theme.surfaceRaised, in: Circle())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 32, height: 32)
+                    .background(Color.primary.opacity(0.1), in: Circle())
             }
+            .buttonStyle(NearbyRowButtonStyle())
             .accessibilityLabel("Close")
         }
+    }
+
+    /// Apple Maps style category chips.
+    private var filterChips: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(NearbyFilter.allCases) { f in
+                    let on = f == category
+                    Button {
+                        withAnimation(.snappy) { category = f }
+                    } label: {
+                        Label(f.title, systemImage: f.symbol)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(on ? Color.white : Color.primary)
+                            .padding(.horizontal, 14)
+                            .frame(height: 34)
+                            .background(on ? AnyShapeStyle(Color.blue) : AnyShapeStyle(Color.primary.opacity(0.09)), in: Capsule())
+                    }
+                    .buttonStyle(NearbyRowButtonStyle())
+                    .accessibilityAddTraits(on ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, 16)
+        }
+        .scrollIndicators(.hidden)
     }
 
     private static func fixText(_ fix: CLLocation, units: DistanceUnits) -> String {
@@ -129,67 +143,69 @@ struct NearbySheet: View {
     @MainActor
     private func list(_ rows: [NearbyRow], units: DistanceUnits) -> some View {
         List {
-            ForEach(rows) { row in
-                Button {
-                    select(row.poi)
-                } label: {
-                    NearbyRowView(row: row, units: units)
-                }
-                .buttonStyle(NearbyRowButtonStyle())
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    if row.poi.source == .user {
-                        Button(role: .destructive) {
-                            delete(row.poi)
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
-                        Button {
-                            beginRename(row.poi)
-                        } label: {
-                            Label("Rename", systemImage: "pencil")
-                        }
-                        .tint(Theme.accent)
-                    }
-                }
-                .contextMenu {
+            Section {
+                ForEach(rows) { row in
                     Button {
                         select(row.poi)
                     } label: {
-                        Label("Show on map", systemImage: "scope")
+                        NearbyRowView(row: row, units: units)
                     }
-                    if row.poi.source == .user {
-                        Button {
-                            beginRename(row.poi)
-                        } label: {
-                            Label("Rename", systemImage: "pencil")
+                    .buttonStyle(NearbyRowButtonStyle())
+                    .listRowBackground(Color.primary.opacity(0.07))
+                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        if row.poi.source == .user {
+                            Button(role: .destructive) {
+                                delete(row.poi)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                            Button {
+                                beginRename(row.poi)
+                            } label: {
+                                Label("Rename", systemImage: "pencil")
+                            }
+                            .tint(Color.blue)
                         }
-                        Button(role: .destructive) {
-                            delete(row.poi)
+                    }
+                    .contextMenu {
+                        Button {
+                            select(row.poi)
                         } label: {
-                            Label("Delete", systemImage: "trash")
+                            Label("Show on Map", systemImage: "scope")
+                        }
+                        if row.poi.source == .user {
+                            Button {
+                                beginRename(row.poi)
+                            } label: {
+                                Label("Rename", systemImage: "pencil")
+                            }
+                            Button(role: .destructive) {
+                                delete(row.poi)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
                         }
                     }
                 }
             }
         }
-        .listStyle(.plain)
+        .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+        .contentMargins(.top, 4, for: .scrollContent)
         .environment(\.defaultMinListRowHeight, 10)
     }
 
     private func emptyState(title: String, symbol: String, text: String) -> some View {
         VStack(spacing: 10) {
             Spacer(minLength: 16)
-            SymbolBadge(symbol: symbol, color: Theme.textSecondary, size: 56)
+            SymbolBadge(symbol: symbol, color: Color.secondary, size: 56)
             Text(title)
                 .font(.headline)
-                .foregroundStyle(Theme.textPrimary)
+                .foregroundStyle(.primary)
             Text(text)
                 .font(.subheadline)
-                .foregroundStyle(Theme.textSecondary)
+                .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
             Spacer(minLength: 16)
@@ -299,45 +315,44 @@ struct NearbyRow: Identifiable, Hashable {
 
 // MARK: - Row
 
-private struct NearbyRowView: View {
+/// One POI: glyph marker, name, kind/elevation/source, distance and a bearing arrow.
+struct NearbyRowView: View {
     let row: NearbyRow
     let units: DistanceUnits
 
     var body: some View {
         let poi = row.poi
         HStack(spacing: 12) {
-            SymbolBadge(symbol: poi.kind.symbolName, color: POIKindStyle.color(for: poi.kind), size: 38)
+            POIGlyphMarker(kind: poi.kind, size: 38)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(poi.name.isEmpty ? POIKindStyle.name(for: poi.kind) : poi.name)
                     .font(.body.weight(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text(subtitle)
                     .font(.footnote)
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             if let distance = row.distance, let bearing = row.bearing {
-                VStack(alignment: .trailing, spacing: 3) {
+                VStack(alignment: .trailing, spacing: 2) {
                     Text(distance < 25 ? "Here" : GeoFormat.distance(distance, units: units))
-                        .font(.callout.weight(.semibold))
+                        .font(.system(.callout, design: .rounded).weight(.semibold))
                         .monospacedDigit()
-                        .foregroundStyle(distance < 25 ? Theme.userRed : Theme.textPrimary)
+                        .foregroundStyle(.primary)
                     Text(Geodesy.compassPoint(bearing))
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(Theme.textSecondary)
+                        .foregroundStyle(.secondary)
                 }
                 NearbyBearingArrow(bearing: bearing)
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Theme.surface.opacity(0.85), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.stroke, lineWidth: 1))
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(.vertical, 9)
+        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
     }
 
@@ -369,16 +384,14 @@ private struct NearbyBearingArrow: View {
         let relative = Self.normalized(bearing - (heading ?? 0))
         ZStack {
             Circle()
-                .fill(Theme.surfaceRaised)
-            Circle()
-                .stroke(heading == nil ? Theme.stroke : Theme.accent.opacity(0.35), lineWidth: 1)
+                .fill(Color.primary.opacity(0.08))
             Image(systemName: "location.north.fill")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundStyle(heading == nil ? Theme.textSecondary : Theme.accent)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(heading == nil ? Color.secondary : Color.blue)
                 .rotationEffect(.degrees(relative))
                 .animation(.easeOut(duration: 0.25), value: relative)
         }
-        .frame(width: 34, height: 34)
+        .frame(width: 32, height: 32)
         .accessibilityHidden(true)
     }
 
@@ -391,11 +404,27 @@ private struct NearbyBearingArrow: View {
     }
 }
 
-private struct NearbyRowButtonStyle: ButtonStyle {
+struct NearbyRowButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
             .opacity(configuration.isPressed ? 0.85 : 1)
             .animation(.spring(response: 0.25, dampingFraction: 0.75), value: configuration.isPressed)
+    }
+}
+
+extension View {
+    /// Liquid Glass sheet on iOS 26 (the system default); a frosted material before.
+    @ViewBuilder
+    func nearbySheetBackground() -> some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            self
+        } else {
+            self.presentationBackground(.regularMaterial)
+        }
+        #else
+        self.presentationBackground(.regularMaterial)
+        #endif
     }
 }

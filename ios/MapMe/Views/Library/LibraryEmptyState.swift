@@ -4,6 +4,8 @@ import SwiftUI
 struct LibraryEmptyState: View {
     var onImportFile: () -> Void
     var onImportPhoto: () -> Void
+    /// Document camera ("Scan Paper Map"); nil where it is not available.
+    var onScan: (() -> Void)? = nil
 
     @State private var appeared = false
 
@@ -20,7 +22,7 @@ struct LibraryEmptyState: View {
                         .font(.system(.title, design: .rounded).weight(.bold))
                         .foregroundStyle(Theme.textPrimary)
                         .multilineTextAlignment(.center)
-                    Text("Import a PDF or picture of any trail map — MapMe finds where it is and shows you on it.")
+                    Text("Import a PDF, a screenshot or a photo of any trail map — MapMe finds where it is and shows you on it.")
                         .font(.body)
                         .foregroundStyle(Theme.textSecondary)
                         .multilineTextAlignment(.center)
@@ -31,6 +33,11 @@ struct LibraryEmptyState: View {
                 .offset(y: appeared ? 0 : 12)
 
                 Menu {
+                    if let onScan {
+                        Button(action: onScan) {
+                            Label("Scan Paper Map", systemImage: "camera.viewfinder")
+                        }
+                    }
                     Button(action: onImportFile) {
                         Label("PDF or image from Files", systemImage: "folder")
                     }

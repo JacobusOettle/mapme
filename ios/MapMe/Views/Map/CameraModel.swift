@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Observation
 
 /// What part of the map the canvas shows. The map pixel `center` sits at the middle of the
 /// view, `zoom` is view points per map pixel and `rotation` turns the map clockwise (radians).
@@ -43,6 +44,69 @@ struct CanvasCamera: Equatable {
     }
 }
 
+/// Apple Maps style user tracking (the location button cycles none → follow → follow with heading → follow).
+enum CanvasTrackingMode: String, Equatable, CaseIterable {
+    /// The camera stays where you put it.
+    case none
+    /// The camera follows your position.
+    case follow
+    /// The camera follows your position and the map turns with your heading.
+    case followWithHeading
+
+    var follows: Bool { self != .none }
+
+    /// What the tracking button switches to.
+    var next: CanvasTrackingMode {
+        switch self {
+        case .none: return .follow
+        case .follow: return .followWithHeading
+        case .followWithHeading: return .follow
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .none: return "location"
+        case .follow: return "location.fill"
+        case .followWithHeading: return "location.north.line.fill"
+        }
+    }
+}
+
+/// Live readouts from the map canvas for SwiftUI chrome (the compass) and commands back to it.
+/// The canvas publishes only meaningful changes, so observers re-render rarely.
+@MainActor
+@Observable
+final class MapCanvasController {
+    /// Map rotation in degrees (clockwise) relative to the paper's own up. Updated in small steps
+    /// while the map turns; read it only from views that should redraw that often.
+    private(set) var rotationDegrees: Double = 0
+    /// Screen direction of true north at your position (or the view centre), degrees clockwise from up.
+    private(set) var northDegrees: Double = 0
+    /// The map is turned away from paper-up (the compass shows). Changes only when crossing the threshold.
+    private(set) var isRotated = false
+
+    @ObservationIgnored weak var canvas: MapCanvasUIView?
+
+    init() {}
+
+    /// Animate back to paper-up (north-up for a grid-aligned map).
+    func resetNorth() {
+        canvas?.animateToNorthUp()
+    }
+
+    func publish(rotationDegrees r: Double, northDegrees n: Double) {
+        if abs(MapAngle.normalizedDegrees(r - rotationDegrees)) > 0.25 || (abs(r) < 0.01 && rotationDegrees != 0) {
+            rotationDegrees = abs(r) < 0.01 ? 0 : r
+        }
+        if abs(MapAngle.normalizedDegrees(n - northDegrees)) > 0.25 {
+            northDegrees = n
+        }
+        let rotated = abs(MapAngle.normalizedDegrees(r)) > 0.75
+        if rotated != isRotated { isRotated = rotated }
+    }
+}
+
 enum MapAngle {
     /// Wraps to -π…π.
     static func normalized(_ a: Double) -> Double {
@@ -53,12 +117,19 @@ enum MapAngle {
     }
 
     static func radians(_ degrees: Double) -> Double { degrees * .pi / 180 }
+
+    /// Wraps to -180…180.
+    static func normalizedDegrees(_ d: Double) -> Double {
+        normalized(radians(d)) * 180 / .pi
+    }
 }
 
 /// A round-number scale bar ("200 m", "1 km", "500 ft", "2 mi").
 struct ScaleBarSpec: Equatable {
     var length: CGFloat
     var label: String
+    /// Number at the middle tick, without units ("100" for "200 m").
+    var halfLabel: String = ""
 
     /// - Parameters:
     ///   - metersPerPoint: ground metres per view point at the screen centre.
@@ -69,16 +140,20 @@ struct ScaleBarSpec: Equatable {
         switch units {
         case .metric:
             let meters = niceNumber(atMost: maxMeters)
-            let label = meters >= 1000 ? "\(formatted(meters / 1000)) km" : "\(formatted(meters)) m"
-            return ScaleBarSpec(length: CGFloat(meters / metersPerPoint), label: label)
+            let km = meters >= 1000
+            let label = km ? "\(formatted(meters / 1000)) km" : "\(formatted(meters)) m"
+            let half = formatted(km ? meters / 2000 : meters / 2)
+            return ScaleBarSpec(length: CGFloat(meters / metersPerPoint), label: label, halfLabel: half)
         case .imperial:
             let feet = maxMeters / 0.3048
             if feet < 2640 {
                 let f = niceNumber(atMost: feet)
-                return ScaleBarSpec(length: CGFloat(f * 0.3048 / metersPerPoint), label: "\(formatted(f)) ft")
+                return ScaleBarSpec(length: CGFloat(f * 0.3048 / metersPerPoint), label: "\(formatted(f)) ft",
+                                    halfLabel: formatted(f / 2))
             }
             let miles = niceNumber(atMost: maxMeters / 1609.344)
-            return ScaleBarSpec(length: CGFloat(miles * 1609.344 / metersPerPoint), label: "\(formatted(miles)) mi")
+            return ScaleBarSpec(length: CGFloat(miles * 1609.344 / metersPerPoint), label: "\(formatted(miles)) mi",
+                                halfLabel: formatted(miles / 2))
         }
     }
 

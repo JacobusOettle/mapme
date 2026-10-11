@@ -286,11 +286,20 @@ scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
   `DEMService` (Terrarium fetch + disk cache), `GeoreferenceService` (OCR → core
   session → DEM loop, with progress stages), `POIService` (map labels +
   waypoints + OpenStreetMap Overpass).
-* `Views/` holds the Library, Import progress, the Map screen (`MapCanvasUIView`:
-  CATiledLayer pyramid, pan/pinch/rotate gestures, camera with north-up /
-  heading-up / free modes, overlays for the GPS dot, accuracy, heading cone,
-  dotted track, POIs and waypoints), HUD, Nearby sheet, Calibration (MapKit) and
-  Settings.
+* `Services/` also has the photo path: `PhotoQuadDetector` (Vision document
+  segmentation / rectangles + sub-pixel edge snapping), `MapPhotoRectifier`
+  (CIPerspectiveCorrection with aspect-ratio recovery) and, in Debug builds,
+  `SyntheticPhoto` for tests.
+* `Views/` holds the Library, the import flow (corner editor for photos, then
+  progress), the Map screen (`MapCanvasUIView`: CATiledLayer pyramid,
+  pan/pinch/rotate gestures, camera with tracking modes none / follow / follow
+  with heading and a compass; overlays for the position puck, heading beam,
+  accuracy, dotted trail, POI markers and waypoints), the stats card, Nearby
+  sheet, Calibration (MapKit) and Settings.
+* Photos of paper maps keep the original as `source-photo.*` and the flattened
+  page as `source.jpg` (the base raster); `MapDocument.photoSource` stores the
+  page corners so they can be adjusted later, and georeferencing runs with
+  `"photo": true`.
 
 Map files live in `Application Support/Maps/<uuid>/` as `meta.json`, the original
 source, `tiles/{level}/{col}_{row}.jpg` (512 px tiles, level 0 = full

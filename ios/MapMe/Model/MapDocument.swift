@@ -4,6 +4,22 @@ import Foundation
 enum MapSourceKind: String, Codable, Hashable {
     case pdf
     case image
+    /// Photo of a paper map: flattened from its page corners, or a document-camera scan.
+    case photo
+}
+
+/// The original photo of a paper map and the page corners its base raster was flattened from.
+struct PhotoSource: Codable, Hashable {
+    /// Original photo inside the map folder ("source-photo.heic"); may equal the base raster's
+    /// file when the photo was used as is.
+    var fileName: String
+    /// Size of the upright photo (EXIF orientation applied, long side ≤ 6000 px) the corners refer to.
+    var pixelWidth: Int
+    var pixelHeight: Int
+    /// Page corners TL, TR, BR, BL as [x, y] in those pixels (top-left origin).
+    var quad: [[Double]]
+    /// 35 mm-equivalent focal length from the photo's EXIF, when known (helps recover the page's aspect ratio).
+    var focalLength35mm: Double? = nil
 }
 
 enum POIKind: String, Codable, Hashable, CaseIterable {
@@ -68,9 +84,16 @@ struct MapDocument: Codable, Hashable, Identifiable {
     var pois: [MapPOI] = []
     /// User-picked contour colour override (RGB 0-255), used when re-locating.
     var contourRGB: [Int]?
+    /// Photos of paper maps: the original photo and the page corners (nil for PDFs, images and scans).
+    /// Optional, so meta.json files written before photo support still decode.
+    var photoSource: PhotoSource? = nil
 
     var pixelSize: CGSize { CGSize(width: pixelWidth, height: pixelHeight) }
     var isGeoreferenced: Bool { georef != nil }
+    /// Taken with a camera: georeferenced in photo mode (lighting normalised, projective fit).
+    var isPhoto: Bool { sourceKind == .photo }
+    /// The page corners can be adjusted again (the original photo is kept).
+    var canAdjustCorners: Bool { photoSource != nil }
 
     /// Centre of the map in geographic coordinates, if georeferenced.
     var center: LatLon? {

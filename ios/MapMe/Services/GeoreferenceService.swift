@@ -45,8 +45,10 @@ final class GeoreferenceService {
         self.dem = dem
     }
 
-    /// `progress(stage, fraction 0…1)` may be called from any thread.
+    /// `progress(stage, fraction 0…1)` may be called from any thread. `photo` marks a photo of a
+    /// paper map (lighting normalisation and a projective fit in the core).
     func locate(image: CGImage, dpi: Double?, gps: CLLocation?, contourRGB: [Int]?, searchRadiusKm: Double,
+                photo: Bool = false,
                 progress: @escaping (GeorefStage, Double) -> Void) async -> GeorefOutcome {
         lock.withLock { cancelled = false }
         let reporter = MonotonicProgress(progress)
@@ -87,6 +89,7 @@ final class GeoreferenceService {
         request.contourRgb = contourRGB
         request.searchRadiusM = searchRadiusKm * 1000
         request.methods = ["grid", "contours"]
+        request.photo = photo
 
         var response: GeorefResponse?
         var downloadRounds = 0

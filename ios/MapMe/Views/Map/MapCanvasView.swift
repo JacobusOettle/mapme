@@ -24,7 +24,11 @@ struct CanvasMarker: Identifiable, Hashable {
 }
 
 /// SwiftUI wrapper around the high-performance UIKit map canvas
-/// (CATiledLayer pyramid, pan/pinch/rotate, camera modes, overlays).
+/// (CATiledLayer pyramid, pan/pinch/rotate, tracking modes, overlays).
+///
+/// Two ways to drive the camera: the live map passes `tracking` (Apple Maps style
+/// none / follow / follow with heading, which the canvas updates when you pan or rotate);
+/// simpler embeddings (calibration) use `follow` + `orientation` as before.
 struct MapCanvasView: UIViewRepresentable {
     let map: MapDocument
     let tileStore: TileStore
@@ -40,18 +44,29 @@ struct MapCanvasView: UIViewRepresentable {
     var selectedPOIID: UUID? = nil
     var markers: [CanvasMarker] = []
     /// Camera follows the user's position. The canvas sets it to false when the user pans.
+    /// Ignored when `tracking` is given.
     @Binding var follow: Bool
     /// Tap on the map (base-image pixel), when not hitting a POI.
     var onTap: ((CGPoint) -> Void)? = nil
     /// Long-press on the map (base-image pixel).
     var onLongPress: ((CGPoint) -> Void)? = nil
     var onSelectPOI: ((MapPOI) -> Void)? = nil
-    /// Heading uncertainty in degrees (widens the heading cone).
+    /// Heading uncertainty in degrees (widens the heading beam).
     var headingAccuracy: Double? = nil
     var units: DistanceUnits = .metric
-    /// Space taken by floating controls (including the safe area); the user's dot, the scale bar
+    /// Space taken by floating controls (including the safe area); the puck, the scale bar
     /// and the off-screen arrow stay inside the rest.
     var chromeInsets: UIEdgeInsets = .zero
+    /// Apple Maps style tracking mode; the canvas writes `.none` when you pan, `.follow` when you
+    /// rotate by hand or tap the compass in heading mode.
+    var tracking: Binding<CanvasTrackingMode>? = nil
+    /// Two-finger rotation (with `tracking`; the legacy path allows it only in `.free` orientation).
+    var allowRotation: Bool = true
+    var locationColor: LocationColor = .red
+    /// Also draw POIs read off the map itself (they are printed on the paper already).
+    var showMapLabels: Bool = true
+    /// Receives the map rotation (for the compass) and takes commands (north up).
+    var controller: MapCanvasController? = nil
 
     func makeUIView(context: Context) -> MapCanvasUIView {
         MapCanvasUIView(frame: .zero)
@@ -61,16 +76,36 @@ struct MapCanvasView: UIViewRepresentable {
         uiView.onTap = onTap
         uiView.onLongPress = onLongPress
         uiView.onSelectPOI = onSelectPOI
-        let binding = $follow
-        uiView.onFollowChange = { value in
-            // Never write SwiftUI state during a view update.
-            DispatchQueue.main.async { binding.wrappedValue = value }
+        uiView.controller = controller
+
+        let mode: CanvasTrackingMode
+        let lockNorthUp: Bool
+        let rotation: Bool
+        if let tracking {
+            mode = tracking.wrappedValue
+            lockNorthUp = false
+            rotation = allowRotation
+            uiView.onTrackingChange = { value in
+                // Never write SwiftUI state during a view update.
+                DispatchQueue.main.async { tracking.wrappedValue = value }
+            }
+        } else {
+            mode = follow ? (orientation == .headingUp ? .followWithHeading : .follow) : .none
+            lockNorthUp = orientation == .northUp
+            rotation = orientation == .free
+            let binding = $follow
+            uiView.onTrackingChange = { value in
+                DispatchQueue.main.async { binding.wrappedValue = value.follows }
+            }
         }
+
         uiView.apply(MapCanvasUIView.Inputs(
             map: map,
             tileStore: tileStore,
             nightMode: nightMode,
-            orientation: orientation,
+            tracking: mode,
+            lockNorthUp: lockNorthUp,
+            allowRotation: rotation,
             userLocation: userLocation,
             heading: heading,
             headingAccuracy: headingAccuracy,
@@ -78,15 +113,17 @@ struct MapCanvasView: UIViewRepresentable {
             showTrack: showTrack,
             pois: pois,
             showPOIs: showPOIs,
+            showMapLabels: showMapLabels,
             selectedPOIID: selectedPOIID,
             markers: markers,
-            follow: follow,
             units: units,
-            chromeInsets: chromeInsets
+            chromeInsets: chromeInsets,
+            locationColor: locationColor.uiColor
         ))
     }
 
     static func dismantleUIView(_ uiView: MapCanvasUIView, coordinator: Coordinator) {
-        uiView.onFollowChange = nil
+        uiView.onTrackingChange = nil
+        uiView.controller = nil
     }
 }

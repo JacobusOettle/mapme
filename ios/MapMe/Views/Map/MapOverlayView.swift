@@ -2,16 +2,19 @@ import CoreLocation
 import QuartzCore
 import UIKit
 
-/// Screen-space overlays drawn above the (transformed) map: GPS dot, accuracy circle, heading cone,
-/// dotted trail, POIs, selection guide line, calibration pins, scale bar and the off-screen arrow.
+/// Screen-space overlays drawn above the (transformed) map, in the style of Apple Maps: the
+/// location puck (white ring, gradient disc, breathing halo, heading "flashlight" beam, accuracy
+/// circle), the dotted walked trail, POI glyph markers with halo labels, the selected POI's balloon
+/// pin and guide line, calibration pins, the scale bar and the off-screen arrow.
 /// Inputs are set when they change; `render` positions everything for a camera and is cheap
-/// enough to run every frame (no big allocations, implicit animations disabled).
+/// enough to run every frame (no allocations on the common path, implicit animations disabled).
 final class MapOverlayView: UIView {
     var units: DistanceUnits = .metric {
         didSet {
             guard units != oldValue else { return }
             scaleSpec = nil
             rebuildPOIs()
+            updateGuideText()
         }
     }
 
@@ -20,20 +23,34 @@ final class MapOverlayView: UIView {
     private var georef: Georeference?
     private var mercatorToPixel: Homography = .identity
     private var location: CLLocation?
-    private var userPixel: CGPoint?
+    /// Where the latest fix is on the map.
+    private var targetUserPixel: CGPoint?
+    /// Where the puck is drawn: glides to `targetUserPixel` after every fix.
+    private var shownUserPixel: CGPoint?
+    private var glideFrom: CGPoint = .zero
+    private var glideStart: CFTimeInterval = 0
+    private var gliding = false
     private var userLatLon: LatLon?
     private var metersPerPixelAtUser = 1.0
     private var northAtUser = 0.0
+    /// Accuracy radius in map pixels: target from the fix, and the animated value drawn.
+    private var accuracyTargetPx: CGFloat = 0
+    private var accuracyShownPx: CGFloat = -1
+    private var isStale = false
+    private var staleTask: Task<Void, Never>?
+
+    private var puckColor: UIColor = LocationColor.red.uiColor
+    private var night = false
 
     private var trackPoints: [TrackPoint] = []
     private var trackPixels: [CGPoint] = []
     private var showTrack = true
-    private var trailDirty = true
 
     private var pois: [MapPOI] = []
     private var items: [POIItem] = []
     private var showPOIs = true
-    private var labelsDirty = true
+    private var showMapLabels = true
+    private var placementDirty = true
     private var selectedID: UUID?
 
     private var markers: [CanvasMarker] = []
@@ -41,56 +58,90 @@ final class MapOverlayView: UIView {
 
     // MARK: Layers
 
-    private let trailCasing = CAShapeLayer()
-    private let trailLayer = CAShapeLayer()
     private let accuracyLayer = CALayer()
-    private let coneLayer = CAGradientLayer()
-    private let coneMask = CAShapeLayer()
-    private let poiContainer = CALayer()
-    private let selectionRing = CALayer()
+    private let beamLayer = CALayer()
+    private let trailHalo = CAShapeLayer()
+    private let trailDots = CAShapeLayer()
+    private let trailStart = CALayer()
+    private let guideCasing = CAShapeLayer()
     private let guideLayer = CAShapeLayer()
+    private let poiContainer = CALayer()
+    private let balloonLayer = CALayer()
+    private let balloonLabel = CALayer()
     private let guideLabel = CALayer()
     private let haloLayer = CALayer()
-    private let dotLayer = CALayer()
+    private let puckLayer = CALayer()
+    private let puckShadow = CALayer()
+    private let puckRing = CALayer()
+    private let puckDisc = CAGradientLayer()
     private let markerContainer = CALayer()
     private let offscreenArrow = CAShapeLayer()
     private let offscreenLabel = CALayer()
-    private let scaleBarLayer = CAShapeLayer()
-    private let scaleLabel = CALayer()
+    private let scaleLayer = CALayer()
 
     // MARK: Render caches
 
     private var lastCamera: CanvasCamera?
-    /// Rendered POI name pills by text (the text includes units, so no invalidation needed).
-    private var pillCache: [String: UIImage] = [:]
-    private var lastLabelCamera: CanvasCamera?
-    private var coneWidth: CGFloat = -1
+    private var lastPlacementCamera: CanvasCamera?
+    /// Trail path in "trail space": view offsets from `trailOrigin` for the zoom and rotation it was built at.
+    private var trailPath = CGMutablePath()
+    private var trailOrigin: CGPoint = .zero
+    private var trailZoom: CGFloat = 0
+    private var trailRotation: CGFloat = 0
+    /// Last point added to `trailPath` (trail space) and how many track pixels it covers.
+    private var trailLast: CGPoint = .zero
+    private var trailBuiltCount = 0
+    private var trailNeedsRebuild = true
+    private var beamWidth = -1
     private var guideText = ""
     private var renderedGuideText = ""
+    private var balloonKind: POIKind?
+    private var balloonID: UUID?
     private var offscreenText = ""
     private var scaleSpec: ScaleBarSpec?
+    private var scaleNight = false
     private var scaleZoom: CGFloat = 0
-    private var scaleOrigin: CGPoint = .zero
+    private var scaleShown = false
+    private var scaleHideAt: CFTimeInterval = 0
+    private var scaleTask: Task<Void, Never>?
 
-    static let dotSize: CGFloat = 24
-    static let coneRadius: CGFloat = 64
-    /// Labels are only drawn when zoomed in at least this far (points per map pixel)…
-    static let labelMinZoom: CGFloat = 0.16
+    /// Puck: inner disc and white ring.
+    static let discSize: CGFloat = 15
+    static let ringWidth: CGFloat = 3.5
+    static var puckSize: CGFloat { discSize + ringWidth * 2 }
+    static let beamRadius: CGFloat = 64
+    /// Time the puck takes to glide to a new fix.
+    static let puckGlide: CFTimeInterval = 0.8
+    /// A fix older than this is shown as a grey "last known" puck.
+    static let staleAfter: TimeInterval = 30
+    /// POI labels show when zoomed in to at least this many points per ground metre⁻¹ (metres per point)…
+    static let labelMaxMetersPerPoint = 7.0
     /// …and the trail skips points closer than this on screen.
-    static let trailMinSpacing: CGFloat = 2.5
+    static let trailMinSpacing: CGFloat = 3
+    /// Dotted trail: dot diameter, halo diameter and dot spacing (points).
+    static let trailDot: CGFloat = 7
+    static let trailHaloWidth: CGFloat = 10.5
+    static let trailSpacing: CGFloat = 12
 
     private final class POIItem {
         let poi: MapPOI
         let pixel: CGPoint
         let priority: Int
-        let badge = CALayer()
+        let labelText: String
+        let marker = CALayer()
         let label = CALayer()
         var screen: CGPoint = .zero
+        var markerVisible = false
         var labelVisible = false
+        /// Label to the left of the marker instead of the right.
+        var labelLeft = false
+        /// The label bitmap is drawn the first time the label shows.
+        var labelReady = false
 
-        init(poi: MapPOI, pixel: CGPoint) {
+        init(poi: MapPOI, pixel: CGPoint, labelText: String) {
             self.poi = poi
             self.pixel = pixel
+            self.labelText = labelText
             switch poi.kind {
             case .waypoint: priority = 0
             case .peak: priority = 1
@@ -113,127 +164,166 @@ final class MapOverlayView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window != nil { startPulse() }
+        if window != nil { startBreathing() }
     }
 
     private func setUpLayers() {
-        let red = Theme.uiUserRed
+        accuracyLayer.borderWidth = 0.75
 
-        // Round caps on near-zero dashes draw dots; the darker casing underneath keeps them readable on any map.
-        for (l, color, width) in [(trailCasing, UIColor.black.withAlphaComponent(0.45), CGFloat(7.5)),
-                                  (trailLayer, Theme.uiTrack, CGFloat(5))] {
+        let b = Self.beamRadius * 2
+        beamLayer.bounds = CGRect(x: 0, y: 0, width: b, height: b)
+
+        // Zero-length dashes with round caps draw dots; the wider white dots underneath give each a halo.
+        for (l, color, width) in [(trailHalo, UIColor.white, Self.trailHaloWidth), (trailDots, Theme.uiTrack, Self.trailDot)] {
             l.fillColor = nil
             l.strokeColor = color.cgColor
             l.lineWidth = width
             l.lineCap = .round
             l.lineJoin = .round
-            l.lineDashPattern = [0.01, 9]
+            l.lineDashPattern = [0.001, NSNumber(value: Double(Self.trailSpacing))]
+            l.anchorPoint = .zero
+            l.bounds = .zero
         }
+        let start = OverlayArt.trailStart()
+        trailStart.contents = start.cgImage
+        trailStart.contentsScale = start.scale
+        trailStart.bounds = CGRect(origin: .zero, size: start.size)
 
-        accuracyLayer.backgroundColor = red.withAlphaComponent(0.13).cgColor
-        accuracyLayer.borderColor = red.withAlphaComponent(0.45).cgColor
-        accuracyLayer.borderWidth = 1
-
-        let d = Self.coneRadius * 2
-        coneLayer.bounds = CGRect(x: 0, y: 0, width: d, height: d)
-        coneLayer.type = .radial
-        coneLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
-        coneLayer.endPoint = CGPoint(x: 1, y: 1)
-        coneLayer.colors = [red.withAlphaComponent(0.6).cgColor, red.withAlphaComponent(0.0).cgColor]
-        coneMask.frame = coneLayer.bounds
-        coneMask.fillColor = UIColor.black.cgColor
-        coneLayer.mask = coneMask
-
-        selectionRing.bounds = CGRect(x: 0, y: 0, width: 38, height: 38)
-        selectionRing.cornerRadius = 19
-        selectionRing.borderWidth = 2.5
-        selectionRing.borderColor = Theme.uiAccent.cgColor
-        selectionRing.backgroundColor = Theme.uiAccent.withAlphaComponent(0.18).cgColor
-        selectionRing.shadowColor = Theme.uiAccent.cgColor
-        selectionRing.shadowOpacity = 0.8
-        selectionRing.shadowRadius = 6
-        selectionRing.shadowOffset = .zero
-        selectionRing.shadowPath = UIBezierPath(ovalIn: selectionRing.bounds).cgPath
-
+        guideCasing.fillColor = nil
+        guideCasing.strokeColor = UIColor.white.withAlphaComponent(0.9).cgColor
+        guideCasing.lineWidth = 6
+        guideCasing.lineCap = .round
+        guideCasing.lineDashPattern = [8, 7]
         guideLayer.fillColor = nil
-        guideLayer.strokeColor = Theme.uiAccent.withAlphaComponent(0.9).cgColor
-        guideLayer.lineWidth = 2.5
+        guideLayer.lineWidth = 3
         guideLayer.lineCap = .round
-        guideLayer.lineDashPattern = [7, 6]
+        guideLayer.lineDashPattern = [8, 7]
 
-        let s = Self.dotSize
+        balloonLabel.anchorPoint = CGPoint(x: 0.5, y: 0)
+
+        let s = Self.puckSize
         haloLayer.bounds = CGRect(x: 0, y: 0, width: s, height: s)
         haloLayer.cornerRadius = s / 2
-        haloLayer.backgroundColor = red.cgColor
-        haloLayer.opacity = 0
 
-        dotLayer.bounds = CGRect(x: 0, y: 0, width: s, height: s)
-        dotLayer.cornerRadius = s / 2
-        dotLayer.backgroundColor = red.cgColor
-        dotLayer.borderColor = UIColor.white.cgColor
-        dotLayer.borderWidth = 3
-        dotLayer.shadowColor = red.cgColor
-        dotLayer.shadowOpacity = 0.9
-        dotLayer.shadowRadius = 8
-        dotLayer.shadowOffset = .zero
-        dotLayer.shadowPath = UIBezierPath(ovalIn: dotLayer.bounds).cgPath
+        puckLayer.bounds = CGRect(x: 0, y: 0, width: s, height: s)
+        puckShadow.frame = puckLayer.bounds
+        puckShadow.shadowPath = UIBezierPath(ovalIn: puckShadow.bounds).cgPath
+        puckShadow.shadowColor = UIColor.black.cgColor
+        puckShadow.shadowOpacity = 0.35
+        puckShadow.shadowRadius = 3
+        puckShadow.shadowOffset = CGSize(width: 0, height: 1.5)
+        puckRing.frame = puckLayer.bounds
+        puckRing.cornerRadius = s / 2
+        puckRing.backgroundColor = UIColor.white.cgColor
+        let d = Self.discSize
+        puckDisc.frame = CGRect(x: (s - d) / 2, y: (s - d) / 2, width: d, height: d)
+        puckDisc.cornerRadius = d / 2
+        puckDisc.masksToBounds = true
+        puckDisc.startPoint = CGPoint(x: 0.5, y: 0)
+        puckDisc.endPoint = CGPoint(x: 0.5, y: 1)
+        puckLayer.addSublayer(puckShadow)
+        puckLayer.addSublayer(puckRing)
+        puckLayer.addSublayer(puckDisc)
 
         offscreenArrow.path = OverlayArt.arrowPath()
-        offscreenArrow.fillColor = red.cgColor
         offscreenArrow.strokeColor = UIColor.white.cgColor
         offscreenArrow.lineWidth = 2
         offscreenArrow.lineJoin = .round
         offscreenArrow.shadowColor = UIColor.black.cgColor
-        offscreenArrow.shadowOpacity = 0.5
+        offscreenArrow.shadowOpacity = 0.4
         offscreenArrow.shadowRadius = 4
-        offscreenArrow.shadowOffset = .zero
+        offscreenArrow.shadowOffset = CGSize(width: 0, height: 1)
         offscreenArrow.shadowPath = offscreenArrow.path
 
-        scaleBarLayer.fillColor = nil
-        scaleBarLayer.strokeColor = UIColor.white.cgColor
-        scaleBarLayer.lineWidth = 2.5
-        scaleBarLayer.lineCap = .round
-        scaleBarLayer.lineJoin = .round
-        scaleLabel.anchorPoint = CGPoint(x: 0, y: 1)
+        scaleLayer.anchorPoint = .zero
+        scaleLayer.opacity = 0
 
-        let stack: [CALayer] = [trailCasing, trailLayer, guideLayer, accuracyLayer, coneLayer, poiContainer, selectionRing,
-                                haloLayer, dotLayer, guideLabel, markerContainer, offscreenArrow, offscreenLabel,
-                                scaleBarLayer, scaleLabel]
+        let stack: [CALayer] = [accuracyLayer, beamLayer, trailHalo, trailDots, trailStart, guideCasing, guideLayer,
+                                poiContainer, haloLayer, puckLayer, balloonLayer, balloonLabel, guideLabel,
+                                markerContainer, offscreenArrow, offscreenLabel, scaleLayer]
         for l in stack {
             layer.addSublayer(l)
         }
-        let initiallyHidden: [CALayer] = [trailCasing, trailLayer, accuracyLayer, coneLayer, selectionRing, haloLayer, dotLayer,
-                                          guideLayer, guideLabel, offscreenArrow, offscreenLabel, scaleBarLayer, scaleLabel]
+        let initiallyHidden: [CALayer] = [accuracyLayer, beamLayer, trailHalo, trailDots, trailStart, guideCasing, guideLayer,
+                                          haloLayer, puckLayer, balloonLayer, balloonLabel, guideLabel,
+                                          offscreenArrow, offscreenLabel, scaleLayer]
         for l in initiallyHidden {
             l.isHidden = true
         }
+        applyPuckStyle()
     }
 
-    private func startPulse() {
-        guard haloLayer.animation(forKey: "pulse") == nil else { return }
-        let scale = CABasicAnimation(keyPath: "transform.scale")
-        scale.fromValue = 1.0
-        scale.toValue = 3.2
-        let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = 0.5
-        fade.toValue = 0.0
-        let group = CAAnimationGroup()
-        group.animations = [scale, fade]
-        group.duration = 2.2
-        group.repeatCount = .infinity
-        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        group.isRemovedOnCompletion = false
-        haloLayer.add(group, forKey: "pulse")
+    /// Gentle breathing of the halo and the disc (render-server animations, no CPU per frame).
+    private func startBreathing() {
+        if haloLayer.animation(forKey: "breathe") == nil {
+            let scale = CABasicAnimation(keyPath: "transform.scale")
+            scale.fromValue = 1.1
+            scale.toValue = 1.85
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = 0.34
+            fade.toValue = 0.06
+            let group = CAAnimationGroup()
+            group.animations = [scale, fade]
+            group.duration = 1.7
+            group.autoreverses = true
+            group.repeatCount = .infinity
+            group.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            group.isRemovedOnCompletion = false
+            haloLayer.add(group, forKey: "breathe")
+        }
+        if puckDisc.animation(forKey: "breathe") == nil {
+            let disc = CABasicAnimation(keyPath: "transform.scale")
+            disc.fromValue = 1.0
+            disc.toValue = 0.86
+            disc.duration = 1.7
+            disc.autoreverses = true
+            disc.repeatCount = .infinity
+            disc.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            disc.isRemovedOnCompletion = false
+            puckDisc.add(disc, forKey: "breathe")
+        }
+    }
+
+    /// Colours of the puck, halo, accuracy circle, beam and off-screen arrow (grey when stale).
+    private func applyPuckStyle() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let base = isStale ? UIColor(white: 0.6, alpha: 1) : puckColor
+        puckDisc.colors = [OverlayArt.mix(base, .white, 0.22).cgColor, OverlayArt.mix(base, .black, 0.1).cgColor]
+        haloLayer.backgroundColor = base.cgColor
+        accuracyLayer.backgroundColor = base.withAlphaComponent(0.12).cgColor
+        accuracyLayer.borderColor = base.withAlphaComponent(0.22).cgColor
+        offscreenArrow.fillColor = base.cgColor
+        offscreenText = ""
+        beamWidth = -1
+        CATransaction.commit()
     }
 
     // MARK: - Inputs
+
+    func setStyle(locationColor: UIColor, night: Bool) {
+        if !locationColor.isEqual(puckColor) {
+            puckColor = locationColor
+            applyPuckStyle()
+        }
+        if night != self.night {
+            self.night = night
+            rebuildPOIs()
+            scaleSpec = nil
+            renderedGuideText = ""
+        }
+    }
 
     func setGeoref(_ g: Georeference?) {
         guard g != georef else { return }
         georef = g
         mercatorToPixel = g?.mercatorToPixel ?? .identity
         recomputeUser()
+        shownUserPixel = targetUserPixel
+        gliding = false
+        accuracyShownPx = -1
         trackPixels = []
+        trailNeedsRebuild = true
         convertTrack(from: 0)
         rebuildPOIs()
         scaleSpec = nil
@@ -245,27 +335,73 @@ final class MapOverlayView: UIView {
         if location == nil, fix == nil { return }
         location = fix
         recomputeUser()
+        if let target = targetUserPixel {
+            var jump = Double.infinity
+            if let shown = shownUserPixel {
+                let pixels = Double(hypot(shown.x - target.x, shown.y - target.y))
+                jump = pixels * metersPerPixelAtUser
+            }
+            if let shown = shownUserPixel, jump < 2000 {
+                glideFrom = shown
+                glideStart = CACurrentMediaTime()
+                gliding = true
+            } else {
+                shownUserPixel = target
+                gliding = false
+            }
+        } else {
+            shownUserPixel = nil
+            gliding = false
+        }
+        updateStale()
+    }
+
+    /// Grey "last known position" puck once the fix is older than `staleAfter`.
+    private func updateStale() {
+        staleTask?.cancel()
+        staleTask = nil
+        guard let fix = location else { return }
+        let age = Date().timeIntervalSince(fix.timestamp)
+        let stale = age > Self.staleAfter
+        if stale != isStale {
+            isStale = stale
+            applyPuckStyle()
+        }
+        guard !stale else { return }
+        let delay = max(0.1, Self.staleAfter - age + 0.25)
+        staleTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.isStale = true
+            self.applyPuckStyle()
+            self.haloLayer.isHidden = true
+            self.beamLayer.isHidden = true
+        }
     }
 
     func setTrack(_ points: [TrackPoint], visible: Bool) {
         if visible != showTrack {
             showTrack = visible
-            trailDirty = true
+            trailNeedsRebuild = true
         }
         if points.count == trackPoints.count, points.first == trackPoints.first, points.last == trackPoints.last { return }
         let appended = points.count > trackPoints.count && !trackPoints.isEmpty
             && points.first == trackPoints.first && points[trackPoints.count - 1] == trackPoints.last
         let start = appended ? trackPoints.count : 0
         trackPoints = points
-        if !appended { trackPixels = [] }
+        if !appended {
+            trackPixels = []
+            trailNeedsRebuild = true
+        }
         convertTrack(from: start)
     }
 
-    func setPOIs(_ list: [MapPOI], visible: Bool) {
-        if visible != showPOIs {
+    func setPOIs(_ list: [MapPOI], visible: Bool, showMapLabels: Bool) {
+        if visible != showPOIs || showMapLabels != self.showMapLabels {
             showPOIs = visible
+            self.showMapLabels = showMapLabels
             poiContainer.isHidden = !visible
-            labelsDirty = true
+            placementDirty = true
         }
         guard list != pois else { return }
         pois = list
@@ -275,7 +411,7 @@ final class MapOverlayView: UIView {
     func setSelected(_ id: UUID?) {
         guard id != selectedID else { return }
         selectedID = id
-        labelsDirty = true
+        placementDirty = true
         updateGuideText()
     }
 
@@ -299,8 +435,12 @@ final class MapOverlayView: UIView {
     func poi(at point: CGPoint) -> MapPOI? {
         guard showPOIs else { return nil }
         var best: (POIItem, CGFloat)?
-        for item in items where !item.badge.isHidden {
-            let dx = item.screen.x - point.x, dy = item.screen.y - point.y
+        for item in items where item.markerVisible || item.poi.id == selectedID {
+            // The balloon's head sits above the POI.
+            let isSelected = item.poi.id == selectedID
+            let lift: CGFloat = isSelected ? OverlayArt.balloonHeight * 0.6 : 0
+            let y = item.screen.y - lift
+            let dx = item.screen.x - point.x, dy = y - point.y
             let d2 = dx * dx + dy * dy
             if d2 < 24 * 24, d2 < (best?.1 ?? .infinity) { best = (item, d2) }
         }
@@ -310,15 +450,85 @@ final class MapOverlayView: UIView {
     /// Map pixel of a POI as currently placed (nil if not on this map's georeference).
     func pixel(ofPOI id: UUID) -> CGPoint? { items.first { $0.poi.id == id }?.pixel }
 
-    var userMapPixel: CGPoint? { userPixel }
+    /// Where the puck is drawn (it glides between fixes), in map pixels.
+    var userMapPixel: CGPoint? { shownUserPixel }
     var userMetersPerPixel: Double { metersPerPixelAtUser }
     var userNorthAngle: Double { northAtUser }
+
+    /// Show the scale bar now and fade it out about 1.5 s after the last call (zooming or panning).
+    func flashScaleBar() {
+        guard georef != nil else { return }
+        scaleHideAt = CACurrentMediaTime() + 1.5
+        if !scaleShown {
+            scaleShown = true
+            fadeScale(to: 1, duration: 0.18)
+        }
+        if scaleTask == nil { scheduleScaleFade(after: 1.5) }
+    }
+
+    /// One pending task at a time: it re-arms itself while the map keeps moving.
+    private func scheduleScaleFade(after delay: Double) {
+        scaleTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0.05, delay) * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.scaleTask = nil
+            let remaining = self.scaleHideAt - CACurrentMediaTime()
+            if remaining > 0.05 {
+                self.scheduleScaleFade(after: remaining)
+            } else {
+                self.scaleShown = false
+                self.fadeScale(to: 0, duration: 0.45)
+            }
+        }
+    }
+
+    private func fadeScale(to value: Float, duration: CFTimeInterval) {
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = scaleLayer.presentation()?.opacity ?? scaleLayer.opacity
+        fade.toValue = value
+        fade.duration = duration
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        scaleLayer.opacity = value
+        CATransaction.commit()
+        scaleLayer.add(fade, forKey: "fade")
+    }
+
+    // MARK: - Animation
+
+    /// Advances the puck glide and the accuracy radius. Returns true while something still moves.
+    func advance(now: CFTimeInterval, dt: Double) -> Bool {
+        var active = false
+        if gliding, let target = targetUserPixel {
+            let t = min(1, max(0, (now - glideStart) / Self.puckGlide))
+            // Ease out: quick to follow the fix, gentle when arriving.
+            let e = CGFloat(1 - (1 - t) * (1 - t))
+            shownUserPixel = CGPoint(x: glideFrom.x + (target.x - glideFrom.x) * e,
+                                     y: glideFrom.y + (target.y - glideFrom.y) * e)
+            if t >= 1 {
+                gliding = false
+                shownUserPixel = target
+            } else {
+                active = true
+            }
+        }
+        if accuracyShownPx < 0 {
+            accuracyShownPx = accuracyTargetPx
+        } else if abs(accuracyShownPx - accuracyTargetPx) > max(0.05, accuracyTargetPx * 0.003) {
+            accuracyShownPx += (accuracyTargetPx - accuracyShownPx) * CGFloat(1 - exp(-dt / 0.25))
+            active = true
+        } else {
+            accuracyShownPx = accuracyTargetPx
+        }
+        return active
+    }
 
     // MARK: - Derived data
 
     private func recomputeUser() {
         guard let georef, let fix = location else {
-            userPixel = nil
+            targetUserPixel = nil
             userLatLon = nil
             updateGuideText()
             return
@@ -326,21 +536,21 @@ final class MapOverlayView: UIView {
         let ll = LatLon(fix.coordinate)
         let px = mercatorToPixel.apply(WebMercator.project(ll))
         guard px.x.isFinite, px.y.isFinite else {
-            userPixel = nil
+            targetUserPixel = nil
             userLatLon = nil
             return
         }
         let p = CGPoint(x: px.x, y: px.y)
-        userPixel = p
+        targetUserPixel = p
         userLatLon = ll
         let mpp = georef.metersPerPixel(atPixel: p)
         metersPerPixelAtUser = mpp.isFinite && mpp > 0 ? mpp : 1
         northAtUser = georef.northAngle(atPixel: p)
+        accuracyTargetPx = CGFloat(max(0, fix.horizontalAccuracy) / metersPerPixelAtUser)
         updateGuideText()
     }
 
     private func convertTrack(from start: Int) {
-        trailDirty = true
         guard georef != nil, start < trackPoints.count else { return }
         trackPixels.reserveCapacity(trackPoints.count)
         for i in start..<trackPoints.count {
@@ -351,45 +561,49 @@ final class MapOverlayView: UIView {
 
     private func rebuildPOIs() {
         items.forEach {
-            $0.badge.removeFromSuperlayer()
+            $0.marker.removeFromSuperlayer()
             $0.label.removeFromSuperlayer()
         }
         items = []
-        labelsDirty = true
+        placementDirty = true
+        balloonKind = nil
+        balloonID = nil
         guard georef != nil else { return }
         var built: [POIItem] = []
         built.reserveCapacity(pois.count)
         for poi in pois {
             let m = mercatorToPixel.apply(WebMercator.project(poi.position))
             guard m.x.isFinite, m.y.isFinite else { continue }
-            let item = POIItem(poi: poi, pixel: CGPoint(x: m.x, y: m.y))
-            let badge = OverlayArt.badge(for: poi.kind)
-            item.badge.contents = badge.cgImage
-            item.badge.contentsScale = badge.scale
-            item.badge.bounds = CGRect(origin: .zero, size: badge.size)
-            var text = poi.name
-            if let ele = poi.elevationM, ele.isFinite, !poi.name.contains(String(Int(ele.rounded()))) {
-                text += " · " + GeoFormat.elevation(ele, units: units)
-            }
-            let pill: UIImage
-            if let cached = pillCache[text] {
-                pill = cached
-            } else {
-                pill = OverlayArt.pill(text, fontSize: 11)
-                pillCache[text] = pill
-            }
-            item.label.contents = pill.cgImage
-            item.label.contentsScale = pill.scale
-            item.label.bounds = CGRect(origin: .zero, size: pill.size)
-            item.label.anchorPoint = CGPoint(x: 0, y: 0.5)
+            let text = Self.labelText(for: poi, units: units)
+            let item = POIItem(poi: poi, pixel: CGPoint(x: m.x, y: m.y), labelText: text)
+            let marker = OverlayArt.marker(for: poi.kind)
+            item.marker.contents = marker.cgImage
+            item.marker.contentsScale = marker.scale
+            item.marker.bounds = CGRect(origin: .zero, size: marker.size)
+            item.marker.isHidden = true
+            item.label.bounds = CGRect(origin: .zero, size: OverlayArt.haloTextSize(text))
             item.label.isHidden = true
             poiContainer.addSublayer(item.label)
-            poiContainer.addSublayer(item.badge)
+            poiContainer.addSublayer(item.marker)
             built.append(item)
         }
-        // Higher priority first, so it wins label collisions.
+        // Higher priority first, so it wins collisions.
         items = built.sorted { $0.priority < $1.priority }
         updateGuideText()
+    }
+
+    private static func labelText(for poi: MapPOI, units: DistanceUnits) -> String {
+        var text = poi.name.isEmpty ? POIKindStyle.name(for: poi.kind) : poi.name
+        if let ele = poi.elevationM, ele.isFinite, !text.contains(String(Int(ele.rounded()))) {
+            text += " · " + GeoFormat.elevation(ele, units: units)
+        }
+        return text
+    }
+
+    /// Category-coloured label text, darkened on paper and lightened at night for contrast.
+    private static func labelColor(for kind: POIKind, night: Bool) -> UIColor {
+        let c = POIKindStyle.uiColor(for: kind)
+        return night ? OverlayArt.mix(c, .white, 0.45) : OverlayArt.mix(c, .black, 0.35)
     }
 
     private func updateGuideText() {
@@ -402,6 +616,10 @@ final class MapOverlayView: UIView {
         guideText = "\(GeoFormat.distance(d, units: units)) \(Geodesy.compassPoint(bearing))"
     }
 
+    private func isShown(_ item: POIItem) -> Bool {
+        item.poi.source != .mapLabel || showMapLabels || item.poi.id == selectedID
+    }
+
     // MARK: - Render
 
     /// Position every overlay for `camera`. `heading` is the smoothed true heading in degrees.
@@ -411,11 +629,10 @@ final class MapOverlayView: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let t = camera.transform(viewSize: size)
-        let cameraChanged = camera != lastCamera
-        let userPoint = userPixel.map { $0.applying(t) }
+        let userPoint = shownUserPixel.map { $0.applying(t) }
 
+        renderTrail(camera: camera, viewSize: size)
         renderUser(at: userPoint, camera: camera, heading: heading, headingAccuracy: headingAccuracy)
-        if trailDirty || (cameraChanged && showTrack) { renderTrail(t) }
         renderPOIs(t, camera: camera)
         renderSelection(userPoint: userPoint)
         for (marker, l) in zip(markers, markerLayers) {
@@ -429,20 +646,20 @@ final class MapOverlayView: UIView {
     }
 
     private func renderUser(at point: CGPoint?, camera: CanvasCamera, heading: Double?, headingAccuracy: Double?) {
-        guard let point, let fix = location else {
-            dotLayer.isHidden = true
+        guard let point, location != nil else {
+            puckLayer.isHidden = true
             haloLayer.isHidden = true
             accuracyLayer.isHidden = true
-            coneLayer.isHidden = true
+            beamLayer.isHidden = true
             return
         }
-        dotLayer.isHidden = false
-        dotLayer.position = point
-        haloLayer.isHidden = false
+        puckLayer.isHidden = false
+        puckLayer.position = point
+        haloLayer.isHidden = isStale
         haloLayer.position = point
 
-        let radius = CGFloat(max(0, fix.horizontalAccuracy) / metersPerPixelAtUser) * camera.zoom
-        if radius > Self.dotSize * 0.7, radius < 4000 {
+        let radius = max(0, accuracyShownPx) * camera.zoom
+        if radius > Self.puckSize / 2 + 2, radius < 4000 {
             accuracyLayer.isHidden = false
             accuracyLayer.bounds = CGRect(x: 0, y: 0, width: radius * 2, height: radius * 2)
             accuracyLayer.cornerRadius = radius
@@ -451,110 +668,210 @@ final class MapOverlayView: UIView {
             accuracyLayer.isHidden = true
         }
 
-        if let heading {
-            let width = CGFloat(MapAngle.radians(min(max((headingAccuracy ?? 22.5) * 2, 25), 70)))
-            if abs(width - coneWidth) > 0.01 {
-                coneWidth = width
-                coneMask.path = OverlayArt.wedgePath(radius: Self.coneRadius, width: width)
-            }
-            let angle = MapAngle.radians(heading) + northAtUser + Double(camera.rotation)
-            coneLayer.isHidden = false
-            coneLayer.position = point
-            coneLayer.setAffineTransform(CGAffineTransform(rotationAngle: CGFloat(angle)))
-        } else {
-            coneLayer.isHidden = true
-        }
-    }
-
-    private func renderTrail(_ t: CGAffineTransform) {
-        trailDirty = false
-        guard showTrack, trackPixels.count > 1 else {
-            trailLayer.isHidden = true
-            trailCasing.isHidden = true
-            trailLayer.path = nil
-            trailCasing.path = nil
+        guard let heading, !isStale else {
+            beamLayer.isHidden = true
             return
         }
-        trailLayer.isHidden = false
-        trailCasing.isHidden = false
-        let path = CGMutablePath()
-        let minD2 = Self.trailMinSpacing * Self.trailMinSpacing
-        var last = trackPixels[0].applying(t)
-        path.move(to: last)
-        let lastIndex = trackPixels.count - 1
-        for i in 1...lastIndex {
-            let v = trackPixels[i].applying(t)
-            let dx = v.x - last.x, dy = v.y - last.y
-            if dx * dx + dy * dy < minD2, i != lastIndex { continue }
-            path.addLine(to: v)
-            last = v
+        // Narrower with a better compass: 60° at ±10° or better, 75° at ±40° or worse.
+        let accuracy = headingAccuracy ?? 25
+        let spread = min(max((accuracy - 10) / 30, 0), 1)
+        let width = 60 + Int((spread * 3).rounded()) * 5
+        if width != beamWidth {
+            beamWidth = width
+            let image = OverlayArt.beam(color: puckColor, widthDegrees: width, radius: Self.beamRadius)
+            beamLayer.contents = image.cgImage
+            beamLayer.contentsScale = image.scale
         }
-        trailLayer.path = path
-        trailCasing.path = path
+        let angle = MapAngle.radians(heading) + northAtUser + Double(camera.rotation)
+        beamLayer.isHidden = false
+        beamLayer.position = point
+        beamLayer.setAffineTransform(CGAffineTransform(rotationAngle: CGFloat(angle)))
+    }
+
+    /// The dotted trail. The path is built in screen space for the current zoom and only moved
+    /// (panning) or turned (rotation: dots are round, so turning the layer is exact) otherwise; new
+    /// points are appended without rebuilding.
+    private func renderTrail(camera: CanvasCamera, viewSize: CGSize) {
+        guard showTrack, georef != nil, trackPixels.count > 1 else {
+            if !trailDots.isHidden || trailDots.path != nil {
+                trailDots.isHidden = true
+                trailHalo.isHidden = true
+                trailStart.isHidden = true
+                trailDots.path = nil
+                trailHalo.path = nil
+                trailBuiltCount = 0
+            }
+            return
+        }
+        let zoomChanged = abs(camera.zoom / max(trailZoom, 1e-9) - 1) > 1e-4
+        let stale = trailNeedsRebuild || trailBuiltCount == 0 || trailBuiltCount > trackPixels.count
+        if stale || zoomChanged {
+            trailNeedsRebuild = false
+            trailZoom = camera.zoom
+            trailRotation = camera.rotation
+            trailOrigin = camera.center
+            trailPath = CGMutablePath()
+            trailLast = trailSpace(trackPixels[0], camera: camera)
+            trailPath.move(to: trailLast)
+            trailBuiltCount = 1
+        }
+        if trailBuiltCount < trackPixels.count {
+            let minD2 = Self.trailMinSpacing * Self.trailMinSpacing
+            let lastIndex = trackPixels.count - 1
+            for i in trailBuiltCount...lastIndex {
+                let v = trailSpace(trackPixels[i], camera: camera)
+                let dx = v.x - trailLast.x, dy = v.y - trailLast.y
+                // Always end exactly at the newest point; later appends continue from there.
+                if dx * dx + dy * dy < minD2, i != lastIndex { continue }
+                trailPath.addLine(to: v)
+                trailLast = v
+            }
+            trailBuiltCount = trackPixels.count
+            let path = trailPath.copy()
+            trailDots.path = path
+            trailHalo.path = path
+        }
+        let origin = camera.viewPoint(forMap: trailOrigin, viewSize: viewSize)
+        let turn = CGAffineTransform(rotationAngle: camera.rotation - trailRotation)
+        trailDots.position = origin
+        trailHalo.position = origin
+        trailDots.setAffineTransform(turn)
+        trailHalo.setAffineTransform(turn)
+        trailDots.isHidden = false
+        trailHalo.isHidden = false
+        trailStart.isHidden = false
+        trailStart.position = camera.viewPoint(forMap: trackPixels[0], viewSize: viewSize)
+    }
+
+    /// A map pixel in trail space (view offset from `trailOrigin` at the trail's zoom and rotation).
+    private func trailSpace(_ p: CGPoint, camera: CanvasCamera) -> CGPoint {
+        let dx = (p.x - trailOrigin.x) * trailZoom
+        let dy = (p.y - trailOrigin.y) * trailZoom
+        let c = cos(trailRotation), s = sin(trailRotation)
+        return CGPoint(x: dx * c - dy * s, y: dx * s + dy * c)
     }
 
     private func renderPOIs(_ t: CGAffineTransform, camera: CanvasCamera) {
-        guard showPOIs, !items.isEmpty else { return }
-        let visibleRect = bounds.insetBy(dx: -60, dy: -30)
-        for item in items {
-            let p = item.pixel.applying(t)
-            item.screen = p
-            let onScreen = visibleRect.contains(p)
-            item.badge.isHidden = !onScreen
-            if onScreen { item.badge.position = p }
-        }
-        if labelsDirty || labelCameraMoved(camera) {
-            placeLabels(camera: camera)
+        guard showPOIs, !items.isEmpty else {
+            balloonLayer.isHidden = true
+            balloonLabel.isHidden = true
+            return
         }
         for item in items {
-            let show = item.labelVisible && !item.badge.isHidden
-            item.label.isHidden = !show
-            if show { item.label.position = CGPoint(x: item.screen.x + 15, y: item.screen.y) }
+            item.screen = item.pixel.applying(t)
+        }
+        if placementDirty || placementCameraMoved(camera) {
+            place(camera: camera)
+        }
+        let visibleRect = bounds.insetBy(dx: -40, dy: -40)
+        for item in items {
+            let onScreen = visibleRect.contains(item.screen)
+            let showMarker = item.markerVisible && onScreen
+            item.marker.isHidden = !showMarker
+            if showMarker { item.marker.position = item.screen }
+            let showLabel = item.labelVisible && onScreen
+            item.label.isHidden = !showLabel
+            if showLabel {
+                if !item.labelReady { drawLabel(item) }
+                let w = item.label.bounds.width
+                let dx = OverlayArt.markerSize / 2 + 1 + w / 2
+                item.label.position = CGPoint(x: item.screen.x + (item.labelLeft ? -dx : dx), y: item.screen.y)
+            }
         }
     }
 
-    private func labelCameraMoved(_ camera: CanvasCamera) -> Bool {
-        guard let last = lastLabelCamera else { return true }
+    private func drawLabel(_ item: POIItem) {
+        item.labelReady = true
+        let halo = night ? UIColor(white: 0.05, alpha: 0.85) : UIColor(white: 1, alpha: 0.95)
+        let image = OverlayArt.haloText(item.labelText, color: Self.labelColor(for: item.poi.kind, night: night), halo: halo)
+        item.label.contents = image.cgImage
+        item.label.contentsScale = image.scale
+        item.label.bounds = CGRect(origin: .zero, size: image.size)
+    }
+
+    private func placementCameraMoved(_ camera: CanvasCamera) -> Bool {
+        guard let last = lastPlacementCamera else { return true }
         return abs(camera.zoom / last.zoom - 1) > 0.04 || abs(MapAngle.normalized(Double(camera.rotation - last.rotation))) > 0.04
     }
 
-    /// Greedy label placement: higher-priority labels first, skipping any that would cover
-    /// another label or a badge. Translation never changes overlaps, so this only reruns on zoom/rotation.
-    private func placeLabels(camera: CanvasCamera) {
-        labelsDirty = false
-        lastLabelCamera = camera
-        let zoomedIn = camera.zoom >= Self.labelMinZoom
-        let half = OverlayArt.badgeSize / 2
-        var placed: [CGRect] = []
-        placed.reserveCapacity(64)
-        let ordered = items.filter { $0.poi.id == selectedID } + items.filter { $0.poi.id != selectedID }
-        for item in ordered {
+    /// Greedy placement: higher-priority markers first, skipping any that would cover one already
+    /// placed; labels (zoomed in only) to the right of their marker, else to the left, else hidden.
+    /// Translation never changes overlaps, so this only reruns on zoom/rotation.
+    private func place(camera: CanvasCamera) {
+        placementDirty = false
+        lastPlacementCamera = camera
+        let mpp = georef?.metersPerPixel(atPixel: camera.center) ?? metersPerPixelAtUser
+        let metersPerPoint = mpp / Double(max(camera.zoom, 1e-9))
+        let labelsAllowed = metersPerPoint <= Self.labelMaxMetersPerPoint
+        let m = OverlayArt.markerSize
+        var taken: [CGRect] = []
+        taken.reserveCapacity(items.count * 2)
+        // The selected POI is drawn as a balloon pin; keep its spot free.
+        if let id = selectedID, let sel = items.first(where: { $0.poi.id == id }) {
+            let h = OverlayArt.balloonHeight
+            taken.append(CGRect(x: sel.screen.x - h * 0.4, y: sel.screen.y - h, width: h * 0.8, height: h))
+        }
+        for item in items {
+            item.markerVisible = false
             item.labelVisible = false
-            guard zoomedIn || item.poi.id == selectedID else { continue }
+            guard isShown(item), item.poi.id != selectedID else { continue }
+            let rect = CGRect(x: item.screen.x - m / 2, y: item.screen.y - m / 2, width: m, height: m).insetBy(dx: -2, dy: -2)
+            if taken.contains(where: { $0.intersects(rect) }) { continue }
+            taken.append(rect)
+            item.markerVisible = true
+            guard labelsAllowed else { continue }
             let size = item.label.bounds.size
-            let rect = CGRect(x: item.screen.x + 15, y: item.screen.y - size.height / 2, width: size.width, height: size.height)
-            if placed.contains(where: { $0.intersects(rect) }) { continue }
-            let hitsBadge = items.contains { other in
-                other !== item && abs(other.screen.x - rect.midX) < rect.width / 2 + half
-                    && abs(other.screen.y - rect.midY) < rect.height / 2 + half
+            let right = CGRect(x: item.screen.x + m / 2 + 1, y: item.screen.y - size.height / 2,
+                               width: size.width, height: size.height).insetBy(dx: 2, dy: 2)
+            let left = right.offsetBy(dx: -(size.width + m + 2), dy: 0)
+            if !taken.contains(where: { $0.intersects(right) }) {
+                taken.append(right)
+                item.labelVisible = true
+                item.labelLeft = false
+            } else if !taken.contains(where: { $0.intersects(left) }) {
+                taken.append(left)
+                item.labelVisible = true
+                item.labelLeft = true
             }
-            if hitsBadge, item.poi.id != selectedID { continue }
-            placed.append(rect)
-            item.labelVisible = true
         }
     }
 
     private func renderSelection(userPoint: CGPoint?) {
         guard let id = selectedID, showPOIs, let item = items.first(where: { $0.poi.id == id }) else {
-            selectionRing.isHidden = true
+            balloonLayer.isHidden = true
+            balloonLabel.isHidden = true
             guideLayer.isHidden = true
+            guideCasing.isHidden = true
             guideLabel.isHidden = true
             return
         }
-        selectionRing.isHidden = false
-        selectionRing.position = item.screen
+        if balloonKind != item.poi.kind {
+            balloonKind = item.poi.kind
+            let image = OverlayArt.balloon(for: item.poi.kind)
+            balloonLayer.contents = image.cgImage
+            balloonLayer.contentsScale = image.scale
+            balloonLayer.bounds = CGRect(origin: .zero, size: image.size)
+            balloonLayer.anchorPoint = CGPoint(x: 0.5, y: (image.size.height - 1) / image.size.height)
+            guideLayer.strokeColor = POIKindStyle.uiColor(for: item.poi.kind).cgColor
+        }
+        if balloonID != id {
+            balloonID = id
+            let text = item.labelText
+            let halo = night ? UIColor(white: 0.05, alpha: 0.85) : UIColor(white: 1, alpha: 0.95)
+            let ink = night ? UIColor.white : UIColor(white: 0.08, alpha: 1)
+            let image = OverlayArt.haloText(text, color: ink, halo: halo, fontSize: 13, weight: .bold)
+            balloonLabel.contents = image.cgImage
+            balloonLabel.contentsScale = image.scale
+            balloonLabel.bounds = CGRect(origin: .zero, size: image.size)
+        }
+        balloonLayer.isHidden = false
+        balloonLayer.position = item.screen
+        balloonLabel.isHidden = false
+        balloonLabel.position = CGPoint(x: item.screen.x, y: item.screen.y + 3)
+
         guard let userPoint, !guideText.isEmpty else {
             guideLayer.isHidden = true
+            guideCasing.isHidden = true
             guideLabel.isHidden = true
             return
         }
@@ -562,11 +879,13 @@ final class MapOverlayView: UIView {
         path.move(to: userPoint)
         path.addLine(to: item.screen)
         guideLayer.path = path
+        guideCasing.path = path
         guideLayer.isHidden = false
+        guideCasing.isHidden = false
         if guideText != renderedGuideText {
             renderedGuideText = guideText
-            let image = OverlayArt.pill(guideText, fontSize: 12, weight: .bold, textColor: .black,
-                                        background: Theme.uiAccent.withAlphaComponent(0.95))
+            let image = OverlayArt.pill(guideText, fontSize: 13, weight: .bold, textColor: .white,
+                                        background: UIColor(white: 0.12, alpha: 0.92))
             guideLabel.contents = image.cgImage
             guideLabel.contentsScale = image.scale
             guideLabel.bounds = CGRect(origin: .zero, size: image.size)
@@ -581,39 +900,24 @@ final class MapOverlayView: UIView {
 
     private func renderScaleBar(camera: CanvasCamera, contentRect: CGRect) {
         guard let georef else {
-            scaleBarLayer.isHidden = true
-            scaleLabel.isHidden = true
+            scaleLayer.isHidden = true
             return
         }
-        let origin = CGPoint(x: contentRect.minX + 10, y: contentRect.maxY - 12)
-        if scaleSpec == nil || abs(camera.zoom / max(scaleZoom, 1e-9) - 1) > 0.002 {
+        if scaleSpec == nil || scaleNight != night || abs(camera.zoom / max(scaleZoom, 1e-9) - 1) > 0.002 {
             scaleZoom = camera.zoom
             let mpp = georef.metersPerPixel(atPixel: camera.center)
-            let spec = ScaleBarSpec.make(metersPerPoint: mpp / Double(camera.zoom), maxLength: 110, units: units)
-            if let spec, spec != scaleSpec {
-                if spec.label != scaleSpec?.label {
-                    let image = OverlayArt.pill(spec.label, fontSize: 11, weight: .bold)
-                    scaleLabel.contents = image.cgImage
-                    scaleLabel.contentsScale = image.scale
-                    scaleLabel.bounds = CGRect(origin: .zero, size: image.size)
-                }
-                let path = CGMutablePath()
-                path.move(to: CGPoint(x: 0, y: -7))
-                path.addLine(to: .zero)
-                path.addLine(to: CGPoint(x: spec.length, y: 0))
-                path.addLine(to: CGPoint(x: spec.length, y: -7))
-                scaleBarLayer.path = path
+            let spec = ScaleBarSpec.make(metersPerPoint: mpp / Double(camera.zoom), maxLength: 96, units: units)
+            if let spec, spec != scaleSpec || scaleNight != night {
+                scaleNight = night
+                let image = OverlayArt.scaleBar(spec, night: night)
+                scaleLayer.contents = image.cgImage
+                scaleLayer.contentsScale = image.scale
+                scaleLayer.bounds = CGRect(origin: .zero, size: image.size)
             }
             scaleSpec = spec
         }
-        let visible = scaleSpec != nil
-        scaleBarLayer.isHidden = !visible
-        scaleLabel.isHidden = !visible
-        if origin != scaleOrigin {
-            scaleOrigin = origin
-            scaleBarLayer.position = origin
-            scaleLabel.position = CGPoint(x: origin.x - 2, y: origin.y - 11)
-        }
+        scaleLayer.isHidden = scaleSpec == nil
+        scaleLayer.position = CGPoint(x: contentRect.minX + 12 - OverlayArt.scaleInset, y: contentRect.minY + 2)
     }
 
     private func renderOffscreen(userPoint: CGPoint?, camera: CanvasCamera, contentRect: CGRect) {
@@ -640,8 +944,9 @@ final class MapOverlayView: UIView {
         let text = GeoFormat.distance(Geodesy.distance(viewCentre, here), units: units)
         if text != offscreenText {
             offscreenText = text
+            let base = isStale ? UIColor(white: 0.45, alpha: 1) : puckColor
             let image = OverlayArt.pill(text, fontSize: 12, weight: .bold, textColor: .white,
-                                        background: Theme.uiUserRed.withAlphaComponent(0.92))
+                                        background: base.withAlphaComponent(0.92))
             offscreenLabel.contents = image.cgImage
             offscreenLabel.contentsScale = image.scale
             offscreenLabel.bounds = CGRect(origin: .zero, size: image.size)

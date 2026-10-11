@@ -61,6 +61,9 @@ final class MapThumbnailCache {
 
     func cached(_ url: URL) -> UIImage? { cache.object(forKey: url as NSURL) }
 
+    /// Forget a thumbnail whose file was rewritten (a photo map flattened again).
+    func invalidate(_ url: URL) { cache.removeObject(forKey: url as NSURL) }
+
     func load(_ url: URL) async -> UIImage? {
         if let hit = cached(url) { return hit }
         let image = await Task.detached(priority: .utility) { () -> UIImage? in
@@ -95,6 +98,17 @@ struct MapCardView: View {
                                startPoint: .center, endPoint: .bottom)
                 MapStatusChip(map: map)
                     .padding(12)
+                if map.isPhoto {
+                    Image(systemName: "camera.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                        .frame(width: 28, height: 28)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().stroke(Theme.stroke, lineWidth: 1))
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .accessibilityLabel("Photo of a paper map")
+                }
             }
             .frame(height: Self.thumbHeight)
 
@@ -119,7 +133,7 @@ struct MapCardView: View {
         )
         .shadow(color: proximity.isOnMap ? Theme.userRed.opacity(0.3) : Color.clear, radius: 14, y: 4)
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .task(id: thumbnailURL) {
+        .task(id: thumbnailKey) {
             thumbnail = await MapThumbnailCache.shared.load(thumbnailURL)
         }
         .accessibilityElement(children: .combine)
@@ -143,6 +157,16 @@ struct MapCardView: View {
                     .foregroundStyle(Theme.textSecondary)
             }
         }
+    }
+
+    /// Changes when the thumbnail file is rewritten (corners adjusted), so it is loaded again.
+    private var thumbnailKey: String {
+        var corners = ""
+        if let quad = map.photoSource?.quad {
+            let values: [Double] = quad.flatMap { $0 }
+            corners = values.map { String(format: "%.0f", $0) }.joined(separator: ",")
+        }
+        return "\(thumbnailURL.path)|\(map.pixelWidth)x\(map.pixelHeight)|\(corners)"
     }
 
     private var proximityText: String? {

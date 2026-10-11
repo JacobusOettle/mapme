@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Georeference status capsule: how the map was located and how accurately
 /// ("Contours ±18 m", "Grid ±2 m", "Manual ±6 m", "Not located").
@@ -109,18 +110,38 @@ struct TintedChip: View {
     }
 }
 
-/// Colours and names for point-of-interest kinds.
+/// Colours, glyphs and names for point-of-interest kinds (Apple Maps style category colours).
 enum POIKindStyle {
     static func color(for kind: POIKind) -> Color {
+        Color(uiColor: uiColor(for: kind))
+    }
+
+    static func uiColor(for kind: POIKind) -> UIColor {
         switch kind {
-        case .peak, .spotHeight: return Color(red: 0.95, green: 0.62, blue: 0.32)
-        case .water: return Color(red: 0.35, green: 0.68, blue: 1.0)
-        case .place: return Theme.accent
-        case .parking: return Color(red: 0.55, green: 0.65, blue: 1.0)
-        case .shelter: return Theme.good
-        case .viewpoint: return Color(red: 0.78, green: 0.55, blue: 1.0)
-        case .waypoint: return Theme.userRed
-        case .other: return Color.white.opacity(0.7)
+        case .peak: return UIColor(red: 0.85, green: 0.45, blue: 0.18, alpha: 1)
+        case .spotHeight: return UIColor(red: 0.64, green: 0.50, blue: 0.36, alpha: 1)
+        case .water: return UIColor(red: 0.16, green: 0.62, blue: 0.96, alpha: 1)
+        case .place: return UIColor(red: 0.62, green: 0.36, blue: 0.90, alpha: 1)
+        case .parking: return UIColor(red: 0.25, green: 0.42, blue: 0.98, alpha: 1)
+        case .shelter: return UIColor(red: 0.18, green: 0.70, blue: 0.38, alpha: 1)
+        case .viewpoint: return UIColor(red: 0.07, green: 0.68, blue: 0.66, alpha: 1)
+        case .waypoint: return UIColor(red: 1.0, green: 0.23, blue: 0.19, alpha: 1)
+        case .other: return UIColor(red: 0.50, green: 0.52, blue: 0.56, alpha: 1)
+        }
+    }
+
+    /// White SF Symbol drawn inside the round marker.
+    static func glyph(for kind: POIKind) -> String {
+        switch kind {
+        case .peak: return "mountain.2.fill"
+        case .spotHeight: return "triangle.fill"
+        case .water: return "drop.fill"
+        case .place: return "mappin"
+        case .parking: return "parkingsign"
+        case .shelter: return "house.fill"
+        case .viewpoint: return "binoculars.fill"
+        case .waypoint: return "flag.fill"
+        case .other: return "mappin"
         }
     }
 
@@ -144,5 +165,27 @@ enum POIKindStyle {
         case .openStreetMap: return "OpenStreetMap"
         case .user: return "your waypoint"
         }
+    }
+}
+
+/// Apple Maps style round marker: a category-coloured disc with a white glyph and a white ring.
+struct POIGlyphMarker: View {
+    let kind: POIKind
+    var size: CGFloat = 34
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color.white)
+            Circle()
+                .fill(POIKindStyle.color(for: kind).gradient)
+                .padding(size * 0.07)
+            Image(systemName: POIKindStyle.glyph(for: kind))
+                .font(.system(size: size * 0.4, weight: .semibold))
+                .foregroundStyle(Color.white)
+        }
+        .frame(width: size, height: size)
+        .shadow(color: Color.black.opacity(0.25), radius: 2, y: 1)
+        .accessibilityHidden(true)
     }
 }

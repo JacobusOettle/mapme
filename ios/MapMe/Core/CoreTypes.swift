@@ -30,9 +30,13 @@ struct GeorefRequest: Codable {
     var allowRotation: Bool = false
     var methods: [String] = ["grid", "contours"]
     var verify: Bool = false
+    /// The raster is a (flattened) photo of a paper map: the core normalises uneven lighting and
+    /// white balance before reading contours, and fits a full projective transform (homography) so
+    /// residual perspective from imperfect page corners is absorbed.
+    var photo: Bool = false
 
     enum CodingKeys: String, CodingKey {
-        case gps, ocr, dpi, methods, verify
+        case gps, ocr, dpi, methods, verify, photo
         case contourRgb = "contour_rgb"
         case searchRadiusM = "search_radius_m"
         case allowRotation = "allow_rotation"

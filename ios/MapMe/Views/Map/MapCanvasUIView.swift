@@ -3,14 +3,19 @@ import QuartzCore
 import UIKit
 
 /// The interactive map: a CATiledLayer raster moved by a camera (centre/zoom/rotation applied as the
-/// tiled view's centre + transform, never relayout), gestures with inertia, north-up / heading-up /
-/// free orientation, and screen-space overlays. A display link runs only while something moves.
+/// tiled view's centre + transform, never relayout) on a shadowed paper sheet, gestures with
+/// inertia, Apple Maps style tracking (none / follow / follow with heading), two-finger rotation and
+/// screen-space overlays. A display link runs only while something moves.
 final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
     struct Inputs {
         var map: MapDocument
         var tileStore: TileStore
         var nightMode: Bool
-        var orientation: MapOrientationMode
+        var tracking: CanvasTrackingMode
+        /// Keep the map paper-up (calibration); otherwise the rotation stays where the user leaves it.
+        var lockNorthUp: Bool
+        /// Two-finger rotation.
+        var allowRotation: Bool
         var userLocation: CLLocation?
         var heading: Double?
         var headingAccuracy: Double?
@@ -18,19 +23,29 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         var showTrack: Bool
         var pois: [MapPOI]
         var showPOIs: Bool
+        /// Also show POIs read off the map (they are printed on it already).
+        var showMapLabels: Bool
         var selectedPOIID: UUID?
         var markers: [CanvasMarker]
-        var follow: Bool
         var units: DistanceUnits
         var chromeInsets: UIEdgeInsets
+        var locationColor: UIColor
     }
 
     var onTap: ((CGPoint) -> Void)?
     var onLongPress: ((CGPoint) -> Void)?
     var onSelectPOI: ((MapPOI) -> Void)?
-    /// The canvas changed `follow` itself (pan turns it off, heading-up turns it on).
-    var onFollowChange: ((Bool) -> Void)?
+    /// The canvas changed the tracking mode itself (a pan stops following, rotating by hand leaves
+    /// heading mode, tapping the compass returns to north up).
+    var onTrackingChange: ((CanvasTrackingMode) -> Void)?
+    /// Receives rotation readouts (for the compass) and sends commands (north up).
+    weak var controller: MapCanvasController? {
+        didSet {
+            if controller !== oldValue { controller?.canvas = self }
+        }
+    }
 
+    private let sheetLayer = CALayer()
     private let tiledView = TiledMapView(frame: .zero)
     private let overlay = MapOverlayView(frame: .zero)
 
@@ -40,16 +55,22 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
     private(set) var camera = CanvasCamera(center: .zero, zoom: 1, rotation: 0)
     private var hasInitialCamera = false
 
-    private var mode: MapOrientationMode = .northUp
-    private var follow = false
-    /// Follow value the canvas reported and is waiting to see echoed back by SwiftUI.
-    private var pendingFollow: Bool?
+    private var tracking: CanvasTrackingMode = .none
+    /// Tracking value the canvas reported and is waiting to see echoed back by SwiftUI.
+    private var pendingTracking: CanvasTrackingMode?
+    private var lockNorthUp = false
+    /// Animating back to paper-up after the compass was tapped (or heading mode was left).
+    private var resettingNorth = false
     private var followEngaged = false
     private var location: CLLocation?
     private var rawHeading: Double?
     private var headingAccuracy: Double?
     private var selectedPOIID: UUID?
     private var chromeInsets: UIEdgeInsets = .zero
+    /// North direction at the middle of the map (radians, clockwise from image-up), for the compass
+    /// when you are not on the map.
+    private var mapNorthAngle = 0.0
+    private var sheetShadowZoom: CGFloat = 0
 
     // Motion state.
     private var displayLink: CADisplayLink?
@@ -83,10 +104,15 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        backgroundColor = Theme.uiBackground
+        backgroundColor = Theme.uiMapBackground
         clipsToBounds = true
         isMultipleTouchEnabled = true
         accessibilityIdentifier = "mapCanvas"
+        sheetLayer.backgroundColor = Theme.uiPaper.cgColor
+        sheetLayer.shadowColor = UIColor.black.cgColor
+        sheetLayer.shadowOpacity = 0.55
+        sheetLayer.isHidden = true
+        layer.addSublayer(sheetLayer)
         addSubview(tiledView)
         overlay.frame = bounds
         overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -133,6 +159,18 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
             tiledView.configure(map: inputs.map, store: inputs.tileStore, dark: inputs.nightMode)
             tileStore = inputs.tileStore
             nightMode = inputs.nightMode
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            let size = inputs.map.pixelSize
+            sheetLayer.bounds = CGRect(origin: .zero, size: size)
+            sheetLayer.shadowPath = UIBezierPath(rect: sheetLayer.bounds).cgPath
+            sheetLayer.backgroundColor = (inputs.nightMode ? Theme.uiNightPaper : Theme.uiPaper).cgColor
+            sheetLayer.isHidden = size.width <= 0 || size.height <= 0
+            CATransaction.commit()
+        }
+        if map?.georef != inputs.map.georef || mapChanged {
+            let mid = CGPoint(x: inputs.map.pixelSize.width / 2, y: inputs.map.pixelSize.height / 2)
+            mapNorthAngle = inputs.map.georef?.northAngle(atPixel: mid) ?? 0
         }
         map = inputs.map
         if mapChanged {
@@ -141,12 +179,13 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         }
 
         overlay.units = inputs.units
+        overlay.setStyle(locationColor: inputs.locationColor, night: inputs.nightMode)
         overlay.setGeoref(inputs.map.georef)
         let hadTarget = followTarget != nil
         location = inputs.userLocation
         overlay.setLocation(inputs.userLocation)
         overlay.setTrack(inputs.track, visible: inputs.showTrack)
-        overlay.setPOIs(inputs.pois, visible: inputs.showPOIs)
+        overlay.setPOIs(inputs.pois, visible: inputs.showPOIs, showMapLabels: inputs.showMapLabels)
         overlay.setSelected(inputs.selectedPOIID)
         overlay.setMarkers(inputs.markers)
         rawHeading = inputs.heading
@@ -157,21 +196,20 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
             setNeedsLayout()
         }
 
-        if inputs.orientation != mode {
-            mode = inputs.orientation
-            rotate.isEnabled = mode == .free
-            if mode == .headingUp, !follow {
-                setFollow(true, notify: true)
-            }
-        }
+        lockNorthUp = inputs.lockNorthUp
+        let canRotate = inputs.allowRotation && !inputs.lockNorthUp
+        if rotate.isEnabled != canRotate { rotate.isEnabled = canRotate }
 
-        // Follow (ignore stale values until SwiftUI echoes the one we reported).
-        if let pending = pendingFollow {
-            if inputs.follow == pending { pendingFollow = nil }
-        } else if inputs.follow != follow {
-            setFollow(inputs.follow, notify: false)
+        // Tracking (ignore stale values until SwiftUI echoes the one we reported).
+        if let pending = pendingTracking {
+            if inputs.tracking == pending { pendingTracking = nil }
+        } else if inputs.tracking != tracking {
+            // Like Apple Maps: leaving heading mode with the button turns the map back to north.
+            let leavingHeading = tracking == .followWithHeading && inputs.tracking == .follow
+            setTracking(inputs.tracking, notify: false)
+            if leavingHeading { resettingNorth = true }
         }
-        if follow, !hadTarget, followTarget != nil {
+        if tracking.follows, !hadTarget, followTarget != nil {
             engageFollow()
         }
 
@@ -182,21 +220,25 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         startAnimating()
     }
 
-    private func setFollow(_ value: Bool, notify: Bool) {
-        guard value != follow else { return }
-        follow = value
-        if value {
+    private func setTracking(_ value: CanvasTrackingMode, notify: Bool) {
+        guard value != tracking else { return }
+        let wasFollowing = tracking.follows
+        tracking = value
+        if value.follows, !wasFollowing {
             velocity = .zero
             targetCenter = nil
             zoomAnchor = nil
+            followEngaged = false
             engageFollow()
-        } else {
+        } else if !value.follows {
             followEngaged = false
         }
+        if value == .followWithHeading { resettingNorth = false }
         if notify {
-            pendingFollow = value
-            onFollowChange?(value)
+            pendingTracking = value
+            onTrackingChange?(value)
         }
+        startAnimating()
     }
 
     /// Start following: glide to the user and zoom in to a walking scale if zoomed far out.
@@ -208,12 +250,19 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         startAnimating()
     }
 
+    /// Compass tap: turn the map back to paper-up (north-up for a grid-aligned map).
+    func animateToNorthUp() {
+        if tracking == .followWithHeading { setTracking(.follow, notify: true) }
+        resettingNorth = true
+        startAnimating()
+    }
+
     // MARK: - Geometry
 
     private var mapSize: CGSize { map?.pixelSize ?? .zero }
 
     /// The user's map pixel when it is on (or just beside) the map; following is a no-op otherwise
-    /// (the off-screen arrow and the info card say where the map is instead).
+    /// (the off-screen arrow and the stats panel say where the map is instead).
     private var followTarget: CGPoint? {
         guard let u = overlay.userMapPixel else { return nil }
         let margin = max(mapSize.width, mapSize.height) * 0.1
@@ -249,10 +298,10 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         return CGPoint(x: min(max(c.x, 0), mapSize.width), y: min(max(c.y, 0), mapSize.height))
     }
 
-    /// Where the user's dot sits while following: centred, or lower in heading-up so you see ahead.
+    /// Where the puck sits while following: centred, or lower in heading mode so you see ahead.
     private var followAnchor: CGPoint {
         let r = contentRect
-        return CGPoint(x: bounds.midX, y: r.minY + r.height * (mode == .headingUp ? 0.64 : 0.5))
+        return CGPoint(x: bounds.midX, y: r.minY + r.height * (tracking == .followWithHeading ? 0.62 : 0.5))
     }
 
     private func comfortableZoom() -> CGFloat {
@@ -272,12 +321,12 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         targetZoom = nil
         zoomAnchor = nil
         let size = bounds.size
-        if let heading = smoothedHeadingDegrees, mode == .headingUp {
+        if tracking == .followWithHeading, let heading = smoothedHeadingDegrees ?? effectiveHeading {
             camera.rotation = CGFloat(MapAngle.normalized(-(MapAngle.radians(heading) + overlay.userNorthAngle)))
         } else {
             camera.rotation = 0
         }
-        if follow, let user = followTarget, CGRect(origin: .zero, size: mapSize).contains(user) {
+        if tracking.follows, let user = followTarget, CGRect(origin: .zero, size: mapSize).contains(user) {
             camera.zoom = comfortableZoom()
             camera.center = clampCenter(camera.center(placing: user, at: followAnchor, viewSize: size))
             followEngaged = true
@@ -291,7 +340,7 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
     /// Frame the selected POI together with the user (if the user is near the map).
     private func framePOI(_ id: UUID) {
         guard let p = overlay.pixel(ofPOI: id), bounds.width > 0 else { return }
-        if follow { setFollow(false, notify: true) }
+        if tracking.follows { setTracking(.none, notify: true) }
         velocity = .zero
         zoomAnchor = nil
         let r = contentRect
@@ -330,9 +379,27 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         guard map != nil else { return }
         let size = bounds.size
         let mid = CGPoint(x: mapSize.width / 2, y: mapSize.height / 2)
-        tiledView.center = camera.viewPoint(forMap: mid, viewSize: size)
-        tiledView.transform = CGAffineTransform(rotationAngle: camera.rotation).scaledBy(x: camera.zoom, y: camera.zoom)
+        let center = camera.viewPoint(forMap: mid, viewSize: size)
+        let transform = CGAffineTransform(rotationAngle: camera.rotation).scaledBy(x: camera.zoom, y: camera.zoom)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        tiledView.center = center
+        tiledView.transform = transform
+        sheetLayer.position = center
+        sheetLayer.setAffineTransform(transform)
+        // The sheet's shadow lives in map pixels; keep it about 16 pt on screen.
+        if sheetShadowZoom <= 0 || abs(camera.zoom / sheetShadowZoom - 1) > 0.05 {
+            sheetShadowZoom = camera.zoom
+            let z = max(camera.zoom, 1e-4)
+            sheetLayer.shadowRadius = 16 / z
+            sheetLayer.shadowOffset = CGSize(width: 0, height: 5 / z)
+        }
+        CATransaction.commit()
         overlay.render(camera: camera, contentRect: contentRect, heading: smoothedHeadingDegrees, headingAccuracy: headingAccuracy)
+        if let controller {
+            let north = (overlay.userMapPixel != nil ? overlay.userNorthAngle : mapNorthAngle) + Double(camera.rotation)
+            controller.publish(rotationDegrees: Double(camera.rotation) * 180 / .pi, northDegrees: north * 180 / .pi)
+        }
     }
 
     private func startAnimating() {
@@ -363,6 +430,9 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
             return
         }
         let size = bounds.size
+
+        // The puck glides between fixes; the camera follows the glide.
+        if overlay.advance(now: now, dt: dt) { active = true }
 
         // Heading low-pass on the unit vector.
         if let target = effectiveHeading {
@@ -399,17 +469,24 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
                 velocity = .zero
             } else {
                 active = true
+                overlay.flashScaleBar()
             }
         }
 
-        // Rotation.
-        if let target = targetRotation() {
+        // Rotation (around the puck while following, so it stays put).
+        if activeGestures == 0 || tracking == .followWithHeading, let target = targetRotation() {
+            let pivot = tracking.follows && activeGestures == 0 ? followTarget : nil
+            let pivotView = pivot.map { camera.viewPoint(forMap: $0, viewSize: size) }
             let diff = CGFloat(MapAngle.normalized(Double(target - camera.rotation)))
             if abs(diff) > 0.0015 {
                 camera.rotation += diff * CGFloat(1 - exp(-dt / Self.rotationTau))
                 active = true
             } else {
                 camera.rotation = target
+                if resettingNorth, target == 0 { resettingNorth = false }
+            }
+            if let pivot, let pivotView {
+                camera.center = clampCenter(camera.center(placing: pivot, at: pivotView, viewSize: size))
             }
         }
 
@@ -431,7 +508,7 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         }
 
         // Centre: follow the user, or glide to a target.
-        if follow, activeGestures == 0, let user = followTarget {
+        if tracking.follows, activeGestures == 0, let user = followTarget {
             let desired = clampCenter(camera.center(placing: user, at: followAnchor, viewSize: size))
             active = glide(to: desired, dt: dt) || active
         } else if let tc = targetCenter, activeGestures == 0 {
@@ -455,15 +532,11 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
     }
 
     private func targetRotation() -> CGFloat? {
-        switch mode {
-        case .northUp:
-            return 0
-        case .headingUp:
-            guard let h = smoothedHeadingDegrees else { return nil }
+        if tracking == .followWithHeading, let h = smoothedHeadingDegrees {
             return CGFloat(MapAngle.normalized(-(MapAngle.radians(h) + overlay.userNorthAngle)))
-        case .free:
-            return nil
         }
+        if lockNorthUp || resettingNorth { return 0 }
+        return nil
     }
 
     // MARK: - Gestures
@@ -512,7 +585,7 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         switch g.state {
         case .began:
             gestureBegan()
-            if follow { setFollow(false, notify: true) }
+            if tracking.follows { setTracking(.none, notify: true) }
         case .changed:
             let t = g.translation(in: self)
             g.setTranslation(.zero, in: self)
@@ -521,6 +594,7 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
             guard !busy(pinch), !busy(rotate) else { return }
             let d = mapDelta(forViewDelta: t)
             camera.center = clampCenter(CGPoint(x: camera.center.x - d.x, y: camera.center.y - d.y))
+            overlay.flashScaleBar()
             applyCamera()
         case .ended:
             let v = g.velocity(in: self)
@@ -545,7 +619,7 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
             let size = bounds.size
             let newZoom = clampZoom(camera.zoom * g.scale)
             g.scale = 1
-            if follow, let user = followTarget {
+            if tracking.follows, let user = followTarget {
                 // Zoom around your position so following continues.
                 camera.zoom = newZoom
                 camera.center = clampCenter(camera.center(placing: user, at: followAnchor, viewSize: size))
@@ -556,6 +630,7 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
                 camera.center = clampCenter(camera.center(placing: anchor, at: focal, viewSize: size))
             }
             pinchFocal = focal
+            overlay.flashScaleBar()
             applyCamera()
         case .ended, .cancelled, .failed:
             pinchFocal = nil
@@ -570,12 +645,15 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         case .began:
             gestureBegan()
             rotationFocal = g.location(in: self)
+            resettingNorth = false
+            // Turning the map by hand leaves heading mode (still following), like Apple Maps.
+            if tracking == .followWithHeading { setTracking(.follow, notify: true) }
         case .changed:
-            guard mode == .free else { return }
+            guard !lockNorthUp else { return }
             let focal = g.location(in: self)
             let size = bounds.size
             let previous = g.numberOfTouches >= 2 ? (rotationFocal ?? focal) : focal
-            let user = follow ? followTarget : nil
+            let user = tracking.follows ? followTarget : nil
             let anchor = user ?? camera.mapPoint(forView: previous, viewSize: size)
             camera.rotation = CGFloat(MapAngle.normalized(Double(camera.rotation + g.rotation)))
             g.rotation = 0
@@ -604,7 +682,8 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         targetCenter = nil
         let target = clampZoom((targetZoom ?? camera.zoom) * factor)
         targetZoom = target
-        zoomAnchor = follow && followTarget != nil ? nil : (map: camera.mapPoint(forView: point, viewSize: bounds.size), view: point)
+        zoomAnchor = tracking.follows && followTarget != nil ? nil : (map: camera.mapPoint(forView: point, viewSize: bounds.size), view: point)
+        overlay.flashScaleBar()
         startAnimating()
     }
 
