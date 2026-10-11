@@ -1,0 +1,126 @@
+# XcodeGen spec: `cd ios && xcodegen generate` creates MapMe.xcodeproj.
+# The Rust core must be built first: scripts/build-core-ios.sh → build/MapMeCore.xcframework
+name: MapMe
+options:
+  bundleIdPrefix: com.jacobusoettle
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  developmentLanguage: en
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    DEAD_CODE_STRIPPING: YES
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+  configs:
+    Release:
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      SWIFT_COMPILATION_MODE: wholemodule
+
+targets:
+  MapMe:
+    type: application
+    platform: iOS
+    sources:
+      - path: MapMe
+    dependencies:
+      - framework: ../build/MapMeCore.xcframework
+        embed: false
+      - sdk: Security.framework
+    info:
+      path: MapMe/Info.plist
+      properties:
+        CFBundleDisplayName: MapMe
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIUserInterfaceStyle: Dark
+        UIApplicationSupportsIndirectInputEvents: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - location
+        NSLocationWhenInUseUsageDescription: MapMe shows your position as a red dot on the maps you import.
+        NSLocationAlwaysAndWhenInUseUsageDescription: MapMe keeps recording your track while the screen is off when you start a recording.
+        NSCameraUsageDescription: Take a photo of a paper map to use it in MapMe.
+        NSPhotoLibraryUsageDescription: Import a map image or screenshot from your photos.
+        ITSAppUsesNonExemptEncryption: false
+        LSSupportsOpeningDocumentsInPlace: false
+        UIFileSharingEnabled: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: PDF map
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - com.adobe.pdf
+          - CFBundleTypeName: Map image
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.jpeg
+              - public.png
+              - public.heic
+              - public.tiff
+              - public.image
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jacobusoettle.mapme
+        PRODUCT_NAME: MapMe
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SWIFT_EMIT_LOC_STRINGS: NO
+    postBuildScripts:
+      - name: Embed sample map (Debug only)
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ "${CONFIGURATION}" = "Debug" ]; then
+            cp "${SRCROOT}/../fixtures/grootkloof/grootkloof.pdf" "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/SampleMap.pdf"
+          fi
+    scheme:
+      testTargets:
+        - MapMeTests
+        - MapMeUITests
+      gatherCoverageData: false
+
+  MapMeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: MapMeTests
+      - path: ../fixtures/grootkloof
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: MapMe
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jacobusoettle.mapme.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+  MapMeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: MapMeUITests
+    dependencies:
+      - target: MapMe
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jacobusoettle.mapme.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: MapMe

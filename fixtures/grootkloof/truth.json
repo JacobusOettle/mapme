@@ -1,0 +1,54 @@
+{
+  "description": "MCSA Magaliesberg Sheet 03 Grootkloof. Ground truth from the 1-arc-minute graticule (line pixel positions measured with a Hough transform on map.jpg, 3507x4960 px, 300 dpi). Graticule lines are axis-aligned (Web Mercator map).",
+  "image_width": 3507,
+  "image_height": 4960,
+  "lat_lines": [
+    {
+      "y": 541,
+      "lat": -25.816666666666666
+    },
+    {
+      "y": 1515,
+      "lat": -25.833333333333332
+    },
+    {
+      "y": 2488,
+      "lat": -25.85
+    },
+    {
+      "y": 3462,
+      "lat": -25.866666666666667
+    },
+    {
+      "y": 4436,
+      "lat": -25.883333333333333
+    }
+  ],
+  "lon_lines": [
+    {
+      "x": 878,
+      "lon": 27.383333333333333
+    },
+    {
+      "x": 1754,
+      "lon": 27.4
+    },
+    {
+      "x": 2630,
+      "lon": 27.416666666666668
+    }
+  ],
+  "map_frame_px": [
+    107,
+    106,
+    3399,
+    4841
+  ],
+  "scale_denominator": 25000,
+  "contour_interval_m": 5,
+  "contour_rgb": [
+    168,
+    152,
+    136
+  ]
+}

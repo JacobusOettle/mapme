@@ -1,0 +1,4 @@
+module MapMeCoreFFI {
+    header "mapme_core.h"
+    export *
+}

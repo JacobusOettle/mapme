@@ -1,0 +1,18 @@
+# Rust
+/core/target/
+target/
+# Xcode / iOS
+/ios/MapMe.xcodeproj/
+/ios/build/
+/build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.ipa
+*.xcarchive
+# Python
+.venv/
+venv/
+__pycache__/
+# misc
+.DS_Store
