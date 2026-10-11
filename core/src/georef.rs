@@ -16,10 +16,12 @@
 //!
 //! A request with `photo: true` (a photo of a paper map, flattened by its
 //! page borders) analyses an illumination- and white-balance-normalised copy
-//! of the raster (`contour::normalize_illumination`), detects grid lines
-//! against their local background, extracts contours with hysteresis, and
-//! lets the grid fit and the contour refinement end in a homography, which
-//! absorbs the perspective and aspect error the flattening left.
+//! of the raster (`contour::normalize_illumination`), traces grid lines
+//! (bent where the paper does not lie flat) against their local background,
+//! extracts contours as luminance valleys of contour colour
+//! (`contour::photo_mask`), and lets the grid fit and the contour refinement
+//! end in a homography, which absorbs the perspective and aspect error the
+//! flattening left.
 //!
 //! When a stage needs DEM tiles that are neither present nor marked missing,
 //! the call returns `need_dem` and starts computing the contour products on
@@ -53,6 +55,10 @@ use std::time::Instant;
 
 /// Grid line fits with a larger RMS (ground metres) only seed the contour stage.
 pub const GRID_MAX_RMS_M: f64 = 25.0;
+/// Photos: paper that does not lie flat (folds, curl) bends the grid, so a
+/// homography through the grid intersections of a good fit is off by tens
+/// of metres (`fixtures/grootkloof/photo`, folded in four: 25 m RMS).
+pub const PHOTO_GRID_MAX_RMS_M: f64 = 60.0;
 /// Contour matches at least this confident are reported without refining
 /// further candidates (`refine::confidence`: ≥ 0.7 is a confident match).
 pub const CONFIDENT: f64 = 0.7;
@@ -373,7 +379,7 @@ impl ContourProducts {
     }
 
     /// `compute`; with `photo`, `img` is the normalised photo
-    /// (`normalize_illumination`) and the mask is grown by hysteresis.
+    /// (`normalize_illumination`) and the mask is `photo_mask`'s.
     pub fn compute_with(img: &Rgb8, contour_rgb: Option<[u8; 3]>, photo: bool) -> ContourProducts {
         let t = Instant::now();
         let (mask, model) = match (contour_rgb, photo) {
@@ -748,7 +754,8 @@ impl<'a> Run<'a> {
             match m {
                 MethodReq::Grid => {
                     if let Some(g) = self.grid()? {
-                        if g.method == GridMethod::Lines && g.rms_m < GRID_MAX_RMS_M {
+                        let max_rms = if self.req.photo { PHOTO_GRID_MAX_RMS_M } else { GRID_MAX_RMS_M };
+                        if g.method == GridMethod::Lines && g.rms_m < max_rms {
                             return self.grid_ok(&g);
                         }
                         weak = Some(g);
@@ -820,7 +827,7 @@ impl<'a> Run<'a> {
         self.s.bump_progress(0.15);
         let lines_h = lines.iter().filter(|l| l.axis == LineAxis::Horizontal).count();
         let lines_v = lines.len() - lines_h;
-        let d = match &g {
+        let mut d = match &g {
             None => json!({"found": false, "lines_h": lines_h, "lines_v": lines_v}),
             Some(g) => json!({
                 "found": true,
@@ -834,6 +841,11 @@ impl<'a> Run<'a> {
                 "lines_v": lines_v,
             }),
         };
+        if let Some(g) = g.as_ref().filter(|_| self.req.photo) {
+            // How far the identified grid lines bend: paper that does not lie flat.
+            let bend = g.lines.iter().filter_map(|l| l.line.bend).map(|b| b.max_abs()).fold(0.0, f64::max);
+            d["max_bend_px"] = json!(round_dp(bend, 1));
+        }
         self.diag.insert("grid".into(), d);
         if let Some(g) = &g {
             self.used_labels = g.used_labels.clone();
@@ -867,7 +879,9 @@ impl<'a> Run<'a> {
             4 => 0.97,
             _ => 1.0,
         };
-        let conf = 0.97 * label_factor * (1.0 - 0.3 * ramp(g.rms_m, 5.0, GRID_MAX_RMS_M));
+        let rms_ramp =
+            if self.req.photo { ramp(g.rms_m, 10.0, PHOTO_GRID_MAX_RMS_M) } else { ramp(g.rms_m, 5.0, GRID_MAX_RMS_M) };
+        let conf = 0.97 * label_factor * (1.0 - 0.3 * rms_ramp);
         let (ya, xa) = self.label_axes(g);
         let msg = format!(
             "Located from {} {ya} and {} {xa} grid label{} ({}).",
