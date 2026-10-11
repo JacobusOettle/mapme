@@ -21,6 +21,17 @@ final class GeoreferenceE2ETests: XCTestCase {
         return String(text[r])
     }
 
+    /// Keep raw data in the result bundle (CI exports it next to the screenshots).
+    private func attachJSON<T: Encodable>(_ value: T, name: String) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(value) else { return }
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     func testOCRReadsGridLabelsAndGridGeoreferenceIsAccurate() async throws {
         let (image, dpi) = try Fixtures.renderedPDF()
         XCTAssertEqual(Double(image.width), 3508, accuracy: 2)
@@ -31,6 +42,7 @@ final class GeoreferenceE2ETests: XCTestCase {
         let ocr = try await OCRService.recognize(in: image)
         let ocrSeconds = Date().timeIntervalSince(started)
         XCTAssertFalse(ocr.isEmpty, "Vision found no text")
+        attachJSON(ocr, name: "grootkloof-vision-ocr.json")
 
         // 25°49'00"S … 25°53'00"S on the left edge (vertical), 27°23'00"E … 27°25'00"E along the bottom.
         let latMinutes = Set(ocr.compactMap { Self.matches($0.text, #"25\D{0,3}(49|50|51|52|53)(?:\D|00)"#) })
@@ -48,6 +60,7 @@ final class GeoreferenceE2ETests: XCTestCase {
         request.dpi = dpi
         request.methods = ["grid"]
         let response = try Fixtures.georeference(session, request)
+        attachJSON(response, name: "grootkloof-grid-response.json")
         XCTAssertEqual(response.status, "ok", response.message ?? "")
         XCTAssertEqual(response.method, "grid")
         let g = try XCTUnwrap(response.georeference)

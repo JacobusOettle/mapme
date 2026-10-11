@@ -433,12 +433,116 @@ fn parse_tokens(toks: &[Tok]) -> Option<CoordValue> {
 pub fn parse_coordinate(text: &str) -> Option<CoordValue> {
     let norm = normalize(text);
     if norm.iter().any(|&c| c == 'o' || c == 'O') {
-        if let Some(v) = parse_tokens(&tokenize(&o_to_zero(&norm))) {
-            return Some(v);
-        }
-        return parse_tokens(&tokenize(&o_to_degree(&norm)));
+        let zeroed = o_to_zero(&norm);
+        return parse_tokens(&tokenize(&zeroed))
+            .or_else(|| parse_tokens(&tokenize(&o_to_degree(&norm))))
+            .or_else(|| parse_embedded_dms(&zeroed));
     }
-    parse_tokens(&tokenize(&norm))
+    parse_tokens(&tokenize(&norm)).or_else(|| parse_embedded_dms(&norm))
+}
+
+/// Fallback for OCR lines where a DMS label is merged with other text
+/// ("Gous 27°23'00\"E", "I 25°50'00\"S") or its marks are confused
+/// ("25'53'00\"S", "25°53°00\"S"). Requires a hemisphere letter so stray
+/// numbers never qualify.
+fn parse_embedded_dms(c: &[char]) -> Option<CoordValue> {
+    let n = c.len();
+    let is_mark = |ch: char| ch == DEG || ch == MIN || ch == SEC;
+    // Skip spaces and at most `marks` mark characters.
+    let skip = |mut k: usize, marks: usize| -> usize {
+        let mut seen = 0;
+        while k < n && (c[k] == ' ' || (is_mark(c[k]) && seen < marks)) {
+            if c[k] != ' ' {
+                seen += 1;
+            }
+            k += 1;
+        }
+        k
+    };
+    let two_digits = |k: usize| -> Option<f64> {
+        if k + 2 <= n
+            && c[k].is_ascii_digit()
+            && c[k + 1].is_ascii_digit()
+            && (k + 2 == n || !c[k + 2].is_ascii_digit())
+        {
+            Some(((c[k] as u8 - b'0') * 10 + (c[k + 1] as u8 - b'0')) as f64)
+        } else {
+            None
+        }
+    };
+    let mut found: Option<CoordValue> = None;
+    for start in 0..n {
+        if !c[start].is_ascii_digit() || (start > 0 && c[start - 1].is_ascii_digit()) {
+            continue;
+        }
+        // Degrees never follow a mark: "25°75'00\"S" must not read as 75°00'S.
+        let mut p = start;
+        while p > 0 && c[p - 1] == ' ' {
+            p -= 1;
+        }
+        if p > 0 && (is_mark(c[p - 1]) || c[p - 1] == '.') {
+            continue;
+        }
+        let mut j = start;
+        while j < n && c[j].is_ascii_digit() {
+            j += 1;
+        }
+        let run: String = c[start..j].iter().collect();
+        let (deg, minutes, mut k) = match run.len() {
+            // Degrees and minutes run together: "2553'00\"S".
+            4 => (run[..2].parse::<f64>().ok()?, run[2..].parse::<f64>().ok()?, j),
+            1..=3 => {
+                let d: f64 = run.parse().ok()?;
+                let k = skip(j, 1);
+                match two_digits(k) {
+                    Some(m) => (d, m, k + 2),
+                    None => continue,
+                }
+            }
+            _ => continue,
+        };
+        let mut seconds = 0.0;
+        let after_min = skip(k, 1);
+        if let Some(sec) = two_digits(after_min) {
+            seconds = sec;
+            k = after_min + 2;
+            if k + 1 < n && c[k] == '.' && c[k + 1].is_ascii_digit() {
+                k += 1;
+                let mut frac = String::from("0.");
+                while k < n && c[k].is_ascii_digit() {
+                    frac.push(c[k]);
+                    k += 1;
+                }
+                seconds += frac.parse::<f64>().unwrap_or(0.0);
+            }
+        }
+        let before_hemi = k;
+        k = skip(k, 2);
+        if k >= n || (k + 1 < n && c[k + 1].is_ascii_alphabetic()) {
+            continue;
+        }
+        let marked = (before_hemi..k).any(|i| is_mark(c[i]));
+        let hemi = match c[k] {
+            '5' if marked => 'S',
+            h @ ('N' | 'S' | 'E' | 'W') => h,
+            _ => continue,
+        };
+        if minutes >= 60.0 || seconds >= 60.0 {
+            continue;
+        }
+        let v = deg + minutes / 60.0 + seconds / 3600.0;
+        let value = match hemi {
+            'N' | 'S' if v <= 90.0 => CoordValue::Lat(if hemi == 'S' { -v } else { v }),
+            'E' | 'W' if v <= 180.0 => CoordValue::Lon(if hemi == 'W' { -v } else { v }),
+            _ => continue,
+        };
+        if found.is_some() {
+            // Two coordinates in one observation: ambiguous which one sits where.
+            return None;
+        }
+        found = Some(value);
+    }
+    found
 }
 
 /// Parse a representative fraction like "1:25 000" / "1 : 50,000" → 25000.
@@ -927,6 +1031,27 @@ fn is_measure(w: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_and_confused_dms_labels() {
+        let lat = |t: &str| match parse_coordinate(t) {
+            Some(CoordValue::Lat(v)) => v,
+            other => panic!("{t:?} -> {other:?}"),
+        };
+        let lon = |t: &str| match parse_coordinate(t) {
+            Some(CoordValue::Lon(v)) => v,
+            other => panic!("{t:?} -> {other:?}"),
+        };
+        assert!((lon("GIS V1 Sept 2017- Eras Gous 27°23'00\"E") - (27.0 + 23.0 / 60.0)).abs() < 1e-9);
+        assert!((lat("I 25°50'00\"S") + 25.0 + 50.0 / 60.0).abs() < 1e-9);
+        assert!((lat("25°50'00\"S 1") + 25.0 + 50.0 / 60.0).abs() < 1e-9);
+        assert!((lat("25'53'00\"S") + 25.0 + 53.0 / 60.0).abs() < 1e-9);
+        assert!((lat("25°53°00\"S") + 25.0 + 53.0 / 60.0).abs() < 1e-9);
+        assert!((lat("25°50'00\"5") + 25.0 + 50.0 / 60.0).abs() < 1e-9);
+        for junk in ["GIS V1 Sept 2017- Eras Gous", "Magnetic Declination 18° West", "Sept 2017", "12 34 Street"] {
+            assert_eq!(parse_coordinate(junk), None, "{junk}");
+        }
+    }
 
     fn lat(v: f64) -> Option<CoordValue> {
         Some(CoordValue::Lat(v))

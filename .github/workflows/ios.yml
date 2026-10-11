@@ -111,6 +111,8 @@ jobs:
     needs: gate
     runs-on: macos-15
     timeout-minutes: 60
+    permissions:
+      contents: write   # push screenshots/logs to the ci-screenshots branch
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
@@ -300,6 +302,26 @@ jobs:
           path: build/screenshots/
           if-no-files-found: ignore
           retention-days: 30
+
+      # Artifacts need a browser login to view; a branch is readable with plain git.
+      - name: Publish screenshots and test logs to the ci-screenshots branch
+        if: ${{ !cancelled() && github.event_name == 'push' }}
+        continue-on-error: true
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          files=(build/screenshots/*.png build/screenshots/*.json build/logs/test.log build/logs/test-summary.json)
+          (( ${#files[@]} )) || { echo "nothing to publish"; exit 0; }
+          dir="$(mktemp -d)"
+          cp "${files[@]}" "$dir/"
+          cd "$dir"
+          printf '# CI screenshots\n\nFrom %s on %s, run %s.\n' "$GITHUB_SHA" "$GITHUB_REF_NAME" "$GITHUB_RUN_ID" > README.md
+          git init -q -b ci-screenshots
+          git add -A
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -qm "Screenshots for ${GITHUB_SHA::7}"
+          git push -qf "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/ci-screenshots
 
       - name: Job summary
         if: ${{ !cancelled() }}
