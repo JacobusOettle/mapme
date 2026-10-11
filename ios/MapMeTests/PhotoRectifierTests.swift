@@ -382,8 +382,8 @@ final class PhotoRectifierTests: XCTestCase {
         // Vision's frame alone is passed on (triage then uses the photo as it is).
         XCTAssertEqual(choose(visionFrame, nil), PageChoice(quad: visionFrame, source: .vision))
         XCTAssertEqual(PhotoGeometry.triage(visionFrame, imageSize: workSize), .asIs)
-        // Agreeing outlines: Vision's.
-        XCTAssertEqual(choose(near, workPage), PageChoice(quad: near, source: .vision))
+        // Agreeing outlines: the core's (it fits its sides itself; Vision's rest on snapping).
+        XCTAssertEqual(choose(near, workPage), PageChoice(quad: workPage, source: .core))
         // Disagreeing: the clearer border, with an edge for Vision.
         XCTAssertEqual(choose(otherOutline, workPage), PageChoice(quad: workPage, source: .core))
         XCTAssertEqual(choose(workPage, otherOutline), PageChoice(quad: workPage, source: .vision))

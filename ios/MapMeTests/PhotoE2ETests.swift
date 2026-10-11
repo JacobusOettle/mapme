@@ -104,7 +104,9 @@ final class PhotoE2ETests: XCTestCase {
         let truePage = try XCTUnwrap(scene.truth.pageQuad)
         let diagonal = (PhotoGeometry.distance(truePage.topLeft, truePage.bottomRight)
             + PhotoGeometry.distance(truePage.topRight, truePage.bottomLeft)) / 2
-        let tolerance = 0.02 * diagonal
+        // The core's own corners are within ~6 px here (Rust tests: 4 px); 1 % leaves room for the
+        // 1600 px working copy and for Vision winning a close call.
+        let tolerance = 0.01 * diagonal
         let analysis = scene.analysis
         var offsets: [Double] = []
         if let detected = analysis.quad {

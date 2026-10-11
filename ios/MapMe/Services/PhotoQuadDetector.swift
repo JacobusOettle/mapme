@@ -19,7 +19,7 @@ struct PageChoice: Equatable {
 /// Everything page detection found in one photo (pixels of the analysed image), for the importer
 /// and for diagnostics.
 struct PageAnalysis {
-    /// The chosen, edge-snapped outline; nil when there is no plausible page.
+    /// The chosen outline (Vision's edge-snapped, or the core's); nil when there is no plausible page.
     var quad: PhotoQuad?
     var source: PageSource?
     /// Vision's largest outline and the core's page, as found (before snapping).
@@ -48,10 +48,10 @@ struct PageAnalysis {
 
 /// Finds the paper in a photo. Two detectors look at the same downscaled copy: Vision's document
 /// segmentation (rectangle detection as a fallback) and the core's page finder (`mm_detect_page`,
-/// which also works where Vision returns the whole frame, as in the simulator). The better outline
-/// is chosen (see `select`), then each of its edges is snapped to the paper's border in the pixels
-/// and the corners are recomputed as the intersections of the fitted edge lines. Rough corners
-/// are typically off by ~1 % of the frame; the snapped ones are within a pixel or two, which keeps
+/// which also works where Vision returns the whole frame, as in the simulator). Vision's edges are
+/// snapped to the paper's border in the pixels and its corners recomputed as the intersections of
+/// the fitted edge lines (its rough corners are typically off by ~1 % of the frame); the core
+/// refines its own sides. The better outline is then chosen (see `select`). Accurate corners keep
 /// the flattened map free of residual perspective.
 enum PhotoQuadDetector {
     /// Long side of the downscaled copy both detectors and the edge snapping work on.
@@ -126,14 +126,16 @@ enum PhotoQuadDetector {
 
     // MARK: - Choosing the outline
 
-    /// Snap both candidates (pixels of `gray`, an image of `imageSize`) to the paper's border, then
-    /// pick one with `select`.
+    /// Snap Vision's outline (pixels of `gray`, an image of `imageSize`) to the paper's border, then
+    /// pick one with `select`. The core's page is used as found: the core already fits each side
+    /// with a robust line through many edge profiles, while snapping takes the strongest step near
+    /// the side, which on folded paper with layered edges can be an inner layer (on the real photo
+    /// fixture snapping moved two good corners 33–43 px inwards).
     static func choosePage(vision: PhotoQuad?, core: PageDetection?, imageSize: CGSize, gray: GrayImage?) -> PageChoice? {
         var visionQuad = vision
-        var coreQuad = core.flatMap { acceptedCoreQuad($0, imageSize: imageSize) }
+        let coreQuad = core.flatMap { acceptedCoreQuad($0, imageSize: imageSize) }
         if let gray {
             visionQuad = visionQuad.map { snapped($0, in: gray, imageSize: imageSize) }
-            coreQuad = coreQuad.map { snapped($0, in: gray, imageSize: imageSize) }
         }
         return select(vision: visionQuad, core: coreQuad, imageSize: imageSize) { quad in
             guard let gray else { return nil }
@@ -163,8 +165,10 @@ enum PhotoQuadDetector {
     ///   an outline whose contrast cannot be measured (edges on the image border) is kept;
     /// - Vision's outline when it is the only one; the core's when it is the only one;
     /// - both: the core's when Vision's (nearly) fills the frame (the simulator's Vision returns the
-    ///   whole image for a sheet on a table); Vision's when they agree; otherwise the one with the
-    ///   clearer border (the core's needs `coreContrastAdvantage` × Vision's contrast).
+    ///   whole image for a sheet on a table); the core's when they agree (it fits each side through
+    ///   many edge profiles, while Vision's corners rest on snapping, which can catch an inner layer
+    ///   of folded paper); otherwise the one with the clearer border (the core's needs
+    ///   `coreContrastAdvantage` × Vision's contrast).
     /// `core` must already have passed `acceptedCoreQuad` (confidence, coverage).
     static func select(vision: PhotoQuad?, core: PhotoQuad?, imageSize: CGSize,
                        contrast: (PhotoQuad) -> Double?) -> PageChoice? {
@@ -177,7 +181,7 @@ enum PhotoQuadDetector {
         guard let c = fromCore else { return visionChoice }
         let coreChoice = PageChoice(quad: c.quad, source: .core)
         if PhotoGeometry.fillsFrame(v.quad, imageSize: imageSize) { return coreChoice }
-        if agree(v.quad, c.quad, imageSize: imageSize) { return visionChoice }
+        if agree(v.quad, c.quad, imageSize: imageSize) { return coreChoice }
         let visionContrast = v.contrast ?? 0
         let coreContrast = c.contrast ?? 0
         return coreContrast > visionContrast * coreContrastAdvantage ? coreChoice : visionChoice
