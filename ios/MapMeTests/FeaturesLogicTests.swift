@@ -101,7 +101,12 @@ final class FeaturesLogicTests: XCTestCase {
             let px = try XCTUnwrap(ContourColorSampler.rgba(of: image, x: x - 6, y: y - 6, width: 13, height: 13))
             let rgb = ContourColorSampler.pick(px, width: 13, height: 13, centerX: 6, centerY: 6)
             XCTAssertEqual(rgb.count, 3)
-            let d = zip(rgb, reference).map { (Double($0) - $1) * (Double($0) - $1) }.reduce(0, +).squareRoot()
+            var squared = 0.0
+            for i in 0..<3 {
+                let diff = Double(rgb[i]) - reference[i]
+                squared += diff * diff
+            }
+            let d = squared.squareRoot()
             if d < 35 { good += 1 }
         }
         XCTAssertGreaterThanOrEqual(good, 4, "contour colour picked for \(good)/\(taps.count) taps")
