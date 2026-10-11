@@ -1,0 +1,5 @@
+# Pinned so local builds and CI lint identically (new clippy lints arrive with
+# every stable release and CI runs clippy with -D warnings). Bump deliberately.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
