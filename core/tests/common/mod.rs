@@ -53,8 +53,7 @@ pub fn dem_store() -> DemStore {
 }
 
 pub fn ocr_fixture() -> Vec<OcrObservation> {
-    let v: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(fixture_dir().join("ocr.json")).unwrap()).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(fixture_dir().join("ocr.json")).unwrap()).unwrap();
     serde_json::from_value(v["observations"].clone()).unwrap()
 }
 
