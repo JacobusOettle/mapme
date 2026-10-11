@@ -15,6 +15,7 @@ pub mod georef;
 pub mod grid;
 pub mod image;
 pub mod labels;
+pub mod page;
 pub mod refine;
 pub mod search;
 pub mod skeleton;

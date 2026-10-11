@@ -217,6 +217,51 @@ pub unsafe extern "C" fn mm_fit_control_points(request_json: *const c_char) -> *
     }
 }
 
+/// Find the sheet of paper in a photo (8-bit RGBA, alpha ignored, rows
+/// `bytes_per_row` apart; read during the call, not kept). Returns
+/// `{"status":"ok","quad":[[x,y]×4 TL,TR,BR,BL],"confidence","coverage"}` or
+/// `{"status":"failed","message"}`, never NULL.
+///
+/// # Safety
+/// `rgba` must be NULL or point to at least `bytes_per_row * (height - 1) + width * 4` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn mm_detect_page(rgba: *const u8, width: u32, height: u32, bytes_per_row: u32) -> *mut c_char {
+    if rgba.is_null() {
+        return into_c_string(failed_json("rgba is NULL"));
+    }
+    if width == 0
+        || height == 0
+        || width > MAX_SIDE
+        || height > MAX_SIDE
+        || width as u64 * height as u64 > MAX_PIXELS
+        || (bytes_per_row as u64) < width as u64 * 4
+    {
+        return into_c_string(failed_json(&format!(
+            "Invalid image: {width}×{height} pixels, {bytes_per_row} bytes per row"
+        )));
+    }
+    let (w, h, stride) = (width as usize, height as usize, bytes_per_row as usize);
+    let Some(len) = stride.checked_mul(h - 1).and_then(|n| n.checked_add(w * 4)) else {
+        return into_c_string(failed_json("Invalid image: too large"));
+    };
+    json_call(|| {
+        let data = std::slice::from_raw_parts(rgba, len);
+        let Some(view) = RgbaView::new(data, w, h, stride) else {
+            return failed_json("Invalid image");
+        };
+        match crate::page::find_page_rgba(&view) {
+            Ok(p) => serde_json::json!({
+                "status": "ok",
+                "quad": p.corners.map(|(x, y)| [x, y]),
+                "confidence": p.confidence,
+                "coverage": p.coverage,
+            })
+            .to_string(),
+            Err(message) => failed_json(&message),
+        }
+    })
+}
+
 /// `{"version": "0.1.0", "build": "release aarch64-ios"}`.
 #[no_mangle]
 pub extern "C" fn mm_version() -> *mut c_char {
