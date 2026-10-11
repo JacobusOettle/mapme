@@ -5,7 +5,8 @@ Catches unbalanced braces, malformed declarations and similar parse errors
 before spending macOS CI minutes. It does not type-check.
 
     python3 -m venv .venv && .venv/bin/pip install tree-sitter tree-sitter-swift
-    .venv/bin/python scripts/check_swift_syntax.py ios
+    .venv/bin/python scripts/check_swift_syntax.py ios            # a directory
+    .venv/bin/python scripts/check_swift_syntax.py a.swift b.swift  # or files
 """
 import pathlib
 import sys
@@ -24,7 +25,10 @@ def errors(node, out):
 
 def main(roots):
     parser = Parser(Language(tree_sitter_swift.language()))
-    files = sorted(p for r in roots for p in pathlib.Path(r).rglob("*.swift"))
+    files = []
+    for r in map(pathlib.Path, roots):
+        files += [r] if r.is_file() else list(r.rglob("*.swift"))
+    files = sorted(set(files))
     bad = 0
     for f in files:
         src = f.read_bytes()
