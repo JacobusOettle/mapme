@@ -1,0 +1,158 @@
+# Rust core on Linux: formatting, lints, tests on the real Grootkloof fixture,
+# an iOS target check and the dev CLI end to end. Cheap (1x Linux minutes).
+name: Core
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "core/**"
+      - "fixtures/**"
+      - "scripts/**"
+      - ".github/workflows/core.yml"
+  pull_request:
+    paths:
+      - "core/**"
+      - "fixtures/**"
+      - "scripts/**"
+      - ".github/workflows/core.yml"
+  workflow_dispatch:
+
+# A push and its pull_request event share a group, so only one of them runs.
+concurrency:
+  group: core-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: core
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  core:
+    name: fmt, clippy, tests, iOS check, CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          cache-on-failure: "true"
+
+      - name: rustfmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests (release, real fixture)
+        run: time cargo test --release -- --show-output
+
+      - name: Check the library for iOS (aarch64-apple-ios)
+        run: cargo check --lib --release --target aarch64-apple-ios
+
+      - name: Georeference the Grootkloof map with the dev CLI
+        run: |
+          mkdir -p ../build/cli
+          echo "== contours (no OCR): map.jpg + GPS + DEM"
+          time cargo run --release --example georef_cli -- ../fixtures/grootkloof/map.jpg \
+            --gps -25.75,27.45 --dem-dir ../fixtures/grootkloof/dem --dpi 300 > ../build/cli/georef-contours.json
+          echo "== grid labels: + OCR fixture"
+          time cargo run --release --example georef_cli -- ../fixtures/grootkloof/map.jpg \
+            --gps -25.75,27.45 --dem-dir ../fixtures/grootkloof/dem --dpi 300 \
+            --ocr ../fixtures/grootkloof/ocr.json > ../build/cli/georef-grid.json
+
+      - name: Compare CLI results with the ground truth
+        working-directory: .
+        env:
+          MAX_ERR_M: "250"
+        run: |
+          python3 - build/cli/georef-contours.json build/cli/georef-grid.json <<'PY'
+          import json, math, os, sys
+
+          R = 6378137.0
+          truth = json.load(open("fixtures/grootkloof/truth.json"))
+
+          def fit(pairs):
+              n = len(pairs)
+              sp = sum(p for p, _ in pairs); sv = sum(v for _, v in pairs)
+              spp = sum(p * p for p, _ in pairs); spv = sum(p * v for p, v in pairs)
+              b = (n * spv - sp * sv) / (n * spp - sp * sp)
+              return (sv - b * sp) / n, b
+
+          # Graticule lines are axis-aligned in Web Mercator: X(x) and Y(y) are linear.
+          ax, bx = fit([(l["x"], R * math.radians(l["lon"])) for l in truth["lon_lines"]])
+          ay, by = fit([(l["y"], R * math.log(math.tan(math.pi / 4 + math.radians(l["lat"]) / 2)))
+                        for l in truth["lat_lines"]])
+          x0, y0, x1, y1 = truth["map_frame_px"]
+          limit = float(os.environ.get("MAX_ERR_M", "250"))
+
+          rows, bad = [], []
+          for path in sys.argv[1:]:
+              label = os.path.basename(path)
+              try:
+                  r = json.load(open(path))
+              except Exception as e:
+                  bad.append("%s: not valid JSON (%s)" % (label, e))
+                  rows.append((label, "invalid", "-", "-", "-", "-", "-", ""))
+                  continue
+              H = r.get("pixel_to_mercator")
+              status, method = r.get("status"), r.get("method")
+              timings = r.get("timings_ms") or {}
+              total = "%.0f ms" % sum(v for v in timings.values() if isinstance(v, (int, float))) if timings else "-"
+              conf = r.get("confidence")
+              conf = "%.2f" % conf if isinstance(conf, (int, float)) else "-"
+              if status != "ok" or not H or len(H) != 9:
+                  bad.append("%s: status=%s (%s)" % (label, status, r.get("message")))
+                  rows.append((label, status, method, conf, "-", "-", total, r.get("message") or ""))
+                  continue
+              errs = []
+              for i in range(11):
+                  for j in range(11):
+                      x = x0 + (x1 - x0) * i / 10.0
+                      y = y0 + (y1 - y0) * j / 10.0
+                      w = H[6] * x + H[7] * y + H[8]
+                      X = (H[0] * x + H[1] * y + H[2]) / w
+                      Y = (H[3] * x + H[4] * y + H[5]) / w
+                      tx, ty = ax + bx * x, ay + by * y
+                      lat = 2 * math.atan(math.exp(ty / R)) - math.pi / 2
+                      errs.append(math.hypot(X - tx, Y - ty) * math.cos(lat))
+              mx, mean = max(errs), sum(errs) / len(errs)
+              if mx > limit:
+                  bad.append("%s: max error %.0f m > %.0f m" % (label, mx, limit))
+              rows.append((label, status, method, conf, "%.1f m" % mx, "%.1f m" % mean, total, r.get("message") or ""))
+
+          head = ("result", "status", "method", "confidence", "max err", "mean err", "core time", "message")
+          table = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+          table += ["| " + " | ".join(str(c) for c in row) + " |" for row in rows]
+          print("\n".join(table))
+          if os.environ.get("GITHUB_STEP_SUMMARY"):
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                  f.write("### Grootkloof georeference (dev CLI vs ground truth)\n\n" + "\n".join(table) + "\n\n")
+          for b in bad:
+              print("::error::" + b)
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Upload CLI results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: georef-cli
+          path: build/cli/
+          if-no-files-found: warn
+          retention-days: 14

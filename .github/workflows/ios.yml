@@ -1,0 +1,607 @@
+# iOS app: cheap Linux gate first, then one macOS job that builds the Rust core
+# XCFramework (cached by source hash), runs the unit + UI tests on a simulator,
+# exports screenshots and packages an unsigned IPA. main / v* tags / manual runs
+# publish the IPA as the "latest-build" prerelease. TestFlight runs only when
+# the signing secrets exist (docs/INSTALL.md).
+#
+# macOS minutes cost 10x on private repos, so: path filters, one run per ref
+# (push + pull_request share a concurrency group), the XCFramework is only
+# rebuilt when core/ changes, and nothing on macOS starts before the gate passes.
+name: iOS
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+    paths:
+      - "ios/**"
+      - "core/**"
+      - "scripts/**"
+      - "fixtures/**"
+      - ".github/workflows/ios.yml"
+  pull_request:
+    paths:
+      - "ios/**"
+      - "core/**"
+      - "scripts/**"
+      - "fixtures/**"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish the IPA as the "latest-build" prerelease
+        type: boolean
+        default: false
+
+concurrency:
+  group: ios-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  XCODEGEN_VERSION: "2.46.0"
+  XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+  # Optional repository variables: XCODE_VERSION, e.g. "16.4" (empty = the image's
+  # default Xcode), and APP_BUNDLE_ID for TestFlight builds under another App ID.
+  XCODE_VERSION: ${{ vars.XCODE_VERSION }}
+  APP_BUNDLE_ID: ${{ vars.APP_BUNDLE_ID || 'com.jacobusoettle.mapme' }}
+
+jobs:
+  gate:
+    name: Gate (Swift syntax, scripts, Rust lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Swift syntax (tree-sitter)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet --disable-pip-version-check \
+            tree-sitter==0.26.0 tree-sitter-swift==0.7.4 pyyaml==6.0.3
+          .venv/bin/python scripts/check_swift_syntax.py ios
+
+      - name: XcodeGen spec parses
+        run: |
+          .venv/bin/python - <<'PY'
+          import yaml
+          spec = yaml.safe_load(open("ios/project.yml"))
+          targets = spec.get("targets", {})
+          missing = {"MapMe", "MapMeTests", "MapMeUITests"} - set(targets)
+          assert not missing, "ios/project.yml lacks targets: %s" % sorted(missing)
+          print("ios/project.yml: targets", ", ".join(sorted(targets)))
+          PY
+
+      - name: Shell and Python scripts
+        run: |
+          for f in scripts/*.sh; do bash -n "$f"; done
+          if command -v shellcheck >/dev/null; then shellcheck -S warning scripts/*.sh; fi
+          python -m py_compile scripts/*.py
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          cache-on-failure: "true"
+
+      - name: rustfmt
+        working-directory: core
+        run: cargo fmt --check
+
+      - name: clippy
+        working-directory: core
+        run: cargo clippy --all-targets -- -D warnings
+
+  build-test:
+    name: Build, test, package (macOS)
+    needs: gate
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      NSUnbufferedIO: "YES"
+      # Simulated GPS fix: the middle of the Grootkloof sheet.
+      SIM_LAT: "-25.8499"
+      SIM_LON: "27.4000"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode
+        run: |
+          if [[ -n "${XCODE_VERSION:-}" ]]; then
+            app="/Applications/Xcode_${XCODE_VERSION}.app"
+            if [[ -d "$app" ]]; then
+              sudo xcode-select -s "$app"
+            else
+              echo "::warning::$app is not installed; using the default Xcode"
+              ls -d /Applications/Xcode*.app
+            fi
+          fi
+          sw_vers
+          xcodebuild -version
+          echo "iphoneos SDK $(xcrun --sdk iphoneos --show-sdk-version), simulator SDK $(xcrun --sdk iphonesimulator --show-sdk-version)"
+
+      - name: Pick and boot an iPhone simulator
+        run: |
+          xcrun simctl list runtimes
+          xcrun simctl list devices available | awk '/^-- / || /iPhone/'
+          udid="$(python3 scripts/pick-simulator.py)"
+          echo "SIM_UDID=$udid" >> "$GITHUB_ENV"
+          # Boot now so it is ready by the time the build finishes.
+          xcrun simctl boot "$udid" || true
+
+      - name: Log formatter
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin" build/logs
+          if command -v xcbeautify >/dev/null && xcbeautify --renderer github-actions --quiet </dev/null >/dev/null 2>&1; then
+            printf '#!/bin/bash\nexec xcbeautify --renderer github-actions "$@"\n' > "$RUNNER_TEMP/bin/xcfmt"
+            echo "using xcbeautify $(xcbeautify --version)"
+          else
+            printf '#!/bin/bash\nexec cat\n' > "$RUNNER_TEMP/bin/xcfmt"
+            echo "xcbeautify not available; raw xcodebuild output"
+          fi
+          chmod +x "$RUNNER_TEMP/bin/xcfmt"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Restore Rust core XCFramework
+        id: xcf
+        uses: actions/cache/restore@v6
+        with:
+          path: build/MapMeCore.xcframework
+          key: xcframework-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('core/Cargo.toml', 'core/Cargo.lock', 'core/build.rs', 'core/src/**', 'core/include/**', 'scripts/build-core-ios.sh') }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.xcf.outputs.cache-hit != 'true'
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.xcf.outputs.cache-hit != 'true'
+        with:
+          workspaces: core
+          key: ios
+          cache-on-failure: "true"
+
+      - name: Build Rust core XCFramework
+        if: steps.xcf.outputs.cache-hit != 'true'
+        run: scripts/build-core-ios.sh
+
+      # Saved right away (not in a post step) so a later test failure keeps it.
+      - name: Save Rust core XCFramework
+        if: steps.xcf.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: build/MapMeCore.xcframework
+          key: ${{ steps.xcf.outputs.cache-primary-key }}
+
+      - name: Install XcodeGen
+        run: |
+          zip="$RUNNER_TEMP/xcodegen.zip"
+          url="https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
+          if curl -fsSL --retry 3 -o "$zip" "$url" && echo "${XCODEGEN_SHA256}  $zip" | shasum -a 256 -c -; then
+            unzip -q -o "$zip" -d "$RUNNER_TEMP/xcodegen"
+            echo "$RUNNER_TEMP/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
+            "$RUNNER_TEMP/xcodegen/xcodegen/bin/xcodegen" --version
+          elif command -v xcodegen >/dev/null; then
+            echo "::warning::XcodeGen ${XCODEGEN_VERSION} download failed; using the preinstalled $(xcodegen --version)"
+          else
+            echo "::warning::XcodeGen ${XCODEGEN_VERSION} download failed; installing from Homebrew"
+            brew install xcodegen
+          fi
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate --spec project.yml
+
+      - name: Build for testing (simulator, Debug)
+        id: build_for_testing
+        timeout-minutes: 25
+        run: |
+          xcodebuild build-for-testing \
+            -project ios/MapMe.xcodeproj -scheme MapMe -configuration Debug \
+            -destination "id=$SIM_UDID" -derivedDataPath build/dd \
+            -hideShellScriptEnvironment -showBuildTimingSummary \
+            CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO \
+            2>&1 | tee build/logs/build-for-testing.log | xcfmt --quiet
+
+      - name: Build device app (Release, unsigned)
+        id: device
+        if: ${{ !cancelled() && steps.build_for_testing.outcome == 'success' }}
+        timeout-minutes: 25
+        run: |
+          xcodebuild build \
+            -project ios/MapMe.xcodeproj -scheme MapMe -configuration Release \
+            -sdk iphoneos -destination "generic/platform=iOS" -derivedDataPath build/dd \
+            -hideShellScriptEnvironment \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            2>&1 | tee build/logs/build-device.log | xcfmt --quiet
+
+      - name: Package unsigned IPA
+        id: ipa
+        if: ${{ !cancelled() && steps.device.outcome == 'success' }}
+        run: |
+          scripts/package-ipa.sh build/dd/Build/Products/Release-iphoneos/MapMe.app build/MapMe-unsigned.ipa \
+            | tee build/logs/package-ipa.log
+
+      - name: Upload IPA
+        if: ${{ !cancelled() && steps.ipa.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: MapMe-unsigned-ipa
+          path: build/MapMe-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Run tests on the simulator
+        id: test
+        if: ${{ !cancelled() && steps.build_for_testing.outcome == 'success' }}
+        timeout-minutes: 30
+        run: |
+          xcrun simctl bootstatus "$SIM_UDID" -b
+          xcrun simctl location "$SIM_UDID" set "$SIM_LAT,$SIM_LON" || echo "::warning::could not set the simulated location"
+          xcrun simctl privacy "$SIM_UDID" grant location com.jacobusoettle.mapme || true
+          rm -rf build/TestResults.xcresult
+          xcodebuild test-without-building \
+            -project ios/MapMe.xcodeproj -scheme MapMe \
+            -destination "id=$SIM_UDID" -derivedDataPath build/dd \
+            -resultBundlePath build/TestResults.xcresult \
+            -parallel-testing-enabled NO \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 300 \
+            -retry-tests-on-failure -test-iterations 2 \
+            2>&1 | tee build/logs/test.log | xcfmt
+
+      - name: Test summary
+        if: ${{ !cancelled() && steps.build_for_testing.outcome == 'success' }}
+        run: |
+          [[ -d build/TestResults.xcresult ]] || { echo "no result bundle"; exit 0; }
+          xcrun xcresulttool get test-results summary --path build/TestResults.xcresult \
+            > build/logs/test-summary.json 2>/dev/null || { echo "test-results summary needs Xcode 16+"; exit 0; }
+          python3 - build/logs/test-summary.json <<'PY'
+          import json, os, sys
+          s = json.load(open(sys.argv[1]))
+          keys = ("totalTestCount", "passedTests", "failedTests", "skippedTests", "expectedFailures")
+          lines = ["### Tests: %s" % s.get("result", "?"), ""]
+          lines.append(", ".join("%s %s" % (k, s[k]) for k in keys if k in s))
+          for f in s.get("testFailures", []):
+              lines.append("- **%s** (%s): %s" % (f.get("testName") or f.get("testIdentifierString"),
+                                                  f.get("targetName", ""), (f.get("failureText") or "").strip()))
+          text = "\n".join(lines) + "\n"
+          print(text)
+          if os.environ.get("GITHUB_STEP_SUMMARY"):
+              open(os.environ["GITHUB_STEP_SUMMARY"], "a").write(text + "\n")
+          PY
+
+      - name: Export screenshots
+        if: ${{ !cancelled() }}
+        run: scripts/export-screenshots.sh build/TestResults.xcresult build/screenshots
+
+      - name: Upload screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: screenshots
+          path: build/screenshots/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Job summary
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo "### Build"
+            echo
+            echo "- $(xcodebuild -version | awk 'NR == 1'), simulator \`$SIM_UDID\`"
+            if [[ -f build/MapMe-unsigned.ipa ]]; then
+              echo "- Unsigned IPA: $(du -h build/MapMe-unsigned.ipa | cut -f1), sha256 \`$(shasum -a 256 build/MapMe-unsigned.ipa | cut -d' ' -f1)\` (artifact **MapMe-unsigned-ipa**; install: docs/INSTALL.md)"
+            else
+              echo "- No IPA was built."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show errors
+        if: failure()
+        run: |
+          for f in build/logs/*.log; do
+            [[ -f "$f" ]] || continue
+            echo "===== $f: errors and failures (last 150) ====="
+            grep -nE "error:|\*\* [A-Z ]*FAILED \*\*|Testing failed|Test Case .* failed|: failed \(|Fatal error|Thread [0-9]+ Crashed" "$f" | tail -n 150 || true
+          done
+          mkdir -p build/logs/crashes
+          find "$HOME/Library/Logs/DiagnosticReports" -name 'MapMe*' -newer build/logs/build-for-testing.log \
+            -exec cp {} build/logs/crashes/ \; 2>/dev/null || true
+          ls build/logs/crashes
+
+      - name: Upload logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-logs
+          path: build/logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Zip result bundle
+        if: failure()
+        run: |
+          if [[ -d build/TestResults.xcresult ]]; then
+            ditto -c -k --keepParent build/TestResults.xcresult build/TestResults.xcresult.zip
+          fi
+
+      - name: Upload result bundle
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xcresult
+          path: build/TestResults.xcresult.zip
+          if-no-files-found: ignore
+          retention-days: 7
+
+  release:
+    name: Publish latest-build prerelease
+    needs: build-test
+    if: >-
+      github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: release-latest-build
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: latest-build
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: MapMe-unsigned-ipa
+          path: dist
+
+      - name: Release notes
+        run: |
+          ipa=dist/MapMe-unsigned.ipa
+          base="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          {
+            echo "Unsigned iPhone build of MapMe from \`${GITHUB_SHA::7}\` (${GITHUB_REF_NAME}), $(date -u '+%Y-%m-%d %H:%M UTC')."
+            echo
+            echo "- Commit: $base/commit/$GITHUB_SHA"
+            echo "- Workflow run: $base/actions/runs/$GITHUB_RUN_ID"
+            echo "- SHA-256: \`$(sha256sum "$ipa" | cut -d' ' -f1)\`"
+            echo
+            echo "Install with Sideloadly or AltStore and a free Apple ID (re-sign every 7 days), see"
+            echo "[docs/INSTALL.md]($base/blob/$GITHUB_SHA/docs/INSTALL.md)."
+            echo
+            echo "This prerelease is replaced on every successful build of main."
+          } > notes.md
+          cat notes.md
+
+      - name: Replace the latest-build prerelease
+        run: |
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
+          gh release create "$TAG" dist/MapMe-unsigned.ipa \
+            --prerelease --target "$GITHUB_SHA" \
+            --title "MapMe latest build (${GITHUB_SHA::7})" --notes-file notes.md
+          echo "Published $GITHUB_SERVER_URL/$GH_REPO/releases/tag/$TAG" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Attach the IPA to the version release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          asset="dist/MapMe-${GITHUB_REF_NAME}-unsigned.ipa"
+          cp dist/MapMe-unsigned.ipa "$asset"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$asset" --title "MapMe $GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi
+
+  signing:
+    name: Signing secrets present?
+    if: >-
+      github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: |
+          missing=()
+          for v in APPLE_TEAM_ID APPLE_CERTIFICATE_P12_BASE64 APPLE_PROVISIONING_PROFILE_BASE64 \
+                   ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8_BASE64; do
+            [[ -n "${!v}" ]] || missing+=("$v")
+          done
+          if (( ${#missing[@]} == 0 )); then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "All signing secrets are set: the TestFlight job will run."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "TestFlight skipped; missing secrets: ${missing[*]} (docs/INSTALL.md, option B)."
+          fi
+
+  testflight:
+    name: TestFlight upload (signed)
+    needs: [build-test, signing]
+    if: needs.signing.outputs.enabled == 'true'
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      NSUnbufferedIO: "YES"
+      BUILD_NUMBER: ${{ github.run_number }}.${{ github.run_attempt }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode
+        run: |
+          if [[ -n "${XCODE_VERSION:-}" && -d "/Applications/Xcode_${XCODE_VERSION}.app" ]]; then
+            sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app"
+          fi
+          xcodebuild -version
+          mkdir -p build/logs
+
+      - name: Restore Rust core XCFramework
+        id: xcf
+        uses: actions/cache/restore@v6
+        with:
+          path: build/MapMeCore.xcframework
+          key: xcframework-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('core/Cargo.toml', 'core/Cargo.lock', 'core/build.rs', 'core/src/**', 'core/include/**', 'scripts/build-core-ios.sh') }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.xcf.outputs.cache-hit != 'true'
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Build Rust core XCFramework
+        if: steps.xcf.outputs.cache-hit != 'true'
+        run: scripts/build-core-ios.sh
+
+      - name: Install XcodeGen and generate the project
+        run: |
+          zip="$RUNNER_TEMP/xcodegen.zip"
+          if curl -fsSL --retry 3 -o "$zip" "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            && echo "${XCODEGEN_SHA256}  $zip" | shasum -a 256 -c -; then
+            unzip -q -o "$zip" -d "$RUNNER_TEMP/xcodegen"
+            export PATH="$RUNNER_TEMP/xcodegen/xcodegen/bin:$PATH"
+          elif ! command -v xcodegen >/dev/null; then
+            brew install xcodegen
+          fi
+          (cd ios && xcodegen generate --spec project.yml)
+
+      - name: Install certificate, profile and API key
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -base64 24)"
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          printf '%s' "$APPLE_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "${APPLE_CERTIFICATE_PASSWORD:-}" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychain -d user -s "$keychain"
+
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(.*Distribution.*\)".*/\1/p' | awk 'NR == 1')"
+          if [[ -z "$identity" ]]; then
+            echo "::error::The .p12 holds no Apple Distribution identity"
+            security find-identity -v -p codesigning "$keychain"
+            exit 1
+          fi
+
+          security cms -D -i "$RUNNER_TEMP/profile.mobileprovision" > "$RUNNER_TEMP/profile.plist"
+          uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/profile.plist")"
+          profile_name="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/profile.plist")"
+          for d in "$HOME/Library/MobileDevice/Provisioning Profiles" \
+                   "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
+            mkdir -p "$d"
+            cp "$RUNNER_TEMP/profile.mobileprovision" "$d/$uuid.mobileprovision"
+          done
+
+          # altool looks for the key in ~/.appstoreconnect/private_keys.
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          printf '%s' "$ASC_KEY_P8_BASE64" | base64 --decode > "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+
+          {
+            echo "KEYCHAIN=$keychain"
+            echo "SIGN_IDENTITY=$identity"
+            echo "PROFILE_NAME=$profile_name"
+          } >> "$GITHUB_ENV"
+          echo "Signing as '$identity' with profile '$profile_name' ($uuid)"
+
+      - name: Archive
+        timeout-minutes: 25
+        run: |
+          xcodebuild archive \
+            -project ios/MapMe.xcodeproj -scheme MapMe -configuration Release \
+            -destination "generic/platform=iOS" -archivePath build/MapMe.xcarchive \
+            -hideShellScriptEnvironment \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="$SIGN_IDENTITY" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            PRODUCT_BUNDLE_IDENTIFIER="$APP_BUNDLE_ID" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            2>&1 | tee build/logs/archive.log | grep -E "error:|warning: |\*\* ARCHIVE" || true
+          [[ -d build/MapMe.xcarchive ]] || { tail -n 80 build/logs/archive.log; exit 1; }
+
+      - name: Export App Store IPA
+        run: |
+          major="$(xcodebuild -version | awk 'NR == 1 { split($2, v, "."); print v[1] }')"
+          method=app-store-connect
+          (( major >= 16 )) || method=app-store
+          python3 - "$method" <<'PY'
+          import os, plistlib, sys
+          opts = {
+              "method": sys.argv[1],
+              "destination": "export",
+              "teamID": os.environ["APPLE_TEAM_ID"],
+              "signingStyle": "manual",
+              "signingCertificate": os.environ["SIGN_IDENTITY"],
+              "provisioningProfiles": {os.environ["APP_BUNDLE_ID"]: os.environ["PROFILE_NAME"]},
+              "uploadSymbols": True,
+              "manageAppVersionAndBuildNumber": False,
+          }
+          with open("build/ExportOptions.plist", "wb") as f:
+              plistlib.dump(opts, f)
+          PY
+          xcodebuild -exportArchive -archivePath build/MapMe.xcarchive \
+            -exportPath build/export -exportOptionsPlist build/ExportOptions.plist \
+            2>&1 | tee build/logs/export.log
+          ls -la build/export
+
+      - name: Upload to TestFlight
+        run: |
+          ipa="$(find build/export -maxdepth 1 -name '*.ipa' | awk 'NR == 1')"
+          [[ -n "$ipa" ]] || { echo "::error::no IPA was exported"; exit 1; }
+          xcrun altool --upload-app --type ios --file "$ipa" --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          echo "Uploaded build $BUILD_NUMBER to App Store Connect; it shows up in TestFlight after processing." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload signing logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: testflight-logs
+          path: build/logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Remove signing material
+        if: always()
+        run: |
+          [[ -n "${KEYCHAIN:-}" ]] && security delete-keychain "$KEYCHAIN" || true
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/profile.mobileprovision" "$RUNNER_TEMP/profile.plist"
+          rm -rf "$HOME/.appstoreconnect/private_keys"

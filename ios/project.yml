@@ -45,6 +45,7 @@ targets:
           UIColorName: LaunchBackground
         UIUserInterfaceStyle: Dark
         UIApplicationSupportsIndirectInputEvents: true
+        CADisableMinimumFrameDurationOnPhone: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

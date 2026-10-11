@@ -1,5 +1,3 @@
-// OWNER: map agent. Replace the implementation; keep this public API
-// (CalibrationView from the features agent also embeds MapCanvasView).
 import CoreLocation
 import SwiftUI
 import UIKit
@@ -11,6 +9,18 @@ struct CanvasMarker: Identifiable, Hashable {
     var pixel: CGPoint
     var label: String
     var color: UIColor = .systemYellow
+
+    // Spelled out because CGPoint is not Hashable.
+    static func == (a: CanvasMarker, b: CanvasMarker) -> Bool {
+        a.id == b.id && a.pixel == b.pixel && a.label == b.label && a.color == b.color
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(pixel.x)
+        hasher.combine(pixel.y)
+        hasher.combine(label)
+    }
 }
 
 /// SwiftUI wrapper around the high-performance UIKit map canvas
@@ -36,7 +46,47 @@ struct MapCanvasView: UIViewRepresentable {
     /// Long-press on the map (base-image pixel).
     var onLongPress: ((CGPoint) -> Void)? = nil
     var onSelectPOI: ((MapPOI) -> Void)? = nil
+    /// Heading uncertainty in degrees (widens the heading cone).
+    var headingAccuracy: Double? = nil
+    var units: DistanceUnits = .metric
+    /// Space taken by floating controls (including the safe area); the user's dot, the scale bar
+    /// and the off-screen arrow stay inside the rest.
+    var chromeInsets: UIEdgeInsets = .zero
 
-    func makeUIView(context: Context) -> UIView { UIView() }
-    func updateUIView(_ uiView: UIView, context: Context) {}
+    func makeUIView(context: Context) -> MapCanvasUIView {
+        MapCanvasUIView(frame: .zero)
+    }
+
+    func updateUIView(_ uiView: MapCanvasUIView, context: Context) {
+        uiView.onTap = onTap
+        uiView.onLongPress = onLongPress
+        uiView.onSelectPOI = onSelectPOI
+        let binding = $follow
+        uiView.onFollowChange = { value in
+            // Never write SwiftUI state during a view update.
+            DispatchQueue.main.async { binding.wrappedValue = value }
+        }
+        uiView.apply(MapCanvasUIView.Inputs(
+            map: map,
+            tileStore: tileStore,
+            nightMode: nightMode,
+            orientation: orientation,
+            userLocation: userLocation,
+            heading: heading,
+            headingAccuracy: headingAccuracy,
+            track: showTrack ? track : [],
+            showTrack: showTrack,
+            pois: pois,
+            showPOIs: showPOIs,
+            selectedPOIID: selectedPOIID,
+            markers: markers,
+            follow: follow,
+            units: units,
+            chromeInsets: chromeInsets
+        ))
+    }
+
+    static func dismantleUIView(_ uiView: MapCanvasUIView, coordinator: Coordinator) {
+        uiView.onFollowChange = nil
+    }
 }
