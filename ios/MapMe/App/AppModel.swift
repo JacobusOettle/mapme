@@ -15,7 +15,7 @@ struct ImportJob: Identifiable, Equatable {
         case failed             // import itself failed
     }
 
-    let id = UUID()
+    var id = UUID()
     var name: String
     var phase: Phase = .importing
     /// Human-readable current step ("Rendering PDF…", "Reading grid labels…").
@@ -87,13 +87,19 @@ final class AppModel {
     func relocate(mapID: UUID) {
         guard let map = library.map(id: mapID) else { return }
         importTask?.cancel()
-        importJob = ImportJob(name: map.name, phase: .locating, step: "Loading map…", fraction: 0.05, mapID: map.id)
+        // Reuse the visible job's id so the progress cover updates in place instead of re-presenting.
+        let job = ImportJob(id: importJob?.id ?? UUID(), name: map.name, phase: .locating, step: "Loading map…",
+                            fraction: 0.05, mapID: map.id)
+        importJob = job
+        let jobID = job.id
         importTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let image = try await self.importer.loadBaseImage(for: map)
+                guard !Task.isCancelled, self.importJob?.id == jobID else { return }
                 await self.locate(map: map, image: image)
             } catch {
+                guard self.importJob?.id == jobID else { return }
                 self.importJob?.phase = .needsCalibration
                 self.importJob?.message = error.localizedDescription
             }
@@ -118,24 +124,29 @@ final class AppModel {
 
     private func startImport(name: String, _ work: @escaping (MapImporter, @escaping (Double, String) -> Void) async throws -> ImportedMap) {
         importTask?.cancel()
-        importJob = ImportJob(name: name)
+        let job = ImportJob(name: name)
+        importJob = job
+        let jobID = job.id
         let importer = self.importer
         importTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let imported = try await work(importer) { fraction, step in
                     Task { @MainActor [weak self] in
-                        guard let self, self.importJob != nil else { return }
+                        guard let self, self.importJob?.id == jobID else { return }
                         self.importJob?.fraction = 0.4 * fraction
                         self.importJob?.step = step
                     }
                 }
+                // A newer import replaced this one while it was rendering.
+                guard !Task.isCancelled, self.importJob?.id == jobID else { return }
                 self.importJob?.mapID = imported.document.id
                 self.importJob?.name = imported.document.name
                 await self.locate(map: imported.document, image: imported.baseImage)
             } catch is CancellationError {
-                self.importJob = nil
+                if self.importJob?.id == jobID { self.importJob = nil }
             } catch {
+                guard self.importJob?.id == jobID else { return }
                 self.importJob?.phase = .failed
                 self.importJob?.message = error.localizedDescription
             }
@@ -144,6 +155,7 @@ final class AppModel {
 
     /// OCR + grid/contour matching, then save the result into the library.
     private func locate(map: MapDocument, image: CGImage) async {
+        let jobID = importJob?.id
         importJob?.phase = .locating
         importJob?.mapID = map.id
         let outcome = await georeferencer.locate(
@@ -154,7 +166,7 @@ final class AppModel {
             searchRadiusKm: settings.searchRadiusKm
         ) { [weak self] stage, fraction in
             Task { @MainActor [weak self] in
-                guard let self, self.importJob != nil else { return }
+                guard let self, self.importJob != nil, self.importJob?.id == jobID else { return }
                 self.importJob?.step = stage.label
                 self.importJob?.fraction = 0.4 + 0.6 * fraction
             }
@@ -168,9 +180,11 @@ final class AppModel {
             updated.pois = updated.pois.filter { $0.source != .mapLabel } + outcome.pois
         }
         library.save(updated)
-        importJob?.fraction = 1
-        importJob?.message = outcome.message
-        importJob?.phase = outcome.georef != nil ? .succeeded : .needsCalibration
+        if importJob != nil, importJob?.id == jobID {
+            importJob?.fraction = 1
+            importJob?.message = outcome.message
+            importJob?.phase = outcome.georef != nil ? .succeeded : .needsCalibration
+        }
         if outcome.georef != nil, settings.useOpenStreetMap {
             let snapshot = updated
             Task { [weak self] in

@@ -121,7 +121,8 @@ final class FeaturesLogicTests: XCTestCase {
         let rows = NearbyRow.rows(for: [far, near, mid], from: here)
         XCTAssertEqual(rows.map(\.poi.name), ["Near", "Mid", "Far"])
         XCTAssertEqual(rows[0].distance ?? 0, 200, accuracy: 2)
-        XCTAssertEqual(rows[0].bearing ?? -1, 0, accuracy: 1)
+        let b0 = rows[0].bearing ?? -1
+        XCTAssertLessThan(min(abs(b0), abs(360 - b0)), 1, "bearing \(b0)")
         XCTAssertEqual(rows[1].bearing ?? -1, 225, accuracy: 1)
 
         let unsorted = NearbyRow.rows(for: [far, near, mid], from: nil)

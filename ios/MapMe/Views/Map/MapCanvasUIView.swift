@@ -37,7 +37,7 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
     private var map: MapDocument?
     private weak var tileStore: TileStore?
     private var nightMode = false
-    private(set) var camera = MapCamera(center: .zero, zoom: 1, rotation: 0)
+    private(set) var camera = CanvasCamera(center: .zero, zoom: 1, rotation: 0)
     private var hasInitialCamera = false
 
     private var mode: MapOrientationMode = .northUp

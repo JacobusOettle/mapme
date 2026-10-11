@@ -55,7 +55,7 @@ final class TiledMapView: UIView {
             mapID = map.id
             bounds = CGRect(origin: .zero, size: map.pixelSize)
             // Coarser levels than the pyramid's last are still useful when zoomed far out.
-            tiledLayer.levelsOfDetail = levels + 1
+            tiledLayer.levelsOfDetail = levels + 2 + Self.detailBias
             tiledLayer.levelsOfDetailBias = Self.detailBias
         }
         tiledLayer.setNeedsDisplay()

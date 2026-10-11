@@ -138,7 +138,9 @@ final class LocationService: NSObject {
         let orientation: CLDeviceOrientation
         switch UIDevice.current.orientation {
         case .portrait: orientation = .portrait
-        case .portraitUpsideDown: orientation = .portraitUpsideDown
+        case .portraitUpsideDown:
+            // iPhone UI never turns upside down, so the compass must follow the interface.
+            orientation = UIDevice.current.userInterfaceIdiom == .pad ? .portraitUpsideDown : Self.interfaceDeviceOrientation()
         case .landscapeLeft: orientation = .landscapeLeft
         case .landscapeRight: orientation = .landscapeRight
         case .faceUp, .faceDown, .unknown:

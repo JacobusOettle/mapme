@@ -330,9 +330,14 @@ struct CalibrationView: View {
             return CalibrationStep(symbol: "2.circle.fill", text: "Nice. Now a second spot, far from the first.", target: .map)
         case 2:
             return CalibrationStep(symbol: "3.circle.fill",
-                                   text: "Two points give a rough fit. Add a third, spread out, to check the accuracy.",
+                                   text: "Two points give a rough fit. Add more, spread out: the fourth point checks the accuracy.",
                                    target: .map)
         default:
+            if let fit, !fit.isChecked {
+                return CalibrationStep(symbol: "plus.circle.fill",
+                                       text: "Add one more point, far from the others, to check the accuracy.",
+                                       target: .map)
+            }
             if let worst = fit?.residuals.max(), worst >= 50 {
                 return CalibrationStep(symbol: "exclamationmark.triangle.fill",
                                        text: "A point disagrees with the others (red). Tap its chip to delete it, or add more points.",
@@ -606,7 +611,9 @@ struct CalibrationView: View {
         guard model.library.map(id: mapID) != nil else { return }
         let appModel = model
         let id = mapID
-        onDone()
+        // Plain dismiss, not onDone(): inside the import flow onDone() would close the progress
+        // screen and open the still-unlocated map.
+        dismiss()
         // Let this sheet (and, during an import, the progress screen) finish dismissing
         // before the progress screen is presented again for the new run.
         Task { @MainActor in
@@ -621,8 +628,10 @@ struct CalibrationView: View {
     private func save() {
         guard let fit, var doc = model.library.map(id: mapID) else { return }
         let rms = fit.rms
+        let checked = fit.isChecked
         let georef = Georeference(pixelToMercator: fit.georef.pixelToMercator, method: .manual,
-                                  confidence: CalibrationFit.confidence(forRMS: rms), rmsMeters: rms)
+                                  confidence: checked ? CalibrationFit.confidence(forRMS: rms) : 0.5,
+                                  rmsMeters: checked ? rms : nil)
         // Labels read off the map belong to map pixels: carry them over to the new fit.
         if let old = doc.georef {
             doc.pois = doc.pois.map { poi in
@@ -635,7 +644,9 @@ struct CalibrationView: View {
             }
         }
         doc.georef = georef
-        doc.georefMessage = "Calibrated manually with \(pairs.count) points (\u{00B1}\(max(1, Int(rms.rounded()))) m)"
+        doc.georefMessage = checked
+            ? "Calibrated manually with \(pairs.count) points (\u{00B1}\(max(1, Int(rms.rounded()))) m)"
+            : "Calibrated manually with \(pairs.count) points (accuracy not checked yet)"
         model.library.save(doc)
         onDone()
     }

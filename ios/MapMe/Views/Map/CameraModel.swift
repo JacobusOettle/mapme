@@ -3,7 +3,7 @@ import Foundation
 
 /// What part of the map the canvas shows. The map pixel `center` sits at the middle of the
 /// view, `zoom` is view points per map pixel and `rotation` turns the map clockwise (radians).
-struct MapCamera: Equatable {
+struct CanvasCamera: Equatable {
     var center: CGPoint
     var zoom: CGFloat
     var rotation: CGFloat

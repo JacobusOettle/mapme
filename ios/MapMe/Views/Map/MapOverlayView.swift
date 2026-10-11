@@ -60,8 +60,10 @@ final class MapOverlayView: UIView {
 
     // MARK: Render caches
 
-    private var lastCamera: MapCamera?
-    private var lastLabelCamera: MapCamera?
+    private var lastCamera: CanvasCamera?
+    /// Rendered POI name pills by text (the text includes units, so no invalidation needed).
+    private var pillCache: [String: UIImage] = [:]
+    private var lastLabelCamera: CanvasCamera?
     private var coneWidth: CGFloat = -1
     private var guideText = ""
     private var renderedGuideText = ""
@@ -369,7 +371,13 @@ final class MapOverlayView: UIView {
             if let ele = poi.elevationM, ele.isFinite, !poi.name.contains(String(Int(ele.rounded()))) {
                 text += " · " + GeoFormat.elevation(ele, units: units)
             }
-            let pill = OverlayArt.pill(text, fontSize: 11)
+            let pill: UIImage
+            if let cached = pillCache[text] {
+                pill = cached
+            } else {
+                pill = OverlayArt.pill(text, fontSize: 11)
+                pillCache[text] = pill
+            }
             item.label.contents = pill.cgImage
             item.label.contentsScale = pill.scale
             item.label.bounds = CGRect(origin: .zero, size: pill.size)
@@ -397,7 +405,7 @@ final class MapOverlayView: UIView {
     // MARK: - Render
 
     /// Position every overlay for `camera`. `heading` is the smoothed true heading in degrees.
-    func render(camera: MapCamera, contentRect: CGRect, heading: Double?, headingAccuracy: Double?) {
+    func render(camera: CanvasCamera, contentRect: CGRect, heading: Double?, headingAccuracy: Double?) {
         let size = bounds.size
         guard size.width > 0, size.height > 0 else { return }
         CATransaction.begin()
@@ -420,7 +428,7 @@ final class MapOverlayView: UIView {
         CATransaction.commit()
     }
 
-    private func renderUser(at point: CGPoint?, camera: MapCamera, heading: Double?, headingAccuracy: Double?) {
+    private func renderUser(at point: CGPoint?, camera: CanvasCamera, heading: Double?, headingAccuracy: Double?) {
         guard let point, let fix = location else {
             dotLayer.isHidden = true
             haloLayer.isHidden = true
@@ -485,7 +493,7 @@ final class MapOverlayView: UIView {
         trailCasing.path = path
     }
 
-    private func renderPOIs(_ t: CGAffineTransform, camera: MapCamera) {
+    private func renderPOIs(_ t: CGAffineTransform, camera: CanvasCamera) {
         guard showPOIs, !items.isEmpty else { return }
         let visibleRect = bounds.insetBy(dx: -60, dy: -30)
         for item in items {
@@ -505,14 +513,14 @@ final class MapOverlayView: UIView {
         }
     }
 
-    private func labelCameraMoved(_ camera: MapCamera) -> Bool {
+    private func labelCameraMoved(_ camera: CanvasCamera) -> Bool {
         guard let last = lastLabelCamera else { return true }
         return abs(camera.zoom / last.zoom - 1) > 0.04 || abs(MapAngle.normalized(Double(camera.rotation - last.rotation))) > 0.04
     }
 
     /// Greedy label placement: higher-priority labels first, skipping any that would cover
     /// another label or a badge. Translation never changes overlaps, so this only reruns on zoom/rotation.
-    private func placeLabels(camera: MapCamera) {
+    private func placeLabels(camera: CanvasCamera) {
         labelsDirty = false
         lastLabelCamera = camera
         let zoomedIn = camera.zoom >= Self.labelMinZoom
@@ -571,7 +579,7 @@ final class MapOverlayView: UIView {
         guideLabel.isHidden = false
     }
 
-    private func renderScaleBar(camera: MapCamera, contentRect: CGRect) {
+    private func renderScaleBar(camera: CanvasCamera, contentRect: CGRect) {
         guard let georef else {
             scaleBarLayer.isHidden = true
             scaleLabel.isHidden = true
@@ -608,7 +616,7 @@ final class MapOverlayView: UIView {
         }
     }
 
-    private func renderOffscreen(userPoint: CGPoint?, camera: MapCamera, contentRect: CGRect) {
+    private func renderOffscreen(userPoint: CGPoint?, camera: CanvasCamera, contentRect: CGRect) {
         guard let userPoint, let here = userLatLon, let georef,
               !contentRect.insetBy(dx: -6, dy: -6).contains(userPoint), contentRect.width > 80, contentRect.height > 80
         else {

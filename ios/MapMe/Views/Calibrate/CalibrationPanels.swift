@@ -69,7 +69,7 @@ struct CalibrationGuidanceBar: View {
 
     /// Residuals only mean something once there are more points than the model needs.
     private func residual(_ index: Int) -> Double? {
-        guard let fit, pairs.count >= 3, index < fit.residuals.count, fit.residuals[index].isFinite else { return nil }
+        guard let fit, fit.isChecked, index < fit.residuals.count, fit.residuals[index].isFinite else { return nil }
         return fit.residuals[index]
     }
 
@@ -118,7 +118,7 @@ struct CalibrationGuidanceBar: View {
     private var fitBadge: some View {
         if let fit {
             VStack(alignment: .trailing, spacing: 1) {
-                if pairs.count >= 3 {
+                if fit.isChecked {
                     Text("\u{00B1}" + Self.meters(fit.rms))
                         .font(.subheadline.weight(.bold))
                         .monospacedDigit()

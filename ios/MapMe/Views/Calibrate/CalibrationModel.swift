@@ -4,7 +4,7 @@ import SwiftUI
 import UIKit
 
 /// One control point: a pixel on the user's map and the same spot on Earth.
-struct CalibrationPair: Identifiable, Hashable {
+struct CalibrationPair: Identifiable, Equatable {
     let id: UUID
     /// Base-image pixel.
     var pixel: CGPoint
@@ -29,6 +29,13 @@ struct CalibrationFit: Equatable {
     var residuals: [Double]
     /// "similarity" | "affine" | "homography"
     var model: String
+
+    /// True once there are more points than the fitted model needs (similarity 2, affine 3,
+    /// homography 4). Before that the residuals are ~0 by construction and say nothing about accuracy.
+    var isChecked: Bool {
+        let needed = model == "similarity" ? 2 : (model == "homography" ? 4 : 3)
+        return residuals.count > needed
+    }
 
     static func confidence(forRMS rms: Double) -> Double {
         rms < 10 ? 0.9 : rms < 30 ? 0.7 : 0.5

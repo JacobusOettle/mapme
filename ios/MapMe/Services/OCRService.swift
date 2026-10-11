@@ -55,17 +55,16 @@ enum OCRService {
     // MARK: - Planning (pure)
 
     /// Upright overlapping tiles over the whole image, plus clockwise and counter-clockwise
-    /// passes over the four margin strips (split along their length into tile-sized pieces).
+    /// passes over the left and right margin strips (split along their length into tile-sized pieces).
     static func plan(width: Int, height: Int) -> [OCRJob] {
         guard width > 0, height > 0 else { return [] }
         var jobs = tileRects(width: width, height: height).map { OCRJob(crop: $0, rotation: .upright) }
         let mx = max(1, min(width, Int((Double(width) * marginFraction).rounded())))
-        let my = max(1, min(height, Int((Double(height) * marginFraction).rounded())))
+        // Vertical labels sit on the left/right margins (latitudes, northings); labels in the
+        // top/bottom margins are horizontal and already read by the upright tiles.
         let strips = [
             CGRect(x: 0, y: 0, width: mx, height: height),
             CGRect(x: width - mx, y: 0, width: mx, height: height),
-            CGRect(x: 0, y: 0, width: width, height: my),
-            CGRect(x: 0, y: height - my, width: width, height: my),
         ]
         for strip in strips {
             let pieces: [CGRect]

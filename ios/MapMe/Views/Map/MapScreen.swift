@@ -154,12 +154,19 @@ struct MapScreen: View {
                 }
                 .accessibilityIdentifier("georefChip")
                 .popover(isPresented: $showGeorefInfo, arrowEdge: .top) {
+                    // Present the next screen only after the popover has finished dismissing.
                     GeorefInfoView(map: map, onLocateAgain: {
                         showGeorefInfo = false
-                        model.relocate(mapID: mapID)
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 450_000_000)
+                            model.relocate(mapID: mapID)
+                        }
                     }, onCalibrate: {
                         showGeorefInfo = false
-                        showCalibration = true
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 450_000_000)
+                            showCalibration = true
+                        }
                     })
                     .presentationCompactAdaptation(.popover)
                 }
