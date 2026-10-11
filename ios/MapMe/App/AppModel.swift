@@ -31,10 +31,10 @@ struct ImportJob: Identifiable, Equatable {
 @MainActor
 @Observable
 final class AppModel {
-    let settings = AppSettings()
-    let library = MapLibrary()
-    let location = LocationService()
-    let tracks = TrackRecorder()
+    let settings: AppSettings
+    let library: MapLibrary
+    let location: LocationService
+    let tracks: TrackRecorder
 
     /// Navigation stack of map ids (LibraryView → MapScreen).
     var path: [UUID] = []
@@ -43,11 +43,20 @@ final class AppModel {
 
     @ObservationIgnored private var importTask: Task<Void, Never>?
     @ObservationIgnored let importer: MapImporter
-    @ObservationIgnored let georeferencer = GeoreferenceService()
-    @ObservationIgnored let poiService = POIService()
+    @ObservationIgnored let georeferencer: GeoreferenceService
+    @ObservationIgnored let poiService: POIService
 
     init() {
-        importer = MapImporter(library: library)
+        let library = MapLibrary()
+        let location = LocationService()
+        let tracks = TrackRecorder()
+        self.settings = AppSettings()
+        self.library = library
+        self.location = location
+        self.tracks = tracks
+        self.importer = MapImporter(library: library)
+        self.georeferencer = GeoreferenceService()
+        self.poiService = POIService()
         tracks.attach(location: location)
     }
 
