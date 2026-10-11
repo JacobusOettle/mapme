@@ -15,8 +15,9 @@ ready for Android.
 * **Apple Maps-style position puck** with a heading beam and accuracy halo;
   follow, follow-with-heading (map turns as you turn) and a compass.
 * **Photos of paper maps**: scan with the document camera or pick a photo; the
-  page is flattened from its corners and located in photo mode (lighting
-  normalised, full perspective fit).
+  sheet is found on the table, flattened from its corners and located in photo
+  mode (lighting normalised, full perspective fit, plus a smooth correction for
+  folded or curled paper).
 * **Dotted trail** of where you walked (GPX export), **nearby points of
   interest** from the map's own labels plus OpenStreetMap, with distance and
   direction.
@@ -28,8 +29,9 @@ ready for Android.
 The Grootkloof PDF in the iPhone simulator with a simulated walk: located from
 its grid labels (±1 m), your position puck with its heading beam, the dotted
 trail you walked, Apple Maps-style controls and the stats card. The last row is
-a synthetic *photo* of the paper map going through the corner editor and photo
-mode. Every push refreshes these on the
+a real phone *photo* of the printed sheet, folded in four and lying on a wooden
+table, going through the corner editor and photo mode. Every push refreshes
+these on the
 [`ci-screenshots`](https://github.com/JacobusOettle/mapme/tree/ci-screenshots)
 branch (with the IPA of that build).
 
@@ -80,7 +82,17 @@ the raster, the text and your GPS fix to the Rust core, which tries in order:
    line has a constant elevation in the DEM. On the Grootkloof sheet this finds
    the map unambiguously in a 70 × 80 km window and converges to about 14 m,
    the noise floor of the elevation data.
-3. **Manual calibration.** Tap the same point on the map and on a satellite
+3. **Photos of paper maps.** The core finds the sheet on the table
+   (`mm_detect_page`), the app flattens it, and both paths above run in photo
+   mode: lighting is normalised, the fit may be fully projective, and a smooth
+   offset lattice ("warp") corrects paper that does not lie flat, fitted to the
+   traced grid lines and to the contours' elevations. On the reference photo
+   (`fixtures/grootkloof/photo`: the printed sheet folded in four, where no
+   single perspective fit is better than 37 m) the position error is ~12 m
+   median from the grid labels and ~15 m from contours alone (~9 m inside the
+   graticule; the legend strip at the bottom, with no grid or contours, is the
+   weakest part).
+4. **Manual calibration.** Tap the same point on the map and on a satellite
    view (or "I'm here"); 2 points give a similarity, 3 or more an affine fit.
 
 Coordinate conventions, the JSON API and the performance budget are in
