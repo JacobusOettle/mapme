@@ -20,7 +20,7 @@ import re
 import subprocess
 import sys
 
-PREFERRED = ["iPhone 16 Pro", "iPhone 16", "iPhone 17 Pro", "iPhone 17", "iPhone 15 Pro", "iPhone 15"]
+PREFERRED = ["iPhone 17 Pro", "iPhone 17", "iPhone 16 Pro", "iPhone 16", "iPhone 15 Pro", "iPhone 15"]
 
 
 def log(msg):

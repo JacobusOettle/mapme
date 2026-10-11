@@ -123,15 +123,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Prefer the newest installed Xcode 26 (iOS 26 SDK: Liquid Glass) unless
+      # the XCODE_VERSION repository variable pins one.
       - name: Select Xcode
         run: |
+          ls -d /Applications/Xcode*.app
           if [[ -n "${XCODE_VERSION:-}" ]]; then
             app="/Applications/Xcode_${XCODE_VERSION}.app"
             if [[ -d "$app" ]]; then
               sudo xcode-select -s "$app"
             else
               echo "::warning::$app is not installed; using the default Xcode"
-              ls -d /Applications/Xcode*.app
+            fi
+          else
+            newest="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | grep -viE 'beta|rc' | sort -V | tail -n 1 || true)"
+            if [[ -n "$newest" ]]; then
+              sudo xcode-select -s "$newest"
+            else
+              echo "::notice::No Xcode 26 on this runner; building with the default Xcode"
             fi
           fi
           sw_vers
