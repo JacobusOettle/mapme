@@ -78,6 +78,16 @@ void mm_session_cancel(MMSession *session);
  */
 char *mm_fit_control_points(const char *request_json);
 
+/*
+ * Find the sheet of paper (the map page) in a photo, for flattening. 8-bit
+ * RGBA, rows bytes_per_row apart (copied). Returns
+ * {"status":"ok","quad":[[x,y],[x,y],[x,y],[x,y]],"confidence":0..1,"coverage":0..1}
+ * with the corners TL, TR, BR, BL in pixels of the given raster (coverage =
+ * quad area / image area), or {"status":"failed","message":...} when no page
+ * stands out from its surroundings. Never NULL.
+ */
+char *mm_detect_page(const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t bytes_per_row);
+
 /* Library version, e.g. {"version":"0.1.0","build":"release aarch64-ios"}. */
 char *mm_version(void);
 
