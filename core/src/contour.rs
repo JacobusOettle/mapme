@@ -353,26 +353,117 @@ pub fn relaxed_model(m: &ContourColorModel) -> ContourColorModel {
     }
 }
 
-/// Regions of a photo mask that fit a square of this radius are not lines.
+/// Photo contour mask: luminance smoothing (σ, pixels) before the valley test…
+const PHOTO_VALLEY_SIGMA: f64 = 0.5;
+/// …and how much darker (luminance levels) than the paper on both sides a
+/// line pixel must be.
+const PHOTO_VALLEY_CONTRAST: f32 = 5.0;
+/// Black ink on a normalised photo: at most 1/5 as much colour (max − min
+/// channel) as ink (255 − max channel), and at least this much ink. Its
+/// blurred edges take a warm tint from the paper and the camera, enough to
+/// pass a relaxed contour colour.
+const PHOTO_BLACK_INK: u8 = 105;
+/// Mask components smaller than this (pixels) are noise or symbols.
+const PHOTO_MIN_COMPONENT: usize = 8;
+
+/// Contour mask of a (normalised) photo.
+///
+/// A phone photo blurs the contour lines (~2.5 px apart in steep terrain at
+/// 5 m per pixel) into each other and into the paper: a colour threshold
+/// either loses the faint lines or merges dense ones into blobs whose
+/// skeleton follows no contour. Instead, line pixels are found as *valleys*
+/// of the (slightly smoothed) luminance: pixels darker than their
+/// neighbours on both sides along one of four directions, by at least
+/// `PHOTO_VALLEY_CONTRAST` against the brighter of the next two pixels on
+/// each side. That keeps every line of a dense bundle separate, one or two
+/// pixels wide. Valley pixels must have the colour of the relaxed contour
+/// model (`model`, or the automatic choice) and not be black ink (grid lines,
+/// text, roads, whose blurred edges are tinted warm); components smaller
+/// than `PHOTO_MIN_COMPONENT` pixels (noise, symbols) are dropped.
+pub fn photo_mask(img: &Rgb8, model: Option<&ContourColorModel>) -> (Mask, ContourColorModel) {
+    let model = match model {
+        Some(m) => m.clone(),
+        None => auto_model(img),
+    };
+    let (w, h) = (img.w, img.h);
+    let mut mask = Mask::new(w, h);
+    if w < 5 || h < 5 || img.data.len() != w * h * 3 {
+        return (mask, model);
+    }
+    let gate = relaxed_model(&model);
+    let mut lum = GrayF32::new(w, h);
+    lum.data.par_iter_mut().zip(img.data.par_chunks_exact(3)).for_each(|(l, p)| {
+        *l = (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0;
+    });
+    let env = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(d);
+    let (eps, strong_c, weak_c, d2far) =
+        (env("V_EPS", 0.0), env("V_STRONG", PHOTO_VALLEY_CONTRAST), env("V_WEAK", PHOTO_VALLEY_CONTRAST), env("V_D2FAR", 0.0));
+    let mut sigmas = vec![env("V_SIGMA", PHOTO_VALLEY_SIGMA as f32)];
+    let s2 = env("V_SIGMA2", 0.0);
+    if s2 > 0.0 {
+        sigmas.push(s2);
+    }
+    let mut weak = Mask::new(w, h);
+    for sigma in sigmas {
+        let lum = lum.gaussian_blur(sigma as f64);
+        mask.data.par_chunks_mut(w).zip(weak.data.par_chunks_mut(w)).enumerate().for_each(|(y, (row, wrow))| {
+            let at = |x: isize, y: isize| lum.get_clamped(x, y);
+            for (x, (o, wo)) in row.iter_mut().zip(wrow.iter_mut()).enumerate() {
+                let i = (y * w + x) * 3;
+                let p = [img.data[i], img.data[i + 1], img.data[i + 2]];
+                if !gate.matches(p) || is_photo_black_ink(p) {
+                    continue;
+                }
+                let (xi, yi) = (x as isize, y as isize);
+                let l = lum.data[y * w + x];
+                let mut best = (f32::NEG_INFINITY, 0isize, 0isize);
+                for (dx, dy, k) in [(1isize, 0isize, 1.0f32), (0, 1, 1.0), (1, 1, 0.5), (1, -1, 0.5)] {
+                    let mut d2 = (at(xi + dx, yi + dy) + at(xi - dx, yi - dy) - 2.0 * l) * k;
+                    if d2far > 0.0 {
+                        d2 = d2.max((at(xi + 2 * dx, yi + 2 * dy) + at(xi - 2 * dx, yi - 2 * dy) - 2.0 * l) * k / 4.0);
+                    }
+                    if d2 > best.0 {
+                        best = (d2, dx, dy);
+                    }
+                }
+                let (_, dx, dy) = best;
+                let (a1, b1) = (at(xi + dx, yi + dy), at(xi - dx, yi - dy));
+                let (a2, b2) = (at(xi + 2 * dx, yi + 2 * dy), at(xi - 2 * dx, yi - 2 * dy));
+                let local_min =
+                    if eps > 0.0 { l <= a1 + eps && l <= b1 + eps } else { l <= a1 && l <= b1 && (l < a1 || l < b1) };
+                if local_min {
+                    let c = a1.max(a2).min(b1.max(b2)) - l;
+                    *o |= (c >= strong_c) as u8;
+                    *wo |= (c >= weak_c) as u8;
+                }
+            }
+        });
+    }
+    if weak_c < strong_c {
+        mask = grow_into(&mask, &weak);
+    }
+    remove_small_components(&mut mask, PHOTO_MIN_COMPONENT);
+    if std::env::var("MASK_UNION").is_ok() {
+        let c = colour_line_mask(img, &model);
+        mask.data.iter_mut().zip(&c.data).for_each(|(m, &v)| *m |= v);
+    }
+    (mask, model)
+}
+
+/// Regions of a colour line mask that fit a square of this radius are not lines.
 const PHOTO_THICK_RADIUS: usize = 3;
 
-/// Contour mask of a (normalised) photo: pixels of `model` (or of the
-/// automatic choice) plus, by hysteresis, the fainter pixels of the relaxed
-/// model connected to them (camera blur and noise break thin lines into
-/// dashes otherwise), cleaned with a majority vote. Regions thicker than a
-/// line (a (2·3+1)-pixel square fits) are removed with a margin: fills,
-/// the page edge, and dense contours the camera blurred into one blob,
-/// whose skeleton would not follow any contour.
-pub fn photo_mask(img: &Rgb8, model: Option<&ContourColorModel>) -> (Mask, ContourColorModel) {
-    let (strong, model) = match model {
-        Some(m) => (extract_mask(img, m), m.clone()),
-        None => auto_mask(img),
-    };
-    let weak = extract_mask(img, &relaxed_model(&model));
+/// Contour lines of a (normalised) photo by colour: pixels of `model` plus,
+/// by hysteresis, the fainter pixels of the relaxed model connected to them,
+/// cleaned with a majority vote, without regions thicker than a line (a
+/// (2·3+1)-pixel square fits: fills, dense contours blurred into a blob).
+pub fn colour_line_mask(img: &Rgb8, model: &ContourColorModel) -> Mask {
+    let strong = extract_mask(img, model);
+    let weak = extract_mask(img, &relaxed_model(model));
     let mut mask = majority_filter(&grow_into(&strong, &weak));
     let thick = morph(&morph(&mask, PHOTO_THICK_RADIUS, false), PHOTO_THICK_RADIUS + 1, true);
     mask.data.par_iter_mut().zip(thick.data.par_iter()).for_each(|(m, &t)| *m &= 1 - t);
-    (mask, model)
+    mask
 }
 
 /// Square dilation (`grow`) or erosion of radius `r` (outside the image
@@ -406,6 +497,60 @@ fn morph(mask: &Mask, r: usize, grow: bool) -> Mask {
         }
     });
     out
+}
+
+/// Black or grey ink on a normalised photo (see `PHOTO_BLACK_INK`).
+pub fn is_photo_black_ink(p: [u8; 3]) -> bool {
+    let mx = p[0].max(p[1]).max(p[2]);
+    let mn = p[0].min(p[1]).min(p[2]);
+    let ink = 255 - mx;
+    ink >= PHOTO_BLACK_INK && (mx - mn) as u32 * 5 <= ink as u32 + 10
+}
+
+/// Clear the 8-connected components of `mask` smaller than `min_px` pixels.
+pub fn remove_small_components(mask: &mut Mask, min_px: usize) {
+    let (w, h) = (mask.w, mask.h);
+    let mut seen = vec![false; w * h];
+    let mut comp = Vec::new();
+    let mut stack = Vec::new();
+    for start in 0..w * h {
+        if mask.data[start] == 0 || seen[start] {
+            continue;
+        }
+        comp.clear();
+        seen[start] = true;
+        stack.push(start);
+        while let Some(i) = stack.pop() {
+            comp.push(i);
+            let (x, y) = (i % w, i / w);
+            for yy in y.saturating_sub(1)..=(y + 1).min(h - 1) {
+                for xx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                    let j = yy * w + xx;
+                    if mask.data[j] != 0 && !seen[j] {
+                        seen[j] = true;
+                        stack.push(j);
+                    }
+                }
+            }
+        }
+        if comp.len() < min_px {
+            for &i in &comp {
+                mask.data[i] = 0;
+            }
+        }
+    }
+}
+
+/// The model `auto_mask` would choose, without building its mask.
+pub fn auto_model(img: &Rgb8) -> ContourColorModel {
+    let models = candidate_models();
+    let (_, stats) = model_bits(img, &models);
+    let best = stats
+        .iter()
+        .enumerate()
+        .fold((0usize, f64::NEG_INFINITY), |acc, (i, s)| if s.score > acc.1 { (i, s.score) } else { acc })
+        .0;
+    models[best].clone()
 }
 
 /// `seed` plus every pixel of `allowed` 8-connected to it through `allowed`.
