@@ -19,5 +19,6 @@ pub mod page;
 pub mod refine;
 pub mod search;
 pub mod skeleton;
+pub mod warp;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

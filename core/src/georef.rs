@@ -21,7 +21,11 @@
 //! extracts contours as luminance valleys of contour colour
 //! (`contour::photo_mask`), and lets the grid fit and the contour refinement
 //! end in a homography, which absorbs the perspective and aspect error the
-//! flattening left.
+//! flattening left. On top of that homography a photo may get a `warp`
+//! (`warp.rs`) for paper that does not lie flat: fitted to the identified
+//! grid lines (the grid path then also asks for the zoom-13 DEM under the
+//! sheet and adds the contours, when contours were requested) or to the
+//! contours, and kept only if the data left out of the fit agree with it.
 //!
 //! When a stage needs DEM tiles that are neither present nor marked missing,
 //! the call returns `need_dem` and starts computing the contour products on
@@ -46,6 +50,7 @@ use crate::refine::{
 };
 use crate::search::{coarse_search, map_field, required_dem_box, rotation_sweep, Candidate, MapField, SearchParams};
 use crate::skeleton::{contour_samples, default_sampling, ContourSamples};
+use crate::warp::{fit_warp, ContourInput, GridLines, Warp, WarpFit, WarpInput};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -220,6 +225,10 @@ pub struct GeorefResponse {
     pub diagnostics: Value,
     #[serde(default)]
     pub timings_ms: BTreeMap<String, f64>,
+    /// Photo mode: smooth correction for paper that does not lie flat, on
+    /// top of `pixel_to_mercator` (absent otherwise; see `warp.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warp: Option<Warp>,
 }
 
 /// Message of a call stopped by `Session::cancel`.
@@ -241,6 +250,7 @@ impl GeorefResponse {
             message,
             diagnostics: Value::Object(Map::new()),
             timings_ms: BTreeMap::new(),
+            warp: None,
         }
     }
 
@@ -647,6 +657,9 @@ enum MethodReq {
     Contours,
 }
 
+/// A refined candidate: the refinement, its DEM zoom and the DEM box it used.
+type Refined = (Candidate, RefineResult, u8, MercBox);
+
 /// Outcome of the contour stage.
 enum Found {
     Located(Box<GeorefResponse>),
@@ -871,8 +884,22 @@ impl<'a> Run<'a> {
             self.verify(&g.transform)?;
         }
         let (scale, _) = scale_and_rotation(&g.transform, w as f64 / 2.0, h as f64 / 2.0);
-        // Line positions are good to a fraction of a pixel; the GCP fit RMS alone is optimistic.
-        let rms = (g.rms_m.powi(2) + (0.75 * scale).powi(2)).sqrt();
+        // Paper that does not lie flat: a warp from the grid lines (and the
+        // contours, when they may be used).
+        let warp = if self.req.photo {
+            let contours = self.warp_contours(&g.transform)?;
+            self.photo_warp(&g.transform, Some(g), contours.as_ref().map(|(p, z, b)| (&**p, *z, b)))
+        } else {
+            None
+        };
+        // Line positions are good to a fraction of a pixel; the GCP fit RMS
+        // alone is optimistic. With a warp, the lines' distance from where
+        // the warp fitted without them puts them.
+        let fit_rms = match &warp {
+            Some(f) if f.warp.is_some() => f.diag.holdout_rms_m.unwrap_or(g.rms_m),
+            _ => g.rms_m,
+        };
+        let rms = (fit_rms.powi(2) + (0.75 * scale).powi(2)).sqrt();
         let n = g.n_lat + g.n_lon;
         let label_factor = match n {
             0..=3 => 0.93,
@@ -890,7 +917,34 @@ impl<'a> Run<'a> {
             if g.n_lon == 1 { "" } else { "s" },
             plus_minus(rms)
         );
-        Ok(self.located(Method::Grid, &g.transform, conf, rms, msg))
+        let warp = warp.and_then(|f| f.warp);
+        Ok(self.located(Method::Grid, &g.transform, warp, conf, rms, msg))
+    }
+
+    /// Contours were requested.
+    fn wants_contours(&self) -> bool {
+        self.req.methods.iter().any(|m| matches!(m.trim().to_ascii_lowercase().as_str(), "contours" | "contour"))
+    }
+
+    /// Photo grid fits: the contour products and the fine DEM (zoom, box) a
+    /// warp is fitted on besides the grid lines, when contours were
+    /// requested (answers need_dem first). None without them.
+    fn warp_contours(&mut self, t: &Homography) -> Step<Option<(Arc<ContourProducts>, u8, MercBox)>> {
+        if !self.wants_contours() {
+            return Ok(None);
+        }
+        let (w, h) = self.size();
+        let Some(plan) = fine_plan(&t.local_affine(w as f64 / 2.0, h as f64 / 2.0), w, h) else {
+            return Ok(None);
+        };
+        let key = self.contour_key();
+        self.need(&plan.tiles, "warp", key)?;
+        // Offline (tiles marked missing): the grid lines alone.
+        let Some((_, zoom)) = self.s.fine_dem(&plan) else {
+            return Ok(None);
+        };
+        let prod = self.products(key)?;
+        Ok((prod.samples.n_segs >= MIN_SEGMENTS).then_some((prod, zoom, plan.bbox)))
     }
 
     fn labels_ok(&mut self, g: &GridResult, contours_tried: bool) -> GeorefResponse {
@@ -908,7 +962,7 @@ impl<'a> Run<'a> {
             conf *= 0.8;
             msg.push_str(" Contour lines couldn't confirm it; check the dot against your surroundings.");
         }
-        self.located(Method::Labels, &g.transform, conf, rms, msg)
+        self.located(Method::Labels, &g.transform, None, conf, rms, msg)
     }
 
     /// Check a transform against the terrain: `diagnostics.contour_check`.
@@ -1160,7 +1214,7 @@ impl<'a> Run<'a> {
         prod: &ContourProducts,
         key: ContourKey,
         cands: &[Candidate],
-    ) -> Step<Vec<(Candidate, RefineResult, u8)>> {
+    ) -> Step<Vec<Refined>> {
         let (w, h) = self.size();
         let plans: Vec<(Candidate, FinePlan)> =
             cands.iter().filter_map(|c| fine_plan(&c.transform, w, h).map(|p| (c.clone(), p))).collect();
@@ -1173,7 +1227,7 @@ impl<'a> Run<'a> {
         for (i, (c, plan)) in plans.iter().enumerate() {
             self.check_cancel()?;
             if let Some((r, zoom)) = self.refine_one(prod, key, plan, &c.transform, false) {
-                out.push((c.clone(), r, zoom));
+                out.push((c.clone(), r, zoom, plan.bbox));
             }
             self.s.bump_progress(0.8 + 0.2 * (i + 1) as f32 / n);
         }
@@ -1186,7 +1240,7 @@ impl<'a> Run<'a> {
         let (w, h) = self.size();
         let key = self.contour_key();
         let no_contours = "No contour lines found on this map. Pick the contour colour, or calibrate manually.";
-        let mut labelled: Option<(Candidate, RefineResult, u8)> = None;
+        let mut labelled: Option<Refined> = None;
 
         // 1. A labels-only fit: refine it directly (no GPS or search needed).
         if let Some((t, plan, rms)) = init
@@ -1207,10 +1261,10 @@ impl<'a> Run<'a> {
                     json!({"fit_confidence": round_dp(fit, 3), "agrees_with_labels": agree}),
                 );
                 if conf >= CONFIDENT {
-                    return Ok(Found::Located(Box::new(self.contour_ok(&r, conf, zoom, true))));
+                    return Ok(Found::Located(Box::new(self.contour_ok(&r, conf, (zoom, &plan.bbox), true, &prod))));
                 }
                 if agree {
-                    labelled = Some((labels_candidate(&t, w, h), r, zoom));
+                    labelled = Some((labels_candidate(&t, w, h), r, zoom, plan.bbox));
                 }
             }
         }
@@ -1275,11 +1329,11 @@ impl<'a> Run<'a> {
         }
         if n > 0 && cands[0].peak_ratio >= DISTINCT_PEAK_RATIO {
             let first = self.refine_candidates(&prod, key, &cands[..1])?;
-            if let Some((c, r, zoom)) = first.first() {
+            if let Some((c, r, zoom, bbox)) = first.first() {
                 let conf = confidence(c, r);
                 if conf >= CONFIDENT {
                     self.diag.insert("selected".into(), json!({"candidate": 0, "refined": 1}));
-                    return Ok(Found::Located(Box::new(self.contour_ok(r, conf, *zoom, false))));
+                    return Ok(Found::Located(Box::new(self.contour_ok(r, conf, (*zoom, bbox), false, &prod))));
                 }
             }
         }
@@ -1288,7 +1342,7 @@ impl<'a> Run<'a> {
         if let Some(l) = labelled {
             results.push(l);
         }
-        let pairs: Vec<(Candidate, RefineResult)> = results.iter().map(|(c, r, _)| (c.clone(), r.clone())).collect();
+        let pairs: Vec<(Candidate, RefineResult)> = results.iter().map(|(c, r, _, _)| (c.clone(), r.clone())).collect();
         let Some((best, conf)) = select_refined(&pairs) else {
             return Ok(Found::NotFound(not_found));
         };
@@ -1302,16 +1356,32 @@ impl<'a> Run<'a> {
             self.diag.insert("best_confidence".into(), json!(round_dp(conf, 3)));
             return Ok(Found::NotFound(not_found));
         }
-        let (_, r, zoom) = &results[best];
-        Ok(Found::Located(Box::new(self.contour_ok(r, conf, *zoom, best >= n_search))))
+        let (_, r, zoom, bbox) = &results[best];
+        Ok(Found::Located(Box::new(self.contour_ok(r, conf, (*zoom, bbox), best >= n_search, &prod))))
     }
 
-    fn contour_ok(&mut self, r: &RefineResult, conf: f64, zoom: u8, from_labels: bool) -> GeorefResponse {
+    /// A located contour match; `dem` is the DEM zoom and box of its
+    /// refinement (photos: the warp is fitted on the same DEM).
+    fn contour_ok(
+        &mut self,
+        r: &RefineResult,
+        conf: f64,
+        dem: (u8, &MercBox),
+        from_labels: bool,
+        prod: &ContourProducts,
+    ) -> GeorefResponse {
         let (w, h) = self.size();
+        let zoom = dem.0;
         let t = r.homography.unwrap_or_else(|| r.transform.to_homography());
         let (_, cy) = t.apply(w as f64 / 2.0, h as f64 / 2.0);
         let (lat, _) = merc_to_latlon(0.0, cy);
-        let rms = contour_rms(r, zoom, lat);
+        let mut rms = contour_rms(r, zoom, lat);
+        // Paper that does not lie flat: a warp from the contours.
+        let warp = if self.req.photo { self.photo_warp(&t, None, Some((prod, dem.0, dem.1))) } else { None };
+        let warp = warp.and_then(|f| {
+            let warped = RefineResult { median_seg_std_m: f.diag.median_seg_std_m?, ..r.clone() };
+            f.warp.inspect(|_| rms = contour_rms(&warped, zoom, lat))
+        });
         self.diag.insert(
             "refined".into(),
             json!({
@@ -1342,14 +1412,68 @@ impl<'a> Run<'a> {
         if conf < CONFIDENT {
             msg.push_str(" Low confidence: check the dot against your surroundings.");
         }
-        self.located(Method::Contours, &t, conf, rms, msg)
+        self.located(Method::Contours, &t, warp, conf, rms, msg)
     }
 
-    fn located(&mut self, method: Method, t: &Homography, conf: f64, rms: f64, message: String) -> GeorefResponse {
+    /// Photo mode: fit a warp for paper that does not lie flat on top of `t`
+    /// (`warp.rs`) from the identified grid lines and/or the contours on the
+    /// DEM of `contours.1`/`.2` (zoom, box); records `diagnostics.warp`.
+    fn photo_warp(
+        &mut self,
+        t: &Homography,
+        grid: Option<&GridResult>,
+        contours: Option<(&ContourProducts, u8, &MercBox)>,
+    ) -> Option<WarpFit> {
         let (w, h) = self.size();
-        let (scale, rotation) = scale_and_rotation(t, w as f64 / 2.0, h as f64 / 2.0);
+        // Every other long straight line printed on the sheet (the frame,
+        // unlabelled grid lines) must stay straight.
+        let valued: Vec<GridLine> = grid.map(|g| g.lines.iter().map(|l| l.line).collect()).unwrap_or_default();
+        let straight: Vec<GridLine> = self.lines().iter().filter(|l| !valued.contains(l)).copied().collect();
+        let tm = Instant::now();
+        let dem = contours.and_then(|(_, zoom, bbox)| {
+            let plan = FinePlan { zoom, bbox: *bbox, tiles: Vec::new() };
+            let (m, z) = self.s.fine_dem(&plan)?;
+            (z == zoom).then(|| PreparedDem::new_cropped(&m, bbox))
+        });
+        let img = self.analysed();
+        let input = WarpInput {
+            w,
+            h,
+            transform: *t,
+            image: Some(&img),
+            grid: grid.filter(|g| !g.lines.is_empty()).map(|g| GridLines { lines: &g.lines, utm_zone: g.utm_zone }),
+            straight: &straight,
+            contours: contours.zip(dem.as_ref()).map(|((p, _, _), d)| ContourInput { samples: &p.samples, dem: d }),
+        };
+        if input.grid.is_none() && input.contours.is_none() {
+            return None;
+        }
+        let fit = fit_warp(&input);
+        self.time("warp", tm);
+        self.diag.insert("warp".into(), serde_json::to_value(&fit.diag).unwrap_or(Value::Null));
+        Some(fit)
+    }
+
+    /// A located response for the pixel → Mercator homography `t`, plus a
+    /// warp in photo mode (the full model `t + warp` gives the corners, the
+    /// scale and the rotation).
+    fn located(
+        &mut self,
+        method: Method,
+        t: &Homography,
+        warp: Option<Warp>,
+        conf: f64,
+        rms: f64,
+        message: String,
+    ) -> GeorefResponse {
+        let (w, h) = self.size();
+        let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+        let (scale, rotation) = match &warp {
+            Some(wp) => affine_scale_rotation(&wp.local_affine(t, cx, cy), wp.apply(t, cx, cy).1),
+            None => scale_and_rotation(t, cx, cy),
+        };
         let corners = [(0.0, 0.0), (w as f64, 0.0), (w as f64, h as f64), (0.0, h as f64)].map(|(x, y)| {
-            let (mx, my) = t.apply(x, y);
+            let (mx, my) = warp.as_ref().map_or_else(|| t.apply(x, y), |wp| wp.apply(t, x, y));
             let (lat, lon) = merc_to_latlon(mx, my);
             [lat, lon]
         });
@@ -1361,6 +1485,7 @@ impl<'a> Run<'a> {
         r.scale_m_per_px = Some(round_dp(scale, 4));
         r.rotation_deg = Some(round_dp(rotation, 2) % 360.0);
         r.corners = Some(corners);
+        r.warp = warp;
         r
     }
 }
@@ -1404,8 +1529,12 @@ fn contour_rms(r: &RefineResult, zoom: u8, lat: f64) -> f64 {
 /// Local ground scale (m/px) and map-up bearing (degrees) of a pixel →
 /// Mercator homography at pixel (x, y).
 pub fn scale_and_rotation(t: &Homography, x: f64, y: f64) -> (f64, f64) {
-    let a = local_affine(t, x, y);
-    let (_, my) = t.apply(x, y);
+    affine_scale_rotation(&local_affine(t, x, y), t.apply(x, y).1)
+}
+
+/// Ground scale (m/px) and map-up bearing (degrees) of a local pixel →
+/// Mercator affine at Mercator y `my`.
+fn affine_scale_rotation(a: &Affine, my: f64) -> (f64, f64) {
     let (lat, _) = merc_to_latlon(0.0, my);
     (a.mean_scale() * lat.to_radians().cos(), a.map_up_bearing_deg())
 }

@@ -16,8 +16,15 @@
 //! the ground distance (haversine) to the truth's lat/lon gives the median,
 //! 90th percentile and maximum. No single homography fits the folded sheet:
 //! the best one over the control points is off by 37 m median, 66 m p90 and
-//! 181 m max (`homography_floor_m`), so the bounds here sit just above that
-//! floor; a warp for the folds (`warp` in the response) is what goes below it.
+//! 181 m max (`homography_floor_m`). Both paths therefore end in a warp for
+//! the folds (`warp` in the response): the full model `pixel_to_mercator +
+//! warp` is checked against the truth, and `pixel_to_mercator` alone against
+//! the bounds a single homography reaches.
+//!
+//! The truth itself (a SIFT field smoothed over ~260 px) is off the printed
+//! graticule by up to ~7 px (~30 m) in places, near the creases and the top
+//! left of the sheet (`realphoto_traced_lines_follow_the_graticule` shows
+//! it), which is part of the error measured near them.
 //!
 //! Run with `cargo test --release --test realphoto -- --nocapture`;
 //! `realphoto_report` (ignored) prints the table of every path and quad, and
@@ -31,6 +38,7 @@ use mapme_core::georef::Session;
 use mapme_core::grid::{detect_lines_photo, georeference_from_grid_with, GridLine, GridOptions, GridResult, LineAxis};
 use mapme_core::image::Rgb8;
 use mapme_core::labels::OcrObservation;
+use mapme_core::warp::Warp;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -269,6 +277,13 @@ fn run_loop(s: &Session, req: &Value) -> (Value, usize, f64) {
     panic!("still need_dem after 6 rounds");
 }
 
+/// The response's warp, if any.
+fn warp_of(r: &Value) -> Option<Warp> {
+    let w: Warp = serde_json::from_value(r.get("warp")?.clone()).ok()?;
+    assert!(w.is_valid(), "invalid warp {}", r["warp"]);
+    Some(w)
+}
+
 fn homography(r: &Value) -> Option<Homography> {
     let m: Vec<f64> = r["pixel_to_mercator"].as_array()?.iter().map(|v| v.as_f64().unwrap()).collect();
     Some(Homography { m: m.try_into().ok()? })
@@ -313,7 +328,9 @@ struct Outcome {
     path: Path,
     quad: String,
     r: Value,
-    /// Ground errors of a located response.
+    /// Ground errors of a located response: `pixel_to_mercator` alone and
+    /// the full model (with the warp, when there is one).
+    flat: Option<Stats>,
     stats: Option<Stats>,
     core_s: f64,
     rounds: usize,
@@ -339,18 +356,25 @@ impl Outcome {
         } else {
             "-"
         };
+        let f = self.flat.unwrap_or(s);
         format!(
-            "{:8} {:15} {:6} {:9} {:10} conf {:4} | median {:5.1} p90 {:5.1} max {:5.1} m | {:5.0} ms, {} calls",
+            "{:8} {:15} {:6} {:9} {:10} conf {:4} | H {:5.1} / {:5.1} / {:5.1} | {} {:5.1} / {:5.1} / {:5.1} m | \
+             {:5.0} ms (warp {:4.0}), {} calls",
             format!("{:?}", self.path).to_lowercase(),
             self.quad,
             self.status(),
             self.r["method"].as_str().unwrap_or("-"),
             model,
             self.r["confidence"].as_f64().map_or("-".into(), |c| format!("{c:.2}")),
+            f.median,
+            f.p90,
+            f.max,
+            if self.r["warp"].is_object() { "H+warp" } else { "no warp" },
             s.median,
             s.p90,
             s.max,
             self.core_s * 1e3,
+            self.r["timings_ms"]["warp"].as_f64().unwrap_or(0.0),
             self.rounds,
         )
     }
@@ -361,8 +385,14 @@ fn run(path: Path, f: &Flat) -> Outcome {
     let s = Session::new(f.image.clone());
     let t_new = t.elapsed().as_secs_f64();
     let (r, rounds, core_s) = run_loop(&s, &path.request(f));
-    let stats = (r["status"] == "ok").then(|| homography(&r)).flatten().map(|h| stats(f.errors(&|x, y| h.apply(x, y))));
-    Outcome { path, quad: f.label(), r, stats, core_s: core_s + t_new, rounds }
+    let h = (r["status"] == "ok").then(|| homography(&r)).flatten();
+    let flat = h.map(|h| stats(f.errors(&|x, y| h.apply(x, y))));
+    let warp = warp_of(&r);
+    let full = h.map(|h| match &warp {
+        Some(w) => stats(f.errors(&|x, y| w.apply(&h, x, y))),
+        None => flat.unwrap(),
+    });
+    Outcome { path, quad: f.label(), r, flat, stats: full, core_s: core_s + t_new, rounds }
 }
 
 /// Every quad perturbation through `path`; prints the table and returns it.
@@ -397,6 +427,27 @@ fn located(o: &Outcome, method: &str, min_conf: f64, bounds: Stats) -> Result<()
     Ok(())
 }
 
+/// A warp from `source` in the response; `pixel_to_mercator` alone within
+/// `flat` metres; the warp fitted in at most `WARP_MS`.
+fn warped(o: &Outcome, source: &str, flat: Stats) -> Result<(), String> {
+    let d = &o.r["diagnostics"]["warp"];
+    if !o.r["warp"].is_object() || d["accepted"] != true || d["source"] != source {
+        return Err(format!("expected a warp from {source}: {d}"));
+    }
+    let f = o.flat.ok_or("no transform")?;
+    if f.median > flat.median || f.p90 > flat.p90 || f.max > flat.max {
+        return Err(format!("pixel_to_mercator alone {f:?} exceeds {flat:?}"));
+    }
+    let ms = o.r["timings_ms"]["warp"].as_f64().unwrap_or(f64::INFINITY);
+    if ms > WARP_MS {
+        return Err(format!("warp took {ms} ms"));
+    }
+    Ok(())
+}
+
+/// Time the warp fit may take (ms; the test profile is optimised like release).
+const WARP_MS: f64 = 1500.0;
+
 // ---------------------------------------------------------------------------
 // Ground truth sanity
 // ---------------------------------------------------------------------------
@@ -423,15 +474,23 @@ fn realphoto_metric_matches_homography_floor() {
 // ---------------------------------------------------------------------------
 
 /// Grid labels + lines: a homography through the 15 graticule intersections
-/// (5 latitude × 3 longitude lines), at the single-homography floor.
+/// (5 latitude × 3 longitude lines), at the single-homography floor
+/// (~32 m median, ~90 m p90, ~295 m max), and a warp fitted to the traced
+/// graticule, the map frame and the contours that brings the full model to
+/// ~12 m median, ~50 m p90, ~145 m max.
 #[test]
 fn realphoto_grid() {
     let out = run_all(Path::Grid, &PERTURBATIONS);
     check(&out, |o| {
-        located(o, "grid", 0.85, Stats { median: 45.0, p90: 120.0, max: 400.0 })?;
+        located(o, "grid", 0.85, Stats { median: 15.0, p90: 60.0, max: 170.0 })?;
+        warped(o, "grid", Stats { median: 35.0, p90: 95.0, max: 310.0 })?;
         let g = &o.r["diagnostics"]["grid"];
         if g["model"] != "homography" || g["n_gcps"].as_u64() < Some(12) {
             return Err(format!("grid fit {g}"));
+        }
+        let w = &o.r["diagnostics"]["warp"];
+        if w["n_lines"] != 8 || w["n_straight_lines"].as_u64() < Some(2) || w["n_segments"].as_u64() < Some(500) {
+            return Err(format!("warp data {w}"));
         }
         Ok(())
     });
@@ -505,17 +564,79 @@ fn realphoto_grid_lines_follow_the_graticule() {
     assert!(max_bend > 5.0, "the folded sheet's grid lines should bend: {max_bend}");
 }
 
+/// Distance (pixels) of a point to a printed graticule line (the truth
+/// polyline in flattened pixels, interpolated along the line).
+fn truth_offset(f: &Flat, t: &TruthLine, (x, y): Pt) -> Option<f64> {
+    let mut pts: Vec<Pt> = t.points.iter().map(|&(px, py)| f.from_photo.apply(px, py)).collect();
+    let (s, p) = match t.axis {
+        LineAxis::Horizontal => (x, y),
+        LineAxis::Vertical => {
+            pts.iter_mut().for_each(|q| *q = (q.1, q.0));
+            (y, x)
+        }
+    };
+    pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let k = pts.partition_point(|q| q.0 < s);
+    if k == 0 || k == pts.len() {
+        return None;
+    }
+    let (a, b) = (pts[k - 1], pts[k]);
+    let f = (s - a.0) / (b.0 - a.0);
+    Some((a.1 + f * (b.1 - a.1) - p).abs())
+}
+
+/// The warp's line tracer follows the 8 printed graticule lines along most
+/// of their length, through the fold creases, within a pixel of the truth's
+/// graticule (median).
+#[test]
+fn realphoto_traced_lines_follow_the_graticule() {
+    let _g = serial();
+    let f = flat(0.0);
+    let (_, g) = grid_fit(&f);
+    let g = g.expect("grid fit");
+    let norm = normalize_illumination(&f.image);
+    let mut bad = Vec::new();
+    for l in &g.lines {
+        let t = real().graticule.iter().find(|t| t.axis == l.line.axis && (t.value - l.value).abs() < 1e-6).unwrap();
+        let pts = mapme_core::warp::trace_printed_line(&norm, &l.line);
+        let off: Vec<f64> = pts.iter().filter_map(|&p| truth_offset(&f, t, p)).collect();
+        let s = stats(off.clone());
+        let extent = if l.line.axis == LineAxis::Horizontal { f.image.w } else { f.image.h } as f64;
+        let cover = pts.len() as f64 * 8.0 / extent;
+        eprintln!(
+            "[real photo] traced {:?} {:.4}: {} points (cover {cover:.2}), off the printed line by median {:.2} p90 {:.2} \
+             max {:.1} px",
+            l.line.axis,
+            l.value,
+            pts.len(),
+            s.median,
+            s.p90,
+            s.max
+        );
+        // The truth's graticule strays from the printed line by up to ~7 px
+        // in places (checked by eye on the photo), hence the loose p90.
+        if !(s.median < 1.0 && s.p90 < 8.0 && cover > 0.7) {
+            bad.push(format!("{:?} {}: {s:?}, cover {cover:.2}", l.line.axis, l.value));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:?}");
+}
+
 // ---------------------------------------------------------------------------
 // Contour path
 // ---------------------------------------------------------------------------
 
 /// Contours against the DEM from a GPS fix on the map: the coarse search
-/// finds the sheet, the refinement ends in a homography at the floor.
+/// finds the sheet, the refinement ends in a homography at the floor
+/// (~36–40 m median, ~87–98 m p90, ~290–350 m max), and a warp fitted to the
+/// contours and the sheet's straight printed lines brings the full model to
+/// ~15 m median, ~60–67 m p90, ~145–157 m max.
 #[test]
 fn realphoto_contours() {
     let out = run_all(Path::Contours, &PERTURBATIONS);
     check(&out, |o| {
-        located(o, "contours", 0.7, Stats { median: 55.0, p90: 140.0, max: 450.0 })?;
+        located(o, "contours", 0.7, Stats { median: 20.0, p90: 75.0, max: 180.0 })?;
+        warped(o, "contours", Stats { median: 45.0, p90: 105.0, max: 360.0 })?;
         if o.r["diagnostics"]["refined"]["projective"] != true {
             return Err(format!("not projective: {}", o.r["diagnostics"]["refined"]));
         }
@@ -604,6 +725,16 @@ fn realphoto_dump() {
     let valued: Vec<GridLine> = g.map(|g| g.lines.iter().map(|l| l.line).collect()).unwrap_or_default();
     let mut li = norm.clone();
     for l in &lines {
+        let mid = if l.axis == LineAxis::Horizontal { li.w as f64 / 2.0 } else { li.h as f64 / 2.0 };
+        eprintln!(
+            "{:?} at {:.0}: coverage {:.2}, seen {:?}, bend {:.1} px{}",
+            l.axis,
+            l.pos_at(mid),
+            l.coverage,
+            l.bend.map(|b| (b.lo.round(), b.hi.round())),
+            l.bend.map_or(0.0, |b| b.max_abs()),
+            if valued.contains(l) { ", identified" } else { "" }
+        );
         let col = if valued.contains(l) { [255, 0, 0] } else { [0, 0, 255] };
         let n = if l.axis == LineAxis::Horizontal { li.w } else { li.h };
         for s in 0..n {

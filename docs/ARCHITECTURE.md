@@ -155,19 +155,79 @@ into the paper. With `photo: true` the request:
   `diagnostics.refined.projective` tells. `refine::sample_fits` gives every
   contour sample's elevation residual and slope under a fitted transform.
 
+* **warp** (`warp.rs`, the `warp` of the response): paper that does not lie
+  flat (fold creases, curl) bends the map in ways no homography follows, so
+  on top of the fitted homography `H` a smooth offset lattice `B` is
+  estimated (20 nodes along the long side, ~115 px apart on a phone photo)
+  by regularised least squares over the node offsets:
+  * *grid lines*: every identified grid line is traced densely in the
+    normalised photo (`warp::trace_printed_line`: thin grey crossings every
+    2 px within ±40 px of its detected course, picked by a running median
+    with a shrinking tolerance, then followed beyond where it was seen by
+    extrapolation, so a fold that bends it ~25 px away is kept); every 8 px
+    of it says that `H + B` puts it on its value (across the line: Mercator
+    y for a parallel, x for a meridian, the gradient of northing or easting
+    for a UTM line). The outermost other long straight line on each side
+    (the map frame) must stay straight too: on a graticule it is a parallel
+    or meridian of unknown value (a free offset), otherwise a straight line
+    anywhere (free offset and slope); in the contour path all detected lines
+    count that way. Lines that are short, ragged (jumping between features)
+    or beside an identified line are left out.
+  * *contours* (contour path; the grid path too when contours were requested:
+    it then answers `need_dem` for the zoom-13 tiles under the sheet): the
+    DEM elevation along every contour segment must be constant under `H + B`,
+    with the segment's level a free variable eliminated in closed form
+    (variable projection), like the refinement does, since it absorbs any
+    offset a whole segment shares. Gauss–Newton with Levenberg damping and
+    soft-L1 weights (3 m), from DEM pyramid level 1 to the finest.
+  * *regularisation*: the bending energy (second differences of each offset
+    component, expected ~3 % of a cell per cell) and a weak pull to zero
+    (150 m). The normal equations are dense (2 × 300 unknowns) and solved by
+    Cholesky.
+
+  A warp is kept only if data it was not fitted to agree with it: each
+  identified grid line, predicted by the warp fitted without it, must end up
+  at most 85 % of its RMS distance under `H` alone (and ≥ 1 px closer), and
+  each half of the contour segments (split by parity) must lose ≥ 6 % of its
+  robust cost under the warp fitted without it. It must stay fold-free
+  (pixel derivative ≤ 0.35× that of `H`) and plausible (≤ 300 m where the
+  map's lines and contours are). Flat sheets get none (the synthetic photos
+  of `tests/photo.rs`: held-out lines get worse, contour halves gain 2–5 %).
+  Grid lines alone (offline, no DEM) do not pass on the real folded sheet:
+  its 5 × 3 graticule lines are too far apart to predict each other through
+  the folds (22 m held out vs 19 m from `H`), so it then gets no warp.
+  `diagnostics.warp` reports `source`, `accepted` or `rejected` (why),
+  `cols`/`rows`, `n_lines`, `n_straight_lines`, `n_line_points`,
+  `n_segments`, `n_samples`, `rms_before_m`/`rms_after_m` (grid lines from
+  their value under `H` and `H + B`), `holdout_before_m`/`holdout_rms_m`
+  (the same for each line left out), `contour_cost_before_m`/`_after_m`
+  (robust mean elevation residual), `contour_holdout_gain`,
+  `median_seg_std_m`, `max_offset_m`, `derivative_ratio`, `iterations` and
+  `ms`. With a warp, `rms_m` is the held-out line RMS (grid) or the contour
+  estimate from the warped segments' spread.
+
 The response's `pixel_to_mercator` is then a true homography (last row not
-`[0, 0, 1]`); `scale_m_per_px` and `rotation_deg` are taken from its local
-affine approximation at the image centre and `corners` from the homography
-itself. On synthetic photos of the Grootkloof sheet (`tests/photo.rs`: camera
-tilted ~15°, shadow ×0.55…1, warm cast, blur σ 1.2, noise; flattened from
-corners 0.5 % and 2.5 % off, inwards and outwards) the grid path is within
-~2 m and the contour path within ~10–30 m over the whole map frame (an affine
-from the same GCPs is off by 20 m and 115 m). On the real phone photo of the
-printed sheet, folded in four (`tests/realphoto.rs`, flattened from the page
-corners and from corners 0.5–1 % off), both paths reach the flat-model floor
-(the best single homography through the 670 truth points: 37 m median,
-66 m p90): the grid path ~32 m median, ~90 m p90, the contour path ~36–40 m
-median, ~87–98 m p90; only a warp goes below that.
+`[0, 0, 1]`); without a warp `scale_m_per_px` and `rotation_deg` are taken
+from its local affine approximation at the image centre and `corners` from
+the homography itself (with one, from the full model). On synthetic photos
+of the Grootkloof sheet (`tests/photo.rs`: camera tilted ~15°, shadow
+×0.55…1, warm cast, blur σ 1.2, noise; flattened from corners 0.5 % and
+2.5 % off, inwards and outwards) the grid path is within ~2 m and the contour
+path within ~10–30 m over the whole map frame (an affine from the same GCPs
+is off by 20 m and 115 m), and no warp is kept. On the real phone photo of
+the printed sheet, folded in four (`tests/realphoto.rs`, flattened from the
+page corners and from corners 0.5–1 % off; median / p90 / max over the 670
+truth points), `pixel_to_mercator` alone is at the flat-model floor (the best
+single homography: 37 / 66 / 181 m): the grid path 31.5–31.8 / 88–90 /
+293–296 m, the contour path 36–40 / 87–98 / 288–348 m. With the warp the
+grid path is at 11.3–12.7 / 48–53 / 140–145 m and the contour path at
+14.4–16.0 / 60–67 / 145–157 m, for ~0.45–0.6 s of fit (plus the contour
+products, ~0.4 s, in the grid path and the line detection, ~0.5 s, in the
+contour path). Inside the outermost graticule lines the grid path is at
+~9 / 21 / 59 m; the tail comes from the strip below the last parallel
+(legend and title: no grid line, few contours) where the paper curls by
+100–170 m and only the frame's shape is known, and from the truth itself,
+which is off the printed graticule by up to ~7 px (~30 m) near the creases.
 
 The core is pull-based for DEM data. When it needs tiles it does not have, it
 answers `need_dem` with the tile list. The app downloads them (cached on disk),
@@ -314,6 +374,8 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
   src/search.rs       coarse orientation-field FFT search
   src/refine.rs       contour-constancy least-squares refinement (similarity, affine,
                       projective for photos) + scoring
+  src/warp.rs         photo warp: offset lattice for paper that is not flat, fitted to
+                      traced grid lines and contours, held-out checks, inverse
   src/labels.rs       coordinate / scale / POI label parsing
   src/grid.rs         grid-line detection, label↔line association, GCP fit
   src/control_points.rs manual calibration fits
@@ -322,7 +384,8 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
   include/mapme_core.h
   tests/              integration tests on fixtures/grootkloof (photo.rs: synthetic
                       photos of the sheet, flattened from imperfect corners;
-                      realphoto.rs: the real phone photo of the folded sheet)
+                      realphoto.rs: the real phone photo of the folded sheet;
+                      warp.rs: the warp contract and its accuracy on that photo)
 fixtures/grootkloof/  the real map (PDF + extracted JPEG), DEM tiles, OCR fixture, truth
 ios/                  XcodeGen project (project.yml), app, unit tests, UI tests
 scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
@@ -371,7 +434,10 @@ resolution) and `thumb.jpg`.
 * Grid georeference (OCR + core): < 3 s. Contour georeference: < 4 s plus DEM
   download. Photo mode adds the normalisation (~0.1 s for 9 MP) and costlier
   line and mask extraction: ~0.9 s grid and ~2 s contour path on the CI-class
-  Linux box (4 cores), < 6 s even when three candidates must be refined.
+  Linux box (4 cores), < 6 s even when three candidates must be refined. The
+  warp adds ~0.5 s of fit, plus the contour products in the grid path (one
+  more `need_dem` round) and the line detection in the contour path: ~1.3–1.5 s
+  grid and ~2.4–2.7 s contour path on the real photo.
 * Map interaction at 60/120 fps, because tiles are drawn off the main thread
   by CATiledLayer and overlays are cheap CAShapeLayers.
 * Release core: `opt-level=3`, LTO, `codegen-units=1`, `panic=unwind` (needed
