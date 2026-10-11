@@ -55,6 +55,39 @@ enum Fixtures {
         return try JSONDecoder().decode(File.self, from: Data(contentsOf: url("ocr.json"))).observations
     }
 
+    /// fixtures/grootkloof/photo/`name` (the real phone photo of the printed sheet and its truth).
+    static func photoURL(_ name: String) throws -> URL {
+        let url = try directory().appendingPathComponent("photo").appendingPathComponent(name)
+        guard FileManager.default.fileExists(atPath: url.path) else { throw FixtureError.missing("photo/" + name) }
+        return url
+    }
+
+    /// The fixture OCR moved into the real photo's pixels (photo/ocr.json).
+    static func photoOCRFixture() throws -> [PhotoOCRBox] {
+        struct File: Decodable { var observations: [PhotoOCRBox] }
+        return try JSONDecoder().decode(File.self, from: Data(contentsOf: photoURL("ocr.json"))).observations
+    }
+
+    /// A DEMService that serves the fixture tiles (copied into a fresh cache in its z/x/y.png
+    /// layout) and never touches the network: tiles the fixtures lack come back as unavailable, so
+    /// the core is told they are missing, as `georeference(_:_:)` does.
+    static func offlineDEMService() throws -> DEMService {
+        let cache = try makeTemporaryDirectory("dem-fixtures-\(UUID().uuidString)")
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [NotFoundURLProtocol.self]
+        let service = DEMService(cacheDirectory: cache, session: URLSession(configuration: config))
+        let source = try directory().appendingPathComponent("dem")
+        let fm = FileManager.default
+        for name in try fm.contentsOfDirectory(atPath: source.path) where name.hasSuffix(".png") {
+            let parts = name.dropLast(4).split(separator: "_")
+            guard parts.count == 3, let z = Int(parts[0]), let x = Int(parts[1]), let y = Int(parts[2]) else { continue }
+            let target = service.cacheURL(for: TileID(z: z, x: x, y: y))
+            try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.copyItem(at: source.appendingPathComponent(name), to: target)
+        }
+        return service
+    }
+
     /// Answer `need_dem` from the fixture tiles (absent ones are marked missing) until the core finishes.
     static func georeference(_ session: GeorefSession, _ request: GeorefRequest, maxRounds: Int = 8) throws -> GeorefResponse {
         var response = try session.georeference(request)
@@ -140,6 +173,142 @@ struct GrootkloofTruth {
     func maxGroundError(of h: Homography, scale k: Double) -> Double {
         checkPoints(scale: k).map { groundError(of: h, atPixel: $0, scale: k) }.max() ?? .infinity
     }
+}
+
+/// Ground truth of the real phone photo of the printed sheet (fixtures/grootkloof/photo/truth.json,
+/// photo pixels, top-left origin): the paper's and the map frame's corners and 670 control points
+/// photo pixel → lat/lon measured through a dense SIFT field (the paper is folded, so no single
+/// homography fits it; `homographyFloor` is how well the best one does).
+struct RealPhotoTruth: Decodable {
+    struct ControlPoint: Decodable {
+        var x: Double
+        var y: Double
+        var lat: Double
+        var lon: Double
+    }
+
+    struct ErrorStats: Codable {
+        var rms: Double?
+        var median: Double
+        var p90: Double
+        var max: Double
+    }
+
+    var image: String
+    var imageWidth: Int
+    var imageHeight: Int
+    /// The sheet of paper, TL, TR, BR, BL.
+    var pageQuadPoints: [[Double]]
+    /// The map's neatline, TL, TR, BR, BL.
+    var frameQuadPoints: [[Double]]
+    var controlPoints: [ControlPoint]
+    var homographyFloor: ErrorStats?
+
+    enum CodingKeys: String, CodingKey {
+        case image
+        case imageWidth = "image_width"
+        case imageHeight = "image_height"
+        case pageQuadPoints = "page_quad"
+        case frameQuadPoints = "frame_quad"
+        case controlPoints = "control_points"
+        case homographyFloor = "homography_floor_m"
+    }
+
+    static func load() throws -> RealPhotoTruth {
+        try JSONDecoder().decode(RealPhotoTruth.self, from: Data(contentsOf: Fixtures.photoURL("truth.json")))
+    }
+
+    var pageQuad: PhotoQuad? { PhotoQuad(json: pageQuadPoints) }
+    var frameQuad: PhotoQuad? { PhotoQuad(json: frameQuadPoints) }
+
+    /// Inside (or on) a convex quad ordered clockwise on screen, like the truth's quads.
+    static func isInside(_ p: CGPoint, _ quad: PhotoQuad) -> Bool {
+        let corners = quad.points
+        for i in 0..<4 {
+            let a = corners[i]
+            let b = corners[(i + 1) % 4]
+            let ex = Double(b.x - a.x)
+            let ey = Double(b.y - a.y)
+            let px = Double(p.x - a.x)
+            let py = Double(p.y - a.y)
+            if ex * py - ey * px < 0 { return false }
+        }
+        return true
+    }
+
+    /// Control points inside the map frame.
+    var framedControlPoints: [ControlPoint] {
+        guard let frame = frameQuad else { return controlPoints }
+        return controlPoints.filter { Self.isInside(CGPoint(x: $0.x, y: $0.y), frame) }
+    }
+}
+
+/// One box of the fixture OCR in the real photo's pixels (photo/ocr.json).
+struct PhotoOCRBox: Decodable {
+    var text: String
+    /// The box's corners TL, TR, BR, BL in photo pixels.
+    var quad: [[Double]]
+    /// Their axis-aligned extent [x, y, w, h].
+    var bbox: [Double]
+    var confidence: Float
+
+    /// The observation in the pixels of the image `h` maps the photo to (e.g. the flattened page):
+    /// the axis-aligned extent of the box's mapped corners.
+    func observation(through h: Homography) -> OCRObservation {
+        let corners = quad.filter { $0.count == 2 }.map { h.apply(SIMD2($0[0], $0[1])) }
+        let xs = corners.map(\.x)
+        let ys = corners.map(\.y)
+        guard corners.count == 4, let x0 = xs.min(), let x1 = xs.max(), let y0 = ys.min(), let y1 = ys.max() else {
+            return OCRObservation(text: text, bbox: bbox, confidence: confidence)
+        }
+        return OCRObservation(text: text, bbox: [x0, y0, x1 - x0, y1 - y0], confidence: confidence)
+    }
+}
+
+/// Median, 90th percentile and maximum of a set of errors (linear interpolation between ranks, as
+/// numpy's default).
+struct ErrorSummary: Codable {
+    var count: Int
+    var median: Double
+    var p90: Double
+    var max: Double
+
+    init(_ values: [Double]) {
+        let sorted = values.sorted()
+        count = sorted.count
+        median = Self.percentile(sorted, 0.5)
+        p90 = Self.percentile(sorted, 0.9)
+        max = sorted.last ?? .nan
+    }
+
+    static func percentile(_ sorted: [Double], _ q: Double) -> Double {
+        guard !sorted.isEmpty else { return .nan }
+        let position = q * Double(sorted.count - 1)
+        let lower = Int(position.rounded(.down))
+        let upper = Swift.min(lower + 1, sorted.count - 1)
+        let f = position - Double(lower)
+        return sorted[lower] * (1 - f) + sorted[upper] * f
+    }
+
+    var text: String { String(format: "median %.1f m, p90 %.1f m, max %.1f m (%ld points)", median, p90, max, count) }
+}
+
+/// Answers every request with 404, so a test never depends on the network.
+final class NotFoundURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let url = request.url ?? URL(fileURLWithPath: "/")
+        if let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: nil) {
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        }
+        client?.urlProtocol(self, didLoad: Data())
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 enum LeastSquares {

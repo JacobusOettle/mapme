@@ -1,13 +1,15 @@
 import XCTest
 
-/// Photo of a paper map, through the UI: the app photographs its bundled sample sheet
-/// (`-importSamplePhoto`, a synthetic photo in perspective on a table), shows "Adjust Corners"
-/// with the detected sheet (in the simulator Vision sees only the whole frame; the core's page
-/// finder supplies the outline), flattens and locates it, and opens it with a mocked GPS fix.
+/// Photo of a paper map, through the UI: the app imports its bundled sample photo
+/// (`-importSamplePhoto`: the real phone photo of the printed Grootkloof sheet on a wooden table,
+/// folded in four, which Debug builds bundle as SamplePhoto.jpg), shows "Adjust Corners" with the
+/// detected sheet (in the simulator Vision often sees only the whole frame; the core's page finder
+/// supplies the outline), flattens and locates it (OCR, then contours against terrain downloaded
+/// over the network near the mocked GPS fix, which is inside the sheet) and opens it.
 final class PhotoImportUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = true
-        executionTimeAllowance = 480
+        executionTimeAllowance = 600
     }
 
     @MainActor
@@ -30,8 +32,9 @@ final class PhotoImportUITests: XCTestCase {
         XCTAssertTrue(app.buttons["cornersFullImageButton"].exists)
         XCTAssertTrue(done.isEnabled)
         // The handles sit on the sheet's corners, well inside the photo (not on its corners, as
-        // they would for "the whole image"): the sheet's top-left is ~20 % in from the left edge
-        // and its bottom-right ~13 % in from the right.
+        // they would for "the whole image"): in the photo the sheet's top-left is ~12 % in from the
+        // left edge and its bottom-right ~10 % in from the right; the editor fits the photo to the
+        // screen width with a margin, so on screen they are ~15 % and ~13 % in.
         let width = app.frame.width
         let topLeft = app.descendants(matching: .any).matching(identifier: "cornerHandle0").firstMatch
         let bottomRight = app.descendants(matching: .any).matching(identifier: "cornerHandle2").firstMatch
@@ -44,14 +47,19 @@ final class PhotoImportUITests: XCTestCase {
         }
         done.tap()
 
+        // Flattening, OCR, the contour search and the terrain download take a while in CI.
         let openMap = app.buttons["openMapButton"]
-        guard openMap.waitForExistence(timeout: 240) else {
+        guard openMap.waitForExistence(timeout: 300) else {
             attachScreenshot(app, "06-photo-import-timeout")
-            XCTFail("The photo was not flattened and located within 240 s")
+            XCTFail("The photo was not flattened and located within 300 s")
             return
         }
         attachScreenshot(app, "05b-photo-located")
+        // "Calibrate manually" is offered only when the map could not be located.
+        XCTAssertFalse(app.buttons["calibrateButton"].exists, "The photo was imported but not located")
         openMap.tap()
+        _ = app.buttons["trackingButton"].waitForExistence(timeout: 20)
+        // Let the tiles load and the puck glide in.
         Thread.sleep(forTimeInterval: 4)
         attachScreenshot(app, "06-photo-map")
     }

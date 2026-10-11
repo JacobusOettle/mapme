@@ -86,11 +86,12 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         SWIFT_EMIT_LOC_STRINGS: NO
     postBuildScripts:
-      - name: Embed sample map (Debug only)
+      - name: Embed sample map and photo (Debug only)
         basedOnDependencyAnalysis: false
         script: |
           if [ "${CONFIGURATION}" = "Debug" ]; then
             cp "${SRCROOT}/../fixtures/grootkloof/grootkloof.pdf" "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/SampleMap.pdf"
+            cp "${SRCROOT}/../fixtures/grootkloof/photo/printed-map-photo.jpg" "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/SamplePhoto.jpg"
           fi
     scheme:
       testTargets:

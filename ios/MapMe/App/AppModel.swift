@@ -346,16 +346,18 @@ final class AppModel {
     // MARK: - UI testing / demo
 
     #if DEBUG
-    /// `-importSamplePhoto` launch argument: photograph the bundled sample map (synthetically: tilted
-    /// on a table, uneven light) and import it through the photo flow, corner editor included.
+    /// `-importSamplePhoto` launch argument: import a photo of the sample sheet through the photo
+    /// flow, corner editor included. Debug builds bundle the real phone photo of the printed sheet
+    /// (SamplePhoto.jpg: wooden table, folded in four); without it the bundled sample map is
+    /// photographed synthetically (tilted on a table, uneven light).
     private func importSamplePhotoIfRequested() -> Bool {
         guard ProcessInfo.processInfo.arguments.contains("-importSamplePhoto") else { return false }
         let picker = cornerPicker
         let name = "Grootkloof photo"
         startImport(name: name) { importer, progress in
-            progress(0.01, "Photographing the sample map…")
+            progress(0.01, "Loading the sample photo…")
             let photo = try await Task.detached(priority: .userInitiated) {
-                try SyntheticPhoto.sample()
+                try SyntheticPhoto.samplePhoto()
             }.value
             return try await importer.importImageData(photo.jpeg, suggestedName: name,
                                                       mode: .detectPhoto(picker, fallbackCorners: photo.corners),

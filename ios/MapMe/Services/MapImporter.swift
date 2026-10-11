@@ -404,6 +404,9 @@ final class MapImporter {
     /// A georeference of the page flattened from `oldCorners` (into `oldWidth` × `oldHeight`)
     /// re-expressed for the same photo flattened from `newCorners` (into `newWidth` × `newHeight`):
     /// new pixel → photo pixel → old pixel → Mercator. Corners are in the same photo's pixels.
+    /// A warp (folded paper) comes along: a lattice of the same size over the new image whose node
+    /// offsets are the old warp at the matching old pixels, so `H_new = H_old ∘ newToOld` and
+    /// `B_new(p) ≈ B_old(newToOld(p))`.
     static func carriedGeoreference(_ georef: Georeference?, oldCorners: PhotoQuad, oldWidth: Int, oldHeight: Int,
                                     newCorners: PhotoQuad, newWidth: Int, newHeight: Int) -> Georeference? {
         guard let georef,
@@ -416,6 +419,12 @@ final class MapImporter {
         guard h.m.allSatisfy({ $0.isFinite }) else { return nil }
         var carried = georef
         carried.pixelToMercator = h
+        carried.warp = georef.warp.flatMap { old -> MeshWarp? in
+            let warp = old.resampled(cols: old.cols, rows: old.rows, width: Double(newWidth), height: Double(newHeight)) { p in
+                newToOld.apply(p)
+            }
+            return warp.isValid ? warp : nil
+        }
         return carried
     }
 

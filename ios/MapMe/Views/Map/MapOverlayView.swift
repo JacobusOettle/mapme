@@ -21,7 +21,9 @@ final class MapOverlayView: UIView {
     // MARK: Inputs
 
     private var georef: Georeference?
-    private var mercatorToPixel: Homography = .identity
+    /// Coordinates → map pixels through the georeference (homography and, for photos of folded
+    /// paper, its warp), with the inverse worked out once per georeference.
+    private var projector: Georeference.Projector?
     private var location: CLLocation?
     /// Where the latest fix is on the map.
     private var targetUserPixel: CGPoint?
@@ -317,7 +319,7 @@ final class MapOverlayView: UIView {
     func setGeoref(_ g: Georeference?) {
         guard g != georef else { return }
         georef = g
-        mercatorToPixel = g?.mercatorToPixel ?? .identity
+        projector = g.map { Georeference.Projector($0) }
         recomputeUser()
         shownUserPixel = targetUserPixel
         gliding = false
@@ -527,20 +529,19 @@ final class MapOverlayView: UIView {
     // MARK: - Derived data
 
     private func recomputeUser() {
-        guard let georef, let fix = location else {
+        guard let georef, let projector, let fix = location else {
             targetUserPixel = nil
             userLatLon = nil
             updateGuideText()
             return
         }
         let ll = LatLon(fix.coordinate)
-        let px = mercatorToPixel.apply(WebMercator.project(ll))
-        guard px.x.isFinite, px.y.isFinite else {
+        let p = projector.pixel(for: ll)
+        guard p.x.isFinite, p.y.isFinite else {
             targetUserPixel = nil
             userLatLon = nil
             return
         }
-        let p = CGPoint(x: px.x, y: px.y)
         targetUserPixel = p
         userLatLon = ll
         let mpp = georef.metersPerPixel(atPixel: p)
@@ -551,11 +552,10 @@ final class MapOverlayView: UIView {
     }
 
     private func convertTrack(from start: Int) {
-        guard georef != nil, start < trackPoints.count else { return }
+        guard let projector, start < trackPoints.count else { return }
         trackPixels.reserveCapacity(trackPoints.count)
         for i in start..<trackPoints.count {
-            let m = mercatorToPixel.apply(WebMercator.project(trackPoints[i].latLon))
-            trackPixels.append(CGPoint(x: m.x, y: m.y))
+            trackPixels.append(projector.pixel(for: trackPoints[i].latLon))
         }
     }
 
@@ -568,14 +568,14 @@ final class MapOverlayView: UIView {
         placementDirty = true
         balloonKind = nil
         balloonID = nil
-        guard georef != nil else { return }
+        guard let projector else { return }
         var built: [POIItem] = []
         built.reserveCapacity(pois.count)
         for poi in pois {
-            let m = mercatorToPixel.apply(WebMercator.project(poi.position))
-            guard m.x.isFinite, m.y.isFinite else { continue }
+            let pixel = projector.pixel(for: poi.position)
+            guard pixel.x.isFinite, pixel.y.isFinite else { continue }
             let text = Self.labelText(for: poi, units: units)
-            let item = POIItem(poi: poi, pixel: CGPoint(x: m.x, y: m.y), labelText: text)
+            let item = POIItem(poi: poi, pixel: pixel, labelText: text)
             let marker = OverlayArt.marker(for: poi.kind)
             item.marker.contents = marker.cgImage
             item.marker.contentsScale = marker.scale

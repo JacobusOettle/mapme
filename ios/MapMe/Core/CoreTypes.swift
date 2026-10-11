@@ -78,9 +78,12 @@ struct GeorefResponse: Codable {
     var pois: [CorePOI]?
     var message: String?
     var timingsMs: [String: Double]?
+    /// Photo mode: correction for paper that does not lie flat (absent or null otherwise). The full
+    /// model is `pixelToMercator` plus this warp; see `MeshWarp`.
+    var warp: MeshWarp?
 
     enum CodingKeys: String, CodingKey {
-        case status, method, confidence, corners, pois, message
+        case status, method, confidence, corners, pois, message, warp
         case pixelToMercator = "pixel_to_mercator"
         case rmsM = "rms_m"
         case scaleMPerPx = "scale_m_per_px"
@@ -102,7 +105,31 @@ struct GeorefResponse: Codable {
         case "contours": method = .contours
         default: method = .manual
         }
-        return Georeference(pixelToMercator: Homography(m), method: method, confidence: confidence ?? 0, rmsMeters: rmsM)
+        // A malformed warp is dropped: the homography alone is still the best flat fit.
+        let usableWarp = warp.flatMap { $0.isValid ? $0 : nil }
+        return Georeference(pixelToMercator: Homography(m), method: method, confidence: confidence ?? 0, rmsMeters: rmsM,
+                            warp: usableWarp)
+    }
+}
+
+extension GeorefResponse {
+    /// Like the synthesized decoder, except that a `warp` the app cannot read is dropped instead of
+    /// failing the whole response (the flat homography is still a usable answer).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = try c.decode(String.self, forKey: .status)
+        method = try c.decodeIfPresent(String.self, forKey: .method)
+        pixelToMercator = try c.decodeIfPresent([Double].self, forKey: .pixelToMercator)
+        confidence = try c.decodeIfPresent(Double.self, forKey: .confidence)
+        rmsM = try c.decodeIfPresent(Double.self, forKey: .rmsM)
+        scaleMPerPx = try c.decodeIfPresent(Double.self, forKey: .scaleMPerPx)
+        rotationDeg = try c.decodeIfPresent(Double.self, forKey: .rotationDeg)
+        corners = try c.decodeIfPresent([[Double]].self, forKey: .corners)
+        needTiles = try c.decodeIfPresent([TileID].self, forKey: .needTiles)
+        pois = try c.decodeIfPresent([CorePOI].self, forKey: .pois)
+        message = try c.decodeIfPresent(String.self, forKey: .message)
+        timingsMs = try c.decodeIfPresent([String: Double].self, forKey: .timingsMs)
+        warp = try? c.decodeIfPresent(MeshWarp.self, forKey: .warp)
     }
 }
 

@@ -27,6 +27,8 @@ struct GeorefOutcome {
     /// Labels read off the map (place names, peaks), already converted to coordinates.
     var pois: [MapPOI]
     var response: GeorefResponse?
+    /// The text the request carried (read with Vision, or handed in), for diagnostics.
+    var ocr: [OCRObservation] = []
 }
 
 /// OCR → mapme-core session → DEM download loop → result.
@@ -46,22 +48,25 @@ final class GeoreferenceService {
     }
 
     /// `progress(stage, fraction 0…1)` may be called from any thread. `photo` marks a photo of a
-    /// paper map (lighting normalisation and a projective fit in the core).
+    /// paper map (lighting normalisation and a projective fit in the core). `knownText` is text
+    /// already read off `image` (tests); nil reads it with Vision.
     func locate(image: CGImage, dpi: Double?, gps: CLLocation?, contourRGB: [Int]?, searchRadiusKm: Double,
-                photo: Bool = false,
+                photo: Bool = false, knownText: [OCRObservation]? = nil,
                 progress: @escaping (GeorefStage, Double) -> Void) async -> GeorefOutcome {
         lock.withLock { cancelled = false }
         let reporter = MonotonicProgress(progress)
 
         // 1. Text on the map (grid labels, scale, names). Best effort: contours work without it.
         reporter.report(.readingText, 0.01)
-        var ocr: [OCRObservation] = []
-        do {
-            ocr = try await OCRService.recognize(in: image) { f in
-                reporter.report(.readingText, 0.01 + 0.34 * f)
+        var ocr: [OCRObservation] = knownText ?? []
+        if knownText == nil {
+            do {
+                ocr = try await OCRService.recognize(in: image) { f in
+                    reporter.report(.readingText, 0.01 + 0.34 * f)
+                }
+            } catch {
+                if isCancelled { return Self.cancelledOutcome }
             }
-        } catch {
-            if isCancelled { return Self.cancelledOutcome }
         }
         if isCancelled { return Self.cancelledOutcome }
 
@@ -130,7 +135,9 @@ final class GeoreferenceService {
         }
 
         reporter.report(.finished, 1)
-        return Self.outcome(from: response, hadGPS: fix != nil, searchRadiusKm: searchRadiusKm)
+        var outcome = Self.outcome(from: response, hadGPS: fix != nil, searchRadiusKm: searchRadiusKm)
+        outcome.ocr = ocr
+        return outcome
     }
 
     /// Cancel the running `locate`.

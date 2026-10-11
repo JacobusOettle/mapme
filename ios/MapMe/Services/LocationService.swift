@@ -202,9 +202,11 @@ final class LocationService: NSObject {
         headingDegrees = mock.heading
         headingAccuracy = mock.heading == nil ? nil : 10
         publishMock()
-        guard mock.walk else { return }
+        // A standing GPS still reports about once a second; without that the puck turns grey
+        // ("last known") after `MapOverlayView.staleAfter`, e.g. during a long photo import.
+        let walk = mock.walk
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            self?.advanceMock(by: 1)
+            if walk { self?.advanceMock(by: 1) } else { self?.publishMock() }
         }
         RunLoop.main.add(timer, forMode: .common)
         mockTimer = timer

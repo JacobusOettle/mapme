@@ -3,12 +3,220 @@ import CoreLocation
 import XCTest
 @testable import MapMe
 
-/// Photos of paper maps end to end on the Grootkloof sheet: a synthetic phone photo of the printed
-/// sheet (perspective, table, uneven warm light, blur, JPEG) → page detection (Vision and the
-/// core's page finder, edge snapping) → flattening → OCR → photo-mode georeference. Errors are
-/// measured against the sheet's surveyed graticule through the known photo geometry (page → photo
-/// → flattened pixels).
+/// Photos of paper maps end to end on the Grootkloof sheet → page detection (Vision and the core's
+/// page finder, edge snapping) → flattening → OCR → photo-mode georeference.
+///
+/// The primary case is the user's real phone photo of the printed sheet (fixtures/grootkloof/photo:
+/// wooden table, perspective, faint contours, and the paper folded in four, so no single homography
+/// fits it). It runs as the app runs it: the importer's decoding, `PhotoQuadDetector`, the
+/// importer's flattening, then `GeoreferenceService` (Vision OCR, photo mode, GPS prior inside the
+/// sheet, fixture DEM tiles, no network). Errors are measured at the truth's control points inside
+/// the map frame (photo pixel → flattened pixel → the full model, homography and warp → ground
+/// metres). The bounds are generous: the simulator's Vision may read fewer labels than the fixture
+/// OCR the core's own tests use, and those hold the tight bounds.
+///
+/// The synthetic phone photo of the sheet (perspective, table, uneven warm light, blur, JPEG) is
+/// kept as a second case with a known geometry: its errors are measured against the sheet's
+/// surveyed graticule (page → photo → flattened pixels).
 final class PhotoE2ETests: XCTestCase {
+    // MARK: - The real photo
+
+    /// GPS fix inside the sheet (as in the UI tests).
+    private static let realPhotoGPS = CLLocationCoordinate2D(latitude: -25.8405, longitude: 27.3920)
+
+    private struct RealScene {
+        var truth: RealPhotoTruth
+        /// The photo decoded the way the importer decodes it.
+        var photo: CGImage
+        var analysis: PageAnalysis
+        /// Corners the page was flattened with: the detected ones (the true ones if nothing was
+        /// found, which `testRealPhotoSheetIsDetected` reports as a failure).
+        var corners: PhotoQuad
+        var flat: CGImage
+        /// Photo pixels → flattened pixels (the rectification the flattening applied).
+        var photoToFlat: Homography
+    }
+
+    private struct DetectionReport: Codable {
+        var summary: String
+        var source: String?
+        var detected: [[Double]]?
+        var vision: [[Double]]?
+        var core: [[Double]]?
+        var truth: [[Double]]
+        var cornerOffsetsPx: [Double]
+        var tolerancePx: Double
+    }
+
+    private struct RealPhotoReport: Codable {
+        var variant: String
+        var status: String
+        var method: String?
+        var message: String
+        var confidence: Double?
+        var rmsM: Double?
+        var warp: Bool
+        /// [cols, rows] of the warp's lattice.
+        var warpLattice: [Int]?
+        var warpMaxOffsetM: Double?
+        /// The full model (homography + warp) at the control points.
+        var error: ErrorSummary?
+        /// The homography alone (warp ignored), for comparison.
+        var flatModelError: ErrorSummary?
+        /// The best single homography over the control points (truth.json).
+        var homographyFloor: RealPhotoTruth.ErrorStats?
+        var ocrCount: Int
+        var ocrTexts: [String]
+        var seconds: Double
+        var corners: [[Double]]
+        var flattenedSize: [Int]
+    }
+
+    private static var cachedRealScene: RealScene?
+
+    /// The real photo through the importer's steps: decoding, page detection, flattening.
+    private func realScene() async throws -> RealScene {
+        if let cached = Self.cachedRealScene { return cached }
+        let started = Date()
+        let truth = try RealPhotoTruth.load()
+        let truePage = try XCTUnwrap(truth.pageQuad, "page_quad in photo/truth.json")
+        let url = try Fixtures.photoURL(truth.image)
+        let photo = try MapImporter.decodeImage(at: url)
+        XCTAssertEqual(photo.width, truth.imageWidth)
+        XCTAssertEqual(photo.height, truth.imageHeight)
+        let analysis = await PhotoQuadDetector.analyze(photo)
+        note("Real photo page detection: \(analysis.summary)")
+        let corners = analysis.quad ?? truePage
+        let info = PhotoCaptureInfo.read(from: url)
+        let flat = try XCTUnwrap(try MapImporter.flattened(photo, quad: corners, focalLength35mm: info.focalLength35mm),
+                                 "the page outline is the whole photo: nothing to flatten")
+        let rect = try XCTUnwrap(PhotoGeometry.rectification(quad: corners, width: flat.width, height: flat.height))
+        let scene = RealScene(truth: truth, photo: photo, analysis: analysis, corners: corners, flat: flat, photoToFlat: rect)
+        attachImage(flat, name: "real-photo-flattened")
+        let seconds = Date().timeIntervalSince(started)
+        note("Real photo decoded, detected and flattened (\(flat.width)×\(flat.height)) in \(String(format: "%.1f", seconds)) s")
+        Self.cachedRealScene = scene
+        return scene
+    }
+
+    func testRealPhotoSheetIsDetected() async throws {
+        let scene = try await realScene()
+        let truePage = try XCTUnwrap(scene.truth.pageQuad)
+        let diagonal = (PhotoGeometry.distance(truePage.topLeft, truePage.bottomRight)
+            + PhotoGeometry.distance(truePage.topRight, truePage.bottomLeft)) / 2
+        let tolerance = 0.02 * diagonal
+        let analysis = scene.analysis
+        var offsets: [Double] = []
+        if let detected = analysis.quad {
+            offsets = zip(detected.points, truePage.points).map { PhotoGeometry.distance($0, $1) }
+        }
+        let report = DetectionReport(summary: analysis.summary, source: analysis.source?.rawValue,
+                                     detected: analysis.quad?.json, vision: analysis.vision?.json, core: analysis.core?.json,
+                                     truth: truePage.json, cornerOffsetsPx: offsets, tolerancePx: tolerance)
+        attachJSON(report, name: "real-photo-page-detection.json")
+        var outlines: [(PhotoQuad, CGColor)] = [(truePage, CGColor(red: 0.1, green: 0.85, blue: 0.2, alpha: 1))]
+        if let detected = analysis.quad {
+            outlines.append((detected, CGColor(red: 1, green: 0.15, blue: 0.1, alpha: 1)))
+        }
+        attachOutlines(scene.photo, outlines, name: "real-photo-page-detection")
+
+        guard let detected = analysis.quad else {
+            XCTFail("No sheet found in the real photo (\(analysis.summary))")
+            return
+        }
+        let worst = offsets.max() ?? .infinity
+        let offsetText = offsets.map { String(format: "%.1f", $0) }.joined(separator: ", ")
+        XCTAssertLessThan(worst, tolerance,
+                          "detected \(detected.json) vs true \(truePage.json): corner offsets [\(offsetText)] px (\(analysis.summary))")
+        let photoSize = CGSize(width: scene.photo.width, height: scene.photo.height)
+        XCTAssertEqual(PhotoGeometry.triage(detected, imageSize: photoSize), .needsCorners(detected),
+                       "the corner editor must open for this photo (\(analysis.summary))")
+        note("Real photo: \(analysis.source?.rawValue ?? "?") found the sheet; corner offsets [\(offsetText)] px, tolerance \(String(format: "%.1f", tolerance)) px")
+    }
+
+    func testRealPhotoLocatesWithVisionOCR() async throws {
+        let scene = try await realScene()
+        let (outcome, report) = try await locateRealPhoto(scene, variant: "ocr", knownText: nil)
+        XCTAssertEqual(report.status, "ok", outcome.message)
+        let error = try XCTUnwrap(report.error, "not located: \(outcome.message)")
+        XCTAssertLessThanOrEqual(error.median, 80,
+                                 "real photo (Vision OCR) \(error.text) by \(report.method ?? "-"): \(outcome.message)")
+    }
+
+    /// The fixture OCR (every label, as Vision reads the scan) instead of the simulator's Vision:
+    /// tells "Vision read too little" apart from a problem in the pipeline.
+    func testRealPhotoLocatesWithFixtureOCR() async throws {
+        let scene = try await realScene()
+        let ocr = try Fixtures.photoOCRFixture().map { $0.observation(through: scene.photoToFlat) }
+        XCTAssertFalse(ocr.isEmpty)
+        let (outcome, report) = try await locateRealPhoto(scene, variant: "fixture-ocr", knownText: ocr)
+        XCTAssertEqual(report.status, "ok", outcome.message)
+        let error = try XCTUnwrap(report.error, "not located: \(outcome.message)")
+        XCTAssertLessThanOrEqual(error.median, 80,
+                                 "real photo (fixture OCR) \(error.text) by \(report.method ?? "-"): \(outcome.message)")
+    }
+
+    func testRealPhotoLocatesFromContoursOnly() async throws {
+        let scene = try await realScene()
+        let (outcome, report) = try await locateRealPhoto(scene, variant: "contours", knownText: [])
+        XCTAssertEqual(report.status, "ok", outcome.message)
+        XCTAssertEqual(report.method, "contours", outcome.message)
+        let error = try XCTUnwrap(report.error, "not located: \(outcome.message)")
+        XCTAssertLessThanOrEqual(error.median, 90,
+                                 "real photo (contours only) \(error.text) by \(report.method ?? "-"): \(outcome.message)")
+    }
+
+    /// `GeoreferenceService` on the flattened real photo as the app runs it (photo mode, GPS fix
+    /// inside the sheet), with the fixture DEM tiles and no network. `knownText` nil reads the
+    /// text with Vision, as the app does; `[]` gives it none (contours only). The summary is
+    /// attached to the results.
+    private func locateRealPhoto(_ scene: RealScene, variant: String,
+                                 knownText: [OCRObservation]?) async throws -> (GeorefOutcome, RealPhotoReport) {
+        let service = GeoreferenceService(dem: try Fixtures.offlineDEMService())
+        let gps = CLLocation(coordinate: Self.realPhotoGPS, altitude: 1500, horizontalAccuracy: 10, verticalAccuracy: 10,
+                             timestamp: Date())
+        let started = Date()
+        let outcome = await service.locate(image: scene.flat, dpi: nil, gps: gps, contourRGB: nil, searchRadiusKm: 20,
+                                           photo: true, knownText: knownText) { _, _ in }
+        let seconds = Date().timeIntervalSince(started)
+        let warp = outcome.georef?.warp
+        var report = RealPhotoReport(variant: variant, status: outcome.response?.status ?? "none",
+                                     method: outcome.response?.method, message: outcome.message,
+                                     confidence: outcome.response?.confidence, rmsM: outcome.response?.rmsM,
+                                     warp: warp != nil, warpLattice: warp.map { [$0.cols, $0.rows] },
+                                     warpMaxOffsetM: warp?.maxOffset, error: nil, flatModelError: nil,
+                                     homographyFloor: scene.truth.homographyFloor, ocrCount: outcome.ocr.count,
+                                     ocrTexts: outcome.ocr.map(\.text), seconds: seconds, corners: scene.corners.json,
+                                     flattenedSize: [scene.flat.width, scene.flat.height])
+        if let g = outcome.georef {
+            report.error = ErrorSummary(groundErrors(g, scene))
+            let flatModel = Georeference(pixelToMercator: g.pixelToMercator, method: g.method, confidence: g.confidence,
+                                         rmsMeters: g.rmsMeters)
+            report.flatModelError = ErrorSummary(groundErrors(flatModel, scene))
+        }
+        attachJSON(report, name: "real-photo-\(variant)-summary.json")
+        if let response = outcome.response {
+            attachJSON(response, name: "real-photo-\(variant)-response.json")
+        }
+        var line = "Real photo (\(variant)): \(report.status) \(report.method ?? "-"), OCR \(report.ocrCount) boxes, "
+        line += "warp \(report.warp ? "yes" : "no"), \(String(format: "%.1f", seconds)) s"
+        if let error = report.error { line += ", \(error.text)" }
+        if let flatError = report.flatModelError { line += "; homography alone \(flatError.text)" }
+        note(line + " — \(outcome.message)")
+        return (outcome, report)
+    }
+
+    /// Ground error (m) of a georeference of the flattened photo at every truth control point inside
+    /// the map frame: photo pixel → flattened pixel → the full model (homography and warp) → lat/lon.
+    private func groundErrors(_ g: Georeference, _ scene: RealScene) -> [Double] {
+        scene.truth.framedControlPoints.map { (cp: RealPhotoTruth.ControlPoint) -> Double in
+            let f = PhotoGeometry.apply(scene.photoToFlat, CGPoint(x: cp.x, y: cp.y))
+            return Geodesy.distance(g.latLon(forPixel: f), LatLon(lat: cp.lat, lon: cp.lon))
+        }
+    }
+
+    // MARK: - The synthetic photo
+
     private struct Scene {
         var synthetic: SyntheticPhoto.Result
         /// The photo decoded the way the importer decodes it.
@@ -75,13 +283,14 @@ final class PhotoE2ETests: XCTestCase {
         return scene
     }
 
-    /// Worst ground error (m) over the map frame corners and centre of a georeference of the flattened photo.
-    private func maxGroundError(_ h: Homography, _ scene: Scene) throws -> Double {
+    /// Worst ground error (m) over the map frame corners and centre of a georeference of the
+    /// flattened photo (the full model: homography and warp, if any).
+    private func maxGroundError(_ g: Georeference, _ scene: Scene) throws -> Double {
         let truth = try GrootkloofTruth.load()
         var worst = 0.0
         for p in truth.checkPoints(scale: scene.k) {
             let f = PhotoGeometry.apply(scene.pageToFlat, p)
-            let a = h.apply(SIMD2(Double(f.x), Double(f.y)))
+            let a = g.mercator(forPixel: SIMD2(Double(f.x), Double(f.y)))
             let b = truth.pixelToMercator.apply(SIMD2(Double(p.x) / scene.k, Double(p.y) / scene.k))
             let lat = WebMercator.unproject(b).lat
             let dx = a.x - b.x
@@ -106,7 +315,7 @@ final class PhotoE2ETests: XCTestCase {
         attachJSON(response, name: "photo-grid-response.json")
         XCTAssertEqual(response.status, "ok", response.message ?? "")
         let g = try XCTUnwrap(response.georeference, response.message ?? "no georeference")
-        let worst = try maxGroundError(g.pixelToMercator, scene)
+        let worst = try maxGroundError(g, scene)
         XCTAssertLessThan(worst, 30, "photo grid georeference max error \(worst) m (\(response.method ?? "-"))")
         note("Photo grid: \(response.method ?? "-"), OCR \(ocr.count) boxes, \(String(format: "%.1f", Date().timeIntervalSince(started))) s, max error \(String(format: "%.1f", worst)) m")
     }
@@ -127,7 +336,7 @@ final class PhotoE2ETests: XCTestCase {
         attachJSON(response, name: "photo-contour-response.json")
         XCTAssertEqual(response.status, "ok", response.message ?? "")
         let g = try XCTUnwrap(response.georeference, response.message ?? "no georeference")
-        let worst = try maxGroundError(g.pixelToMercator, scene)
+        let worst = try maxGroundError(g, scene)
         XCTAssertLessThan(worst, 90, "photo contour georeference max error \(worst) m (\(response.method ?? "-"))")
         note("Photo contours: \(response.method ?? "-"), \(String(format: "%.1f", Date().timeIntervalSince(started))) s, max error \(String(format: "%.1f", worst)) m")
     }
@@ -271,11 +480,36 @@ final class PhotoE2ETests: XCTestCase {
     private func attachJSON<T: Encodable>(_ value: T, name: String) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        encoder.nonConformingFloatEncodingStrategy = .convertToString(positiveInfinity: "inf", negativeInfinity: "-inf",
+                                                                       nan: "nan")
         guard let data = try? encoder.encode(value) else { return }
         let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    /// The image, downscaled, with outlines drawn on it (for the result bundle).
+    private func attachOutlines(_ image: CGImage, _ outlines: [(PhotoQuad, CGColor)], name: String) {
+        guard let small = MapPhotoRectifier.downscaled(image, maxLongSide: 1200),
+              let ctx = TileStore.makeContext(width: small.width, height: small.height)
+        else { return }
+        let width = CGFloat(small.width)
+        let height = CGFloat(small.height)
+        ctx.draw(small, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let sx = width / CGFloat(image.width)
+        let sy = height / CGFloat(image.height)
+        ctx.setLineWidth(3)
+        for (quad, color) in outlines {
+            // Core Graphics' origin is bottom-left.
+            let points = quad.points.map { CGPoint(x: $0.x * sx, y: height - $0.y * sy) }
+            ctx.setStrokeColor(color)
+            ctx.addLines(between: points)
+            ctx.closePath()
+            ctx.strokePath()
+        }
+        guard let drawn = ctx.makeImage() else { return }
+        attachImage(drawn, name: name)
     }
 
     /// Small JPEG preview in the result bundle.

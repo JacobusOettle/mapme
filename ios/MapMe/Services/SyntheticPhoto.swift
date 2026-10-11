@@ -187,6 +187,42 @@ enum SyntheticPhoto {
         return try make(page: page)
     }
 
+    /// Corners of the sheet in the bundled real photo (fixtures/grootkloof/photo/truth.json
+    /// `page_quad`), as fractions of the photo's width and height, TL, TR, BR, BL.
+    static let samplePhotoSheet: [(x: Double, y: Double)] = [
+        (0.1175, 0.0873), (0.8445, 0.0873), (0.9049, 0.9150), (0.0248, 0.9510),
+    ]
+
+    /// What the `-importSamplePhoto` launch argument imports: the real phone photo of the printed
+    /// sheet (on a wooden table, folded in four) when the Debug build bundles it as
+    /// `SamplePhoto.jpg`, else a synthetic photo of the bundled sample map (`sample()`). `corners`
+    /// is the sheet's outline, which the importer offers only when detection finds nothing.
+    static func samplePhoto() throws -> (jpeg: Data, corners: PhotoQuad) {
+        if let url = Bundle.main.url(forResource: "SamplePhoto", withExtension: "jpg"),
+           let data = try? Data(contentsOf: url),
+           let size = uprightSize(of: data) {
+            let points = samplePhotoSheet.map { CGPoint(x: CGFloat($0.x) * size.width, y: CGFloat($0.y) * size.height) }
+            if let corners = PhotoQuad(points: points) {
+                return (data, corners)
+            }
+        }
+        let synthetic = try sample()
+        return (synthetic.jpeg, synthetic.corners)
+    }
+
+    /// Pixel size of an image as the importer decodes it (EXIF orientation applied).
+    private static func uprightSize(of data: Data) -> CGSize? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
+              width > 0, height > 0
+        else { return nil }
+        let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        // Orientations 5…8 turn the image a quarter turn.
+        return orientation >= 5 ? CGSize(width: height, height: width) : CGSize(width: width, height: height)
+    }
+
     private static let context = CIContext(options: [.cacheIntermediates: false])
 
     private static func jpegWithCameraEXIF(_ image: CGImage, focalLength35mm: Double) -> Data? {
