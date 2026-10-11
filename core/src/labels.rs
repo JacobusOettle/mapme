@@ -1006,6 +1006,8 @@ pub fn classify_pois(obs: &[OcrObservation]) -> Vec<PoiLabel> {
         out.push(PoiLabel { name, kind: poi_kind(&words), elevation_m: elevation, x, y });
     }
 
+    drop_truncated_heights(&mut out);
+
     // Peaks without a height take the nearest spot height next to them.
     let spots: Vec<(f64, f64, f64)> =
         out.iter().filter(|p| p.kind == PoiKind::SpotHeight).filter_map(|p| Some((p.x, p.y, p.elevation_m?))).collect();
@@ -1020,6 +1022,28 @@ pub fn classify_pois(obs: &[OcrObservation]) -> Vec<PoiLabel> {
         }
     }
     out
+}
+
+/// Drop spot heights that are misreads with digits missing, such as "112" for a "1412" that a
+/// grid line cuts through: on a sheet whose heights nearly all have the same number of digits
+/// (at least 4 heights, 80 % alike), a height with fewer digits and under half the median is
+/// not believable. Sheets that span lowland and mountain keep their short heights.
+fn drop_truncated_heights(pois: &mut Vec<PoiLabel>) {
+    let digits = |h: f64| (h.abs().trunc() as u64).to_string().len();
+    let heights: Vec<f64> =
+        pois.iter().filter(|p| p.kind == PoiKind::SpotHeight).filter_map(|p| p.elevation_m).collect();
+    if heights.len() < 4 {
+        return;
+    }
+    let Some(med) = median(heights.clone()) else { return };
+    let typical = digits(med);
+    let alike = heights.iter().filter(|&&h| digits(h) == typical).count();
+    if (alike as f64) < 0.8 * heights.len() as f64 {
+        return;
+    }
+    pois.retain(|p| {
+        p.kind != PoiKind::SpotHeight || p.elevation_m.is_none_or(|h| digits(h) >= typical || h >= 0.5 * med)
+    });
 }
 
 /// "5m", "100m", "2km" style measurement tokens.
@@ -1205,6 +1229,22 @@ mod tests {
         assert!(find("1500").is_none(), "contour label");
         assert!(find("Cave").is_none(), "generic legend word");
         assert_eq!(p.iter().filter(|q| q.name == "KWAMI LODGE").count(), 1);
+    }
+
+    #[test]
+    fn truncated_spot_heights_are_dropped() {
+        let heights = ["1488", "1518", "1412", "1526", "1604", "112"];
+        let obs: Vec<_> =
+            heights.iter().enumerate().map(|(k, t)| ob(t, 200.0 + 300.0 * k as f64, 400.0, 54.0, 20.0)).collect();
+        let p = classify_pois(&obs);
+        let names: Vec<&str> = p.iter().map(|q| q.name.as_str()).collect();
+        assert_eq!(names, vec!["1488", "1518", "1412", "1526", "1604"], "{p:?}");
+
+        // Lowland and mountain on one sheet: short heights are not the exception.
+        let heights = ["112", "348", "905", "1210", "1488", "760"];
+        let obs: Vec<_> =
+            heights.iter().enumerate().map(|(k, t)| ob(t, 200.0 + 300.0 * k as f64, 400.0, 54.0, 20.0)).collect();
+        assert_eq!(classify_pois(&obs).len(), heights.len());
     }
 
     #[test]

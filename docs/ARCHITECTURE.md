@@ -246,6 +246,7 @@ char      *mm_session_georeference(MMSession *s, const char *request_json);
 float      mm_session_progress(const MMSession *s);   /* 0..1, thread-safe */
 void       mm_session_cancel(MMSession *s);           /* thread-safe */
 char      *mm_fit_control_points(const char *request_json);
+char      *mm_detect_page(const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t bytes_per_row);
 char      *mm_version(void);
 void       mm_string_free(char *s);
 ```
@@ -255,6 +256,19 @@ All strings are UTF-8 JSON and owned by the caller after return; free them with
 caught and turned into `{"status":"failed","message":...}`. A session is not
 thread-safe except for `progress`/`cancel`. RGBA input is 8-bit, alpha
 ignored, rows `bytes_per_row` apart, copied by the session.
+
+`mm_detect_page` finds the sheet of paper in a photo (`page.rs`, stateless,
+~20–60 ms for 12–24 MP): `{"status":"ok","quad":[[x,y]×4],"confidence","coverage"}`
+with the corners TL, TR, BR, BL in the given raster's pixels, or
+`{"status":"failed","message"}` when nothing stands out or the page fills the
+frame (an already-flat scan). It works on a ≤ 800 px copy: brightness relative
+to the local paper level times closeness to the paper colour, the largest solid
+region away from the border, its best quadrilateral; then each side is refined
+on full-resolution profiles (a printed frame just inside the edge is not taken
+for it) with a robust line fit, and corners are the lines' intersections. On
+the real photo (`fixtures/grootkloof/photo`) the corners are within 4 px
+(0.12 % of the diagonal), and within 0.25 % when the photo is rotated, scaled,
+cropped, darkened, blurred or re-tilted.
 
 ### Georeference request
 
@@ -311,7 +325,9 @@ image's pixels, like everything else.
 * `rotation_deg` is the clockwise angle of map-up from true north.
 * `corners` are the image corners TL, TR, BR, BL as `[lat, lon]`.
 * `pois` are map labels classified as place names, peaks or spot heights, in
-  base-image pixels.
+  base-image pixels. A spot height with fewer digits than
+  nearly all others on the sheet and under half their median is dropped as a
+  misread (e.g. "112" for a "1412" cut by a grid line).
 * `warp` (photo mode only; absent or `null` otherwise) is a smooth correction
   for paper that does not lie flat (fold creases, curl). No single homography
   fits a folded sheet: on `fixtures/grootkloof/photo` (a phone photo of the
@@ -376,6 +392,7 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
                       projective for photos) + scoring
   src/warp.rs         photo warp: offset lattice for paper that is not flat, fitted to
                       traced grid lines and contours, held-out checks, inverse
+  src/page.rs         page (paper sheet) finder for photos: mm_detect_page
   src/labels.rs       coordinate / scale / POI label parsing
   src/grid.rs         grid-line detection, label↔line association, GCP fit
   src/control_points.rs manual calibration fits
@@ -410,7 +427,10 @@ scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
   session → DEM loop, with progress stages), `POIService` (map labels +
   waypoints + OpenStreetMap Overpass).
 * `Services/` also has the photo path: `PhotoQuadDetector` (Vision document
-  segmentation / rectangles + sub-pixel edge snapping), `MapPhotoRectifier`
+  segmentation / rectangles and the core's `mm_detect_page` on the same
+  downscaled photo; the core's page is used when Vision returns the whole frame
+  or nothing and it is confident, Vision's when both agree, otherwise the one
+  with the clearer border; then sub-pixel edge snapping), `MapPhotoRectifier`
   (CIPerspectiveCorrection with aspect-ratio recovery) and, in Debug builds,
   `SyntheticPhoto` for tests.
 * `Views/` holds the Library, the import flow (corner editor for photos, then
