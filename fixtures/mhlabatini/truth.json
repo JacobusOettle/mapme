@@ -1,0 +1,58 @@
+{
+  "description": "MCSA Magaliesberg Sheet 02 Mhlabatini & Fern Kloof. Ground truth from the 1-arc-minute graticule, measured independently of the core (fixtures/tools/measure_graticule.py): each line's position is the median, over 300 px segments along it, of the sub-pixel centroid of the thin dark graticule line where the paper around it is blank (map.jpg, 3507x4960 px, 300 dpi; the lines are axis-aligned: segment positions along each line agree to about 0.1 px). Values from the printed labels, read by eye. Labels (laid out as on Grootkloof): 25°48'00\"S … 25°52'00\"S printed vertically just inside the left frame (the 25°52' line runs under the legend box for most of its length), 27°18'00\"E … 27°21'00\"E along the bottom. The 27°18' meridian coincides with the inner frame line (x 117.6 measured; 993.96 - 876.31 = 117.65 from the spacing; its label is centred there). Spacings 973.3-973.9 px per minute of latitude and 876.3 px per minute of longitude, as on Grootkloof; a Web Mercator fit of each axis leaves residuals under 0.05 px. Map frame as on Grootkloof (double frame lines at x 106/118 and 3388/3400, y 106/118 and 4841/4853). Contour colour: median of the brown contour line pixels.",
+  "image_width": 3507,
+  "image_height": 4960,
+  "lat_lines": [
+    {
+      "y": 790.29,
+      "lat": -25.8
+    },
+    {
+      "y": 1763.65,
+      "lat": -25.816666666666666
+    },
+    {
+      "y": 2737.26,
+      "lat": -25.833333333333332
+    },
+    {
+      "y": 3710.83,
+      "lat": -25.85
+    },
+    {
+      "y": 4684.69,
+      "lat": -25.866666666666667
+    }
+  ],
+  "lon_lines": [
+    {
+      "x": 117.65,
+      "lon": 27.3
+    },
+    {
+      "x": 993.96,
+      "lon": 27.316666666666666
+    },
+    {
+      "x": 1870.31,
+      "lon": 27.333333333333332
+    },
+    {
+      "x": 2746.59,
+      "lon": 27.35
+    }
+  ],
+  "map_frame_px": [
+    107,
+    106,
+    3399,
+    4841
+  ],
+  "scale_denominator": 25000,
+  "contour_interval_m": 5,
+  "contour_rgb": [
+    167,
+    151,
+    134
+  ]
+}

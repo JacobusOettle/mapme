@@ -1,0 +1,58 @@
+{
+  "description": "MCSA Magaliesberg Sheet 07 Castle Gorge. Ground truth from the 1-arc-minute graticule, measured independently of the core (fixtures/tools/measure_graticule.py): each line's position is the median, over 300 px segments along it, of the sub-pixel centroid of the thin dark graticule line where the paper around it is blank (map.jpg, 3507x4960 px, 300 dpi; the lines are axis-aligned: segment positions along each line agree to about 0.1 px). Values from the printed labels, read by eye. Labels (laid out as on Grootkloof): 25°47'00\"S … 25°51'00\"S printed vertically just inside the left frame, 27°34'00\"E … 27°37'00\"E along the bottom (27°34' runs into the 'GIS V1 Sept 2017 - Eras Gous' credit). Spacings 973.3-973.9 px per minute of latitude and 876.3 px per minute of longitude, as on Grootkloof; a Web Mercator fit of each axis leaves residuals under 0.05 px. Map frame as on Grootkloof (double frame lines at x 106/118 and 3388/3400, y 106/118 and 4841/4853). Contour colour: median of the brown contour line pixels.",
+  "image_width": 3507,
+  "image_height": 4960,
+  "lat_lines": [
+    {
+      "y": 607.09,
+      "lat": -25.783333333333335
+    },
+    {
+      "y": 1580.34,
+      "lat": -25.8
+    },
+    {
+      "y": 2553.69,
+      "lat": -25.816666666666666
+    },
+    {
+      "y": 3527.29,
+      "lat": -25.833333333333332
+    },
+    {
+      "y": 4500.91,
+      "lat": -25.85
+    }
+  ],
+  "lon_lines": [
+    {
+      "x": 390.67,
+      "lon": 27.566666666666666
+    },
+    {
+      "x": 1267.02,
+      "lon": 27.583333333333332
+    },
+    {
+      "x": 2143.35,
+      "lon": 27.6
+    },
+    {
+      "x": 3019.62,
+      "lon": 27.616666666666667
+    }
+  ],
+  "map_frame_px": [
+    107,
+    106,
+    3399,
+    4841
+  ],
+  "scale_denominator": 25000,
+  "contour_interval_m": 5,
+  "contour_rgb": [
+    167,
+    151,
+    134
+  ]
+}

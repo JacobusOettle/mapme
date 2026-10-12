@@ -652,3 +652,53 @@ pub fn side_by_side(a: &Rgb8, b: &Rgb8, gap: usize) -> Rgb8 {
     }
     Rgb8::from_rgb(w, h, data).unwrap()
 }
+
+// ---------------------------------------------------------------------------
+// Other sheets of the series (fixtures/castle-gorge, fixtures/mhlabatini)
+// ---------------------------------------------------------------------------
+
+/// `fixtures/<name>`.
+pub fn sheet_dir(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures").join(name)
+}
+
+/// The `observations` of `<dir>/ocr.json`.
+pub fn load_ocr(dir: &std::path::Path) -> Vec<OcrObservation> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("ocr.json")).unwrap()).unwrap();
+    serde_json::from_value(v["observations"].clone()).unwrap()
+}
+
+/// A graticule intersection: (pixel (x, y), (lat, lon)).
+pub type GraticulePoint = ((f64, f64), (f64, f64));
+
+/// The graticule intersections of `<dir>/truth.json`.
+pub fn graticule_truth(dir: &std::path::Path) -> Vec<GraticulePoint> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("truth.json")).unwrap()).unwrap();
+    let mut out = Vec::new();
+    for la in v["lat_lines"].as_array().unwrap() {
+        for lo in v["lon_lines"].as_array().unwrap() {
+            out.push((
+                (lo["x"].as_f64().unwrap(), la["y"].as_f64().unwrap()),
+                (la["lat"].as_f64().unwrap(), lo["lon"].as_f64().unwrap()),
+            ));
+        }
+    }
+    out
+}
+
+/// Ground distance (m) at the worst of `pts` (`graticule_truth`) between where `h`
+/// (pixel → Web Mercator) puts the intersection and where it is.
+pub fn max_graticule_error_m(h: &Homography, pts: &[GraticulePoint]) -> f64 {
+    use mapme_core::geo::{haversine_m, merc_to_latlon, LatLon};
+    pts.iter()
+        .map(|&((x, y), (lat, lon))| {
+            let (mx, my) = h.apply(x, y);
+            let (la, lo) = merc_to_latlon(mx, my);
+            if la.is_finite() && lo.is_finite() {
+                haversine_m(LatLon::new(la, lo), LatLon::new(lat, lon))
+            } else {
+                f64::INFINITY
+            }
+        })
+        .fold(0.0, f64::max)
+}
