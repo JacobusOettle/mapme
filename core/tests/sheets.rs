@@ -569,7 +569,7 @@ fn pois_on_the_sheets() {
     for n in ["KWAMI LODGE", "SPARKLING WATERS HOTEL", "WOODY GULLY", "CAVE KLOOF", "1614"] {
         assert!(groot_rapid.contains(&n), "{n}: {groot_rapid:?}");
     }
-    for n in ["LONG POOL", "LIGHTNING RAVINE", "NEEDLE GULLY", "PINACLE GULLY", "1769", "1283"] {
+    for n in ["LONG POOL", "LIGHTNING RAVINE", "NEEDLE GULLY", "PINACLE GULLY", "KRAAL", "1769", "1283"] {
         assert!(castle.contains(&n), "{n}: {castle:?}");
     }
     for n in ["AASVOELKRANS", "AASVOEL GULLY", "MHLABATINIPARKING", "MOUNT SERENE", "1754"] {
@@ -770,6 +770,204 @@ fn vision_ocr_locates_the_sheets() {
             for bad in ["°", "00\"", "peren", "trig bea", "mcsa", "magaliesberg sheet", "annual change"] {
                 assert!(!n.contains(bad), "{dir}: {p:?}");
             }
+        }
+    }
+}
+
+/// The Nearby list on Apple Vision's reads (the app's request, the GPS 60–90 km away): every
+/// name and spot height printed on the sheet that Vision read, once, and nothing else.
+///
+/// Checked against the sheets' images. Before the clean-up of Vision's misreads the lists also
+/// held "MIODLE RIDGEKIOOF" (a second read of MIDDLE RIDGE KLOOF), "UAMERKOD KI OOF" (of HAMERKOP
+/// KLOOF), "KEED RIGHT" (KEEP RIGHT), pieces of ROOIKRANTZ GULLY ("ROOIKRI", "ANTZ", "PHANL
+/// GULLI"), the imprint "ISV1 Sept" and "KUMB." (KUMBA, cut by the frame), and read "WCASTLE GORGE
+/// WATERFALL (LOWER)", "1KWAMI LODGE", "B KONG POOL", "STILE 1.7Km", "PIHRANA POO", "CASCADE KL",
+/// "EASY GUL", "GÁTE" and "AČCOMMODATION"; the spot height "1501 A" (its triangle read as an A)
+/// was lost. Known misreads that stay (no second read to tell): "HAMERKOR GATE" (HAMERKOP),
+/// "MILORHO LODGE", "MARETEWA RIVER" (MARETLWANE), "KUDU KONAÍ", "PARAMOUNT CONFERENCE & ADVENTU"
+/// and the height "2015" (a 1700 contour label read across); "ZIMBABWE" and "HAMERKOP" are the
+/// first words of the turned labels ZIMBABWE KLOOF and HAMERKOP GULLY, whose other word Vision
+/// did not read. Not read at all: MIDDLE RIDGE (taken for a piece of MIDDLE RIDGE KLOOF), CAVE and
+/// CAVE KLOOF (a legend word, lettering read as large as the title) and FERN KLOOF (idem).
+#[test]
+fn vision_pois_are_the_names_printed_on_the_sheets() {
+    let _g = serial();
+    let pretoria = (-25.75, 28.19);
+    let sheets: [(&str, &[&str]); 3] = [
+        (
+            "grootkloof",
+            &[
+                "SUGARBUSH HILL COUNTRY COTTAGE",
+                "PARAMOUNT CONFERENCE & ADVENTU",
+                "RIETFONTEIN VALLEY",
+                "HAMERKOR GATE",
+                "SPARKLING WATERS HOTEL",
+                "BARTLETT FARM PARKING",
+                "BARTLETT/FARM GATE",
+                "MILORHO LODGE",
+                "GROOTKLOOF PEDESTRIAN GATE",
+                "YSTERHOUT KLOOF",
+                "WOODPECKER GULLY",
+                "CANDELABRA",
+                "ROTSBOOM KLOOF",
+                "EASY GULLY",
+                "WOODY GULLY",
+                "HAMERKOP",
+                "GROOTKLOOF",
+                "HAMERKOP KLOOF",
+                "KWAMI LODGE",
+                "1496",
+                "1468",
+                "1394",
+                "1388",
+                "1502",
+                "1392",
+                "1446",
+                "1424",
+                "1372",
+                "1479",
+                "1494",
+                "1488",
+                "1518",
+                "1526",
+                "1614",
+                "1536",
+                "1504",
+                "1582",
+                "1719",
+                "1741",
+                "1716",
+                "1696",
+                "1742",
+                "2015",
+                "1749",
+                "1742",
+                "1719",
+                "1416",
+                "1754",
+                "1556",
+                "1471",
+                "1533",
+                "1514",
+                "1516",
+                "1504",
+            ],
+        ),
+        (
+            "castle-gorge",
+            &[
+                "BUSSHBREAK ACCOMMODATION",
+                "FEATHERS B&B",
+                "KUDU KONAÍ",
+                "STAFF HOUSES",
+                "MARETLWANE BUSH SCHOOL",
+                "MARETEWA RIVER",
+                "AGTERSKOT",
+                "TENTED CAMP",
+                "MIDDLE RIDGE KLOOF",
+                "ZIMBABWE",
+                "ZIMBABWE VLAKTE",
+                "BRAMBLE GULLY",
+                "CASTLE GORGE WATERFALL (LOWER)",
+                "CASTLE GORGE WATERFALL (UPPER)",
+                "GRASSY POOL",
+                "STILE",
+                "PIHRANA POOL",
+                "RAND WATER BOX 2",
+                "TURN RIGHT AT SIGN",
+                "VEHICLE GATE",
+                "KEEP RIGHT",
+                "RAND WATER BOX 1",
+                "LONG POOL",
+                "KRAAL",
+                "UPPER CASTLE GULLY",
+                "SIGN POST",
+                "NO ENTRY SIGN",
+                "PRIVATE PROPERTY",
+                "KEEP LEFT",
+                "CASCADE KLOOF",
+                "CROSSING",
+                "JOINS DIRT ROAD",
+                "MAGALIESBERG MOUNTAIN LODGE",
+                "GAUTENG",
+                "NORTH WEST",
+                "PINACLE GULLY",
+                "LIGHTNING RAVINE",
+                "NEEDLE GULLY",
+                "SHOOP MOUNTAIN LODGE",
+                "1246",
+                "1529",
+                "1492",
+                "1501",
+                "1546",
+                "1598",
+                "1558",
+                "1556",
+                "1497",
+                "1503",
+                "1568",
+                "1716",
+                "1769",
+                "1331",
+            ],
+        ),
+        (
+            // Clean before the clean-up of Vision's misreads; unchanged by it.
+            "mhlabatini",
+            &[
+                "BERGHEIN",
+                "MHLABATINI PARKING",
+                "MHLABATINI KLOOF",
+                "CAMP GULLY",
+                "RETIEP'SKLOOF CATCHMENT AREA",
+                "AASVOËL GULLY",
+                "AASVOËLKRANS",
+                "AASVOELKRANS RESORT",
+                "AM HANG SELF-CATERIN",
+                "MOUNT SERENE",
+                "OLIFANTSHOEK PRIMARY SCHOOL",
+                "NALE",
+                "1248",
+                "1239",
+                "1259",
+                "1316",
+                "1718",
+                "1213",
+                "1754",
+                "1482",
+                "1688",
+                "1512",
+                "1626",
+                "1324",
+                "1636",
+                "1649",
+                "1464",
+                "1312",
+                "1413",
+                "1728",
+                "1202",
+                "1472",
+                "1306",
+            ],
+        ),
+    ];
+    for (dir, want) in sheets {
+        let path = sheet_dir(dir);
+        let s = Session::new(load_jpeg_file(&path.join("map.jpg")));
+        let r = s.georeference(&request(vision_ocr(&path), pretoria, &["grid"]));
+        assert_eq!((r.status, r.method), (Status::Ok, Some(Method::Grid)), "{dir}: {}", r.message);
+        let mut got: Vec<&str> = r.pois.iter().map(|p| p.name.as_str()).collect();
+        let mut want = want.to_vec();
+        got.sort_unstable();
+        want.sort_unstable();
+        let missing: Vec<&&str> = want.iter().filter(|n| !got.contains(n)).collect();
+        let extra: Vec<&&str> = got.iter().filter(|n| !want.contains(n)).collect();
+        assert_eq!(got, want, "{dir}: missing {missing:?}, extra {extra:?}");
+        let kind = |n: &str| r.pois.iter().find(|p| p.name == n).map(|p| p.kind);
+        if dir == "castle-gorge" {
+            assert_eq!(kind("PIHRANA POOL"), Some(PoiKind::Water));
+            assert_eq!(kind("LONG POOL"), Some(PoiKind::Water));
+            assert_eq!(kind("1501"), Some(PoiKind::SpotHeight));
         }
     }
 }

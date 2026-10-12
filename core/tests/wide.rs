@@ -344,6 +344,36 @@ fn hint_queries_of_the_three_sheets() {
         "turn",
         "toilet",
     ];
+    // Apple Vision's reads: the confirmed titles first, in this order, and none of the misreads,
+    // pieces and furniture Vision reads around them.
+    let vision: [(&str, &[&str]); 3] = [
+        ("grootkloof", &["HAMERKOP", "GROOTKLOOF", "MAGALIESBERG"]),
+        ("castle-gorge", &["CASTLE GORGE", "MAGALIESBERG"]),
+        ("mhlabatini", &["MAGALIESBERG", "MHLABATINI", "FERN KLOOF"]),
+    ];
+    for (dir, first) in vision {
+        let q = hint_queries(&ocr_file(fixtures.join(dir).join("vision-ocr.json")));
+        assert_eq!(&q[..first.len()], first, "{dir}: {q:?}");
+        for bad in [
+            "DOTKLOOF",
+            "KDO8PROPERTY",
+            "ual Change per year West",
+            "HTA FAHIN",
+            "ARIG BEACON",
+            "KEED RIGHT",
+            "B KONG POOL",
+            "D LONG POOL",
+            "NAMI LODGE",
+            "EASY GUL",
+            "LABATINI",
+        ] {
+            assert!(!q.iter().any(|x| x == bad), "{dir}: {bad} in {q:?}");
+        }
+        // Then names of several words: no single word before the last of them.
+        let rest = &q[first.len()..];
+        let multi = rest.iter().rposition(|x| x.contains(' ')).unwrap_or(0);
+        assert!(rest[..multi].iter().all(|x| x.contains(' ')), "{dir}: {q:?}");
+    }
     for (name, obs, want) in sheets {
         let q = hint_queries(&obs);
         eprintln!("[hint_queries] {name}: {q:?}");

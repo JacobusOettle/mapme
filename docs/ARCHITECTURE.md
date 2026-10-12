@@ -76,6 +76,7 @@ order:
    have the printed scale when the request gives one (dpi and an OCR'd 1:n).
    If labels exist but no lines are found, label centres are used directly as
    a coarse fit, which is then refined with contours when a DEM is available.
+   See *Grid labels as a phone reads them* for the rules.
 2. **Contour matching against a DEM** (`contour.rs`, `skeleton.rs`,
    `search.rs`, `refine.rs`). This needs somewhere to look: the GPS position
    (the map is assumed to lie within `search_radius_m` of you, 50 km by
@@ -111,6 +112,82 @@ order:
    points on the map and on an Apple satellite map (or "I'm here" at their
    GPS position). 2 points give a similarity, 3 an affine, 4+ an affine
    (homography for photos).
+
+### Grid labels as a phone reads them
+
+Phone OCR garbles the graticule labels printed over the map (Apple Vision and
+the RapidOCR stand-in on the MCSA sheets: `25°48/00\S`, `2595000"s`,
+`2548100s`, `25-4900s`, `27%3400cEV1Sept2017-ErasGous`), reads some twice and
+misses others. The grid path copes, and rejects the fits misreads could make:
+
+* **Readings and their costs** (`labels::coordinate_readings`). Every plausible
+  reading of a label, cheapest first: the label as printed (cost 0), then
+  `fuzzy_dms`, a template of degrees (1–3 digits), mark, minutes, mark,
+  [seconds, mark], hemisphere. A mark read as the printed one is free; as any
+  other symbol 1; as a letter OCR confuses with it 1 (o for °; l, I, i, j for ';
+  c, u, l, I, i for "); as a digit 2 (9 or 0 for °, 1 for ', 1 or 4 for ");
+  lost 1 (two characters may stand for one mark: `11` for "). A zero read as
+  O, o, Q or D and a one read as l, I or | cost 1 each; a lowercase hemisphere
+  letter is free, `5` for S costs 1 (only after a symbol for a mark); no
+  hemisphere (a `Degrees` reading, either axis) costs 1 and needs the seconds
+  and a symbol for a mark. At most 5 repairs. A reading never starts right
+  after a °, ' or " (`°53'00"S` is the end of a cut label, not 53°S); a text
+  holding two different coordinates gives none. `parse_coordinate` (label
+  hints, bands) takes a garbled label only when all its cheapest readings
+  agree.
+* **Alternatives**. Every reading is a grid candidate: the fit keeps the one
+  the other labels agree with (`25-50'00"S` is 50°S as printed, 25°50'S with a
+  dash for the degree sign). A repaired reading of a label that also reads as
+  printed (`340000E`: an easting, or 34°00'00"E with every mark lost) is an
+  *alternative*: it may back up an axis fit but never be all of it, so six-digit
+  UTM labels cannot make a graticule 18× the scale.
+* **Units** (`grid::grid_unit`). Grid lines are drawn at a round interval and
+  labelled with its multiples, so a line fit's step between adjacent lines may
+  be at most 4.5× the finest standard unit its label values share
+  (`MAX_LINE_STEP_UNITS`; units 10° … 1", with the quadrangle intervals 2°30',
+  7'30" and 2'30" of USGS sheets and their ticks; UTM 100 km … 100 m):
+  24°00'11" and 27°23' on adjacent meridians are no 3.4° grid.
+* **Equal scale**. A fit must be conformal: equal Mercator metres per pixel
+  along x and y (1/cos φ more along y on a plain lat/lon map) within 6 % for
+  line fits, 15 % for labels-only fits (`LABELS_CONFORMAL_TOL`: a misread label
+  is off by a whole interval) and 35 % for photos. A label in a corner of the
+  map is a latitude when its text runs up or down. `n_lat`/`n_lon` count
+  distinct values, not reads.
+* **Labels-only fits** (label centres, no line found): confidence at most
+  0.45, under the app's 0.5 "check this" threshold.
+* **One label on an axis** (`GridResult::lone_label`,
+  `diagnostics.grid.lone_label`; scans only). When no fit through two labels
+  per axis exists, an axis whose edge-of-map labels all allow one value is
+  fitted on the other axis' scale (slopes of opposite sign, the label's value
+  on its line, the other lines on round values by counting), then refitted
+  through the lines. It must earn its place: three lines on their values on
+  each axis (`LONE_MIN_LINES`), every fit within one line or label of the best
+  puts the map in the same place, within 250 km of the GPS fix when there is
+  one, and the printed scale (below). With contours requested the terrain
+  judges it (`georef::lone_check`, the zoom-13 tiles under the fit kept for the
+  session's later calls): `refine::fit_confidence` ≥ 0.5 confirms it ("Located
+  from 1 latitude and 2 longitude grid labels, confirmed by the terrain", full
+  confidence); enough contours on the DEM (`refine::fit_evidence` ≥ 0.5, from
+  the contour segments and the relief under them: full at 20 segments over
+  30 m) that fit badly (`refine::fit_quality` < 0.5) rule it out (dropped;
+  the contour search runs as usual); anything else (no
+  terrain, offline, a map without contours, flat ground) answers it at
+  confidence 0.45: "Only one latitude label could be read: check the dot
+  against your surroundings."
+* **Printed scale** (`georef::scale_agrees`). With the dpi and an OCR'd 1:n,
+  a labels-only or one-label fit's ground scale must lie in 0.75·prior·cos φ …
+  1.25·prior, the range the contour search would try.
+* **Hatching** (`grid::drop_hatching`). Coloured fill patterns (vegetation,
+  marsh) are long parallel coloured lines too: a run of three or more coloured
+  lines of one family, each within 50 px (or 1.5 % of the image across them)
+  of the next, is hatching and dropped, unless lines of the other family cross
+  it at about the same spacing (±25 %: a dense coloured grid on a small
+  screenshot; hatching runs one way). Grey and black lines are never dropped.
+
+`tests/stress.rs` damages the printed labels of the three MCSA sheets the way
+phone OCR does (seeded) and replays the app's request 60 km away without
+terrain: with two whole labels per axis 99.5–100 % are located within 5 m,
+and no answer is off by more than 50 m with confidence ≥ 0.5.
 
 ### Photo mode (`"photo": true`)
 
@@ -363,14 +440,9 @@ image's pixels, like everything else.
   request.
 * `method` is `"grid" | "labels" | "contours" | null`.
 * `hint_queries` (every response to a request with OCR text): names on the
-  map worth geocoding into `hints`, best first, at most 12: the title and the
-  series name (from furniture lines such as "MCSA MAGALIESBERG SHEET 3 OF 10"),
-  then place, peak and water names by text size. Legend entries (columns of
-  short labels, or legend, furniture and route-note words only, also when OCR
-  merged them: "DryWaterCourse", "NOENTRYSIGN"), scale bars, coordinates, spot
-  heights, credits ("GIS V1 Sept 2017 - …") and the same name read twice or
-  partially are left out. Grootkloof: `["GROOTKLOOF", "HAMERKOP",
-  "MAGALIESBERG", "SUGARBUSH HILL COUNTRY COTTAGE", "KWAMI LODGE"]`.
+  map worth geocoding into `hints`, best first, at most 12: the titles, then
+  the names of `pois` (see *Names on the map*). Grootkloof (Apple Vision):
+  `["HAMERKOP", "GROOTKLOOF", "MAGALIESBERG", "EASY GULLY", "WOODY GULLY", …]`.
 * `search` (whenever the contour search ran): its progress, for the app's
   "Searched 320 of 1 000 km" UI:
   `{"radius_m", "searched_radius_m", "coarse_zoom", "tiles_planned",
@@ -409,13 +481,9 @@ image's pixels, like everything else.
 * `scale_m_per_px` is in *ground* metres.
 * `rotation_deg` is the clockwise angle of map-up from true north.
 * `corners` are the image corners TL, TR, BR, BL as `[lat, lon]`.
-* `pois` are map labels classified as place names, peaks or spot heights, in
-  base-image pixels. A spot height with fewer digits than
-  nearly all others on the sheet and under half their median is dropped as a
-  misread (e.g. "112" for a "1412" cut by a grid line); so is one more than
-  150 m outside the terrain's elevations around it when the session holds
-  zoom-12/13 tiles under the located map (a peak keeps its name, not the
-  height; `diagnostics.spot_heights_off_dem`).
+* `pois` are map labels classified as place names, peaks, water or spot
+  heights, in base-image pixels, without the labels the grid used (see *Names
+  on the map*).
 * `warp` (photo mode only; absent or `null` otherwise) is a smooth correction
   for paper that does not lie flat (fold creases, curl). No single homography
   fits a folded sheet: on `fixtures/grootkloof/photo` (a phone photo of the
@@ -455,6 +523,128 @@ image's pixels, like everything else.
   ignores `warp` gets the flat-model answer. `diagnostics.warp` says how the
   warp was fitted (`source`: `"grid"` or `"contours"`, constraint counts, RMS
   before and after, largest offset).
+
+### Names on the map (`pois`, `hint_queries`)
+
+`labels::classify_pois` turns the OCR text into the Nearby list; the app shows
+it as read, so it must hold what is printed on the sheet, once, and nothing
+else. Apple Vision's own reads of the three MCSA sheets
+(`fixtures/*/vision-ocr.json`, iOS 26.2 simulator) are the reference:
+`tests/sheets.rs::vision_pois_are_the_names_printed_on_the_sheets` pins the
+exact lists, checked against the images.
+
+1. *Reads*. Identical text close together (several OCR passes) is one read,
+   the most confident.
+2. *Furniture* (never a POI): scale-bar numbers (three or more on a baseline
+   in arithmetic progression), legend columns (three or more short labels
+   sharing a left edge at line spacing), lettering over 1.6× the median text
+   height (the title), coordinates, a scale, angle marks, ©, imprints (a month
+   next to a year, or a version tag with a date: "ISV1 Sept 2017", "GIS V1
+   Sept 2017 - Eras Gous"), labels with a furniture word (`META_WORDS`:
+   "sheet", "declination", "contours", …) and labels of legend words only
+   (`LEGEND_WORDS`, also cut short or run together with their capitals:
+   "Non-Peren", "PerennialRiver"; a one-word name such as "Lakeview" or
+   "PARKVIEW" is a name).
+3. *Spot heights*: three or four digits, not a multiple of 50 (contour
+   labels), −400…8 850 m, also with the triangle read as a letter beside it
+   ("1501 A"). A height with fewer digits than nearly all others and under
+   half their median is a misread ("112" for a "1412" a grid line cuts); so is
+   a three-digit one well under a sheet of four-digit heights in one thousand
+   when the thousand added falls among them ("478" for 1478), unless other
+   three-digit heights lie just under them (a fjord, an alpine valley); and,
+   once the session holds the zoom-12/13 tiles under the located map, one
+   more than 150 m outside the terrain around it
+   (`diagnostics.spot_heights_off_dem`; a peak keeps its name). A peak takes
+   the nearest spot height within six text heights.
+4. *Names*. A trailing height becomes the elevation ("Sugarbush Hill 1523m"),
+   a trailing route distance goes ("STILE 1.7Km", "2,3 km"), symbols at the
+   ends go. Not a name: under three letters or 60 % letters, letters and
+   digits run together in most words ("GISV1$eet20x"), three letters or fewer
+   with no vowel or no consonant, or read up or down the map ("ERN", a piece
+   of a turned label), four such letters that are no lexicon word ("ANTZ"), a
+   lone abbreviation of four letters or fewer ("KUMB.", cut by the frame).
+5. *Mending* (`labels::mend_name`), with the sheet's own words as the
+   dictionary (`labels::Vocabulary`): a *known* word is one of the lexicon
+   (`LEGEND_WORDS`, `NOTE_WORDS`, `PLACE_WORDS`: feature words and their
+   qualifiers in English and Afrikaans) or one of four letters or more read
+   in two reads or more, accents aside.
+   * A lexicon word read with an accent loses it ("GÁTE", "AČCOMMODATION";
+     "AASVOËL" keeps its diaeresis).
+   * A stray glyph in front goes: a digit glued to a word ("1KWAMI LODGE"), a
+     lone letter before the words ("D LONG POOL", the pool's symbol; not
+     initials), or a letter glued to a known word when the two cannot start
+     a word ("WCASTLE", the waterfall's W; `plausible_onset` knows English,
+     Afrikaans, Nguni and other European onsets) or another read of the label
+     at the same place is without it ("PLONG POOL" beside "LONG POOL"). A
+     letter glued behind a known word likewise ("KLOOFI"; not an s).
+   * A last word cut short is completed when exactly one known word on the
+     sheet starts with it, one to three letters longer ("EASY GUL" → "EASY
+     GULLY" beside "WOODY GULLY", "CASCADE KL" → "CASCADE KLOOF", "PIHRANA
+     POO" → "PIHRANA POOL").
+   * A name the OCR was unsure of (confidence under 0.5; Vision gives 0.3 to
+     its guesses) stays only when all its words are known ("PHANL GULLI"
+     goes).
+6. *Pieces and misreads* (`drop_fragments`). A name is a piece of a read next
+   to it when that read holds its text (exactly, or within one edit from five
+   characters) or their boxes all but coincide and they share most of their
+   text; the longer read stays ("KUDUKONA" over "UDU", "1283" over "283"),
+   and a piece of legend text goes with it. Two reads of one label (boxes
+   that all but coincide, lengths within one letter, neither a piece of the
+   other, at most a quarter of the letters apart: "MIDDLE RIDGE KLOOF" /
+   "MIODLE RIDGEKIOOF", "HAMERKOP KLOOF" / "UAMERKOD KI OOF") keep the
+   better read: the clearly more confident one (by 0.25), else the one with
+   more letters in known words ("KEEP RIGHT" over "KEED RIGHT", "LONG POOL"
+   over "KONG POOL"), more words, more confident, longer. An unreadable read
+   ("21728") absorbs nothing.
+7. *Garbled turned labels* (`drop_garbled_turned`). Labels printed up, down
+   or slanting along a stream are read worst: such a read with no known word
+   whose box (widened by a quarter of the text height) meets another such
+   read it shares no three characters with is a garbled piece ("ROOIKRI",
+   "ANTZ", "PHANL GULLI" of ROOIKRANTZ GULLY); so is one such read that is a
+   lone feature word ("GULLY" of UPPER CASTLE GULLY). A turned name on its
+   own stays ("GAUTENG", "CANDELABRA").
+
+On Vision's reads this leaves 54 POIs on Grootkloof (56 before), 53 on Castle
+Gorge (57) and the same 33 on Mhlabatini; on the RapidOCR stand-ins no name
+is lost. What stays wrong has no second read to correct it: "HAMERKOR GATE"
+(HAMERKOP), "MARETEWA RIVER" (MARETLWANE), "KUDU KONAÍ", the height "2015"
+(a 1700 contour label read across), and "ZIMBABWE" and "HAMERKOP", the first
+words of the turned ZIMBABWE KLOOF and HAMERKOP GULLY. Not read at all:
+MIDDLE RIDGE (taken for a piece of MIDDLE RIDGE KLOOF), CAVE (a legend word),
+and turned labels lettered nearly title size (CAVE KLOOF, FERN KLOOF).
+
+`hints::hint_queries` picks the names worth geocoding for a wide search
+(`hints`), best first, at most 12; the app looks up the first 8:
+
+1. *Titles*: lettering at least 1.6× the median font size across the map, and
+   furniture lines ("MCSA MAGALIESBERG SHEET 7 OF 10" → "MAGALIESBERG"; their
+   furniture words, numbers and short acronyms dropped), split at "&", "/",
+   " - " and the like, mended (`mend_name`: "FERN KLOOFI" → "FERN KLOOF").
+   Those another read on the sheet confirms come first (the title "CASTLE
+   GORGE" and "CASTLE GORGE WATERFALL" on the map), larger first; then the
+   others, less a misread of a confirmed one (one that shares 60 % of its
+   letters in a run: "DOTKLOOF" beside "GROOTKLOOF").
+2. *Names*: the place, peak and water names of `classify_pois` (so none of
+   its pieces, misreads or furniture), names of several words before single
+   words, then by font size and confidence (turned labels count 0.6×). Route
+   notes ("KEEP LEFT", "TURN RIGHT AT SIGN"), names of lexicon words only
+   ("KRAAL", "LONG POOL", "FARM GATE": they find no place), credits,
+   coordinates and heights are left out.
+3. The same letters read twice are one query, spaced as some read spaces
+   them ("CASTLEGORGE" → "CASTLE GORGE"); a query inside a longer one in text
+   at least as large, or inside a word of one ranked as high ("ABATINI" of
+   "MHLABATINI"), is a partial read; one with an acronym or a symbol glued to
+   another query is a glued read ("MCSAMAGALIESBERG").
+
+On Vision's reads: Grootkloof `["HAMERKOP", "GROOTKLOOF", "MAGALIESBERG",
+"EASY GULLY", "WOODY GULLY", "HAMERKOR GATE", "PARAMOUNT CONFERENCE",
+"SUGARBUSH HILL COUNTRY COTTAGE", "GROOTKLOOF PEDESTRIAN GATE", "BARTLETT FARM
+PARKING", "KWAMI LODGE", "RIETFONTEIN VALLEY"]`, Castle Gorge `["CASTLE
+GORGE", "MAGALIESBERG", "GRASSY POOL", "MARETLWANE BUSH SCHOOL", "RAND WATER
+BOX", …]`, Mhlabatini `["MAGALIESBERG", "MHLABATINI", "FERN KLOOF",
+"OLIFANTSHOEK PRIMARY SCHOOL", …]`; before, "DOTKLOOF", "KDO8PROPERTY", "ual
+Change per year West", "HTA FAHIN", "ARIG BEACON" and "B KONG POOL" were among
+them, "DOTKLOOF" first.
 
 ### Control point request/response
 
@@ -978,6 +1168,51 @@ scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
   with heading and a compass; overlays for the position puck, heading beam,
   accuracy, dotted trail, POI markers and waypoints), the stats card, Nearby
   sheet, Calibration (MapKit) and Settings.
+* Finding a map farther away ("Search wider", see *Wide search*). The first
+  search covers `AppSettings.searchRadiusKm` (50 km by default, 10–100 km in
+  Settings; a stored 20 km, the old default never picked on purpose, becomes
+  50 km). When it finds no match the import result and the Library's
+  "Search wider…" open `SearchWiderSheet`: 100, 250, 500 or 1 000 km (60–600 mi)
+  or a custom 10–2 000 km, the smallest preset at least 2.5× the radius
+  already searched selected; what it will download from `mm_search_estimate`
+  ("Wi-Fi recommended" from 25 MB), and on an expensive path (mobile data,
+  hotspot) Start asks first above 50 MB; "Use names on the map" on by
+  default. `WideSearch` holds those limits and the outcome kinds
+  (`GeorefFailure`: no terrain match, stopped at the tile limit, no
+  position, no contours, terrain unavailable, …) the result screen words
+  its message and buttons from. The search itself (`GeoreferenceService.run`):
+  * names first: unless the names are known from the first search, one
+    grid-only core call lists them (`hint_queries`); a grid answer of
+    confidence 0.5 or more ends the search there (`probeMinConfidence`: a
+    flagged one-label fit, which the first search's terrain may have ruled
+    out, does not). `HintGeocoder` looks up the first 8 with Apple Maps
+    (`MKLocalSearch` biased to the search circle, points of interest,
+    addresses and on iOS 18 physical features; 3 at a time, 4 s each, a
+    lookup that ignores cancellation is abandoned after a second's grace),
+    keeps each name's two nearest places within the radius, round-robin
+    over the names, skips places within 5 km of an earlier one, at most 12
+    hints of 15 km. Offline (`NetworkPathObserver`, an `NWPathMonitor`:
+    online, expensive, constrained) the lookups are skipped;
+  * then `TerrainPullLoop` answers the core's `need_dem` rounds with
+    `DEMService` for as long as the core makes progress (asks for tiles it
+    has not had, or its `search` status reaches farther, fetches more, tries
+    more hints or changes stage): no fixed number of rounds. Downloads stop
+    at the tile cap (600 for the first search, 2 500 or 1.5× the estimate
+    for a wide one) or when the first two rounds bring nothing (offline);
+    the tiles asked for are then marked missing so the core can finish with
+    what it has (at most 40 more calls). Asking only for tiles it already had
+    three times in a row without progress ends the loop (stalled), and 2 000
+    calls is the absolute bound;
+  * `DEMService` downloads at most 6 tiles at once, retries a transient
+    failure (timeout, dropped connection, 5xx, 429) twice after 0.4 and 1.2 s
+    (offline and 4xx fail at once), and keeps its disk cache
+    (`Caches/dem/z/x/y.png`) least-recently-used under 400 MB: a hit
+    refreshes the file's date, and every 8 MB written a background trim
+    brings it back to 80 % of the cap.
+
+  The import screen shows the stage and the core's `search` progress
+  ("Searched 320 of 1 000 km"), and a failed wide search says what was
+  searched.
 * Photos of paper maps keep the original as `source-photo.*` and the flattened
   page as `source.jpg` (the base raster); `MapDocument.photoSource` stores the
   page corners so they can be adjusted later, and georeferencing runs with

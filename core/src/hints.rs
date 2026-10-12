@@ -14,8 +14,9 @@
 
 use crate::geo::{destination, latlon_to_merc, merc_to_latlon, LatLon};
 use crate::labels::{
-    has_angle_mark, is_measure, legend_members, median, parse_coordinate, parse_height, parse_scale, scale_bar_members,
-    words_of, CoordValue, OcrObservation, LEGEND_WORDS, META_WORDS,
+    classify_pois_reads, has_angle_mark, imprint_text, is_measure, legend_members, lexicon_word, longest_common_run,
+    median, mend_name, parse_coordinate, parse_height, parse_scale, reads_across, scale_bar_members, words_of,
+    CoordValue, OcrObservation, PoiKind, Vocabulary, LEGEND_WORDS, META_WORDS, NOTE_WORDS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -295,46 +296,6 @@ pub fn merc_latlon(m: (f64, f64)) -> LatLon {
 // Names worth geocoding
 // ---------------------------------------------------------------------------
 
-/// Words of signage and route notes ("NO ENTRY SIGN", "KEEP LEFT", "TURN
-/// RIGHT AT SIGN"): never a place to geocode.
-const NOTE_WORDS: &[&str] = &[
-    "no",
-    "entry",
-    "sign",
-    "signs",
-    "signpost",
-    "post",
-    "keep",
-    "left",
-    "right",
-    "turn",
-    "at",
-    "private",
-    "property",
-    "vehicle",
-    "joins",
-    "toilet",
-    "stile",
-    "crossing",
-    "box",
-    "staff",
-    "houses",
-    "accommodation",
-    "tented",
-    "lodge",
-    "cottage",
-    "country",
-    "school",
-    "bush",
-    "lightning",
-    "upper",
-    "lower",
-    "north",
-    "south",
-    "east",
-    "west",
-];
-
 /// Words of map furniture (series, publisher, sheet number) besides `META_WORDS`.
 const FURNITURE_WORDS: &[&str] = &["mcsa", "map", "maps", "series", "no", "nr", "page", "of", "club", "mountain"];
 /// Publishers' acronyms: dropped from any label.
@@ -392,12 +353,6 @@ fn font_px(o: &OcrObservation) -> f64 {
     let n = o.text.chars().filter(|c| !c.is_whitespace()).count().max(1) as f64;
     let (w, h) = (o.bbox[2].abs(), o.bbox[3].abs());
     w.min(h).min(w.hypot(h) / (0.6 * n))
-}
-
-/// Does the box read as horizontal text (much wider than tall)?
-fn horizontal(o: &OcrObservation) -> bool {
-    let n = o.text.chars().filter(|c| !c.is_whitespace()).count().max(1) as f64;
-    o.bbox[2] >= o.bbox[3] * (0.3 * n).clamp(1.5, 4.0)
 }
 
 /// Upper-case letters of a name, the key for spotting the same name read twice.
@@ -495,88 +450,180 @@ fn clean_name(part: &str) -> Option<String> {
     Some(name)
 }
 
-/// Names on the map worth geocoding, best first (at most
-/// `MAX_HINT_QUERIES`): the title (large horizontal text) and the series
-/// name from furniture lines, then place, peak and water names by text size.
-/// Legend entries (columns of short labels, or legend and furniture words
-/// only, merged or not), scale bars, coordinates, spot heights, credits and
-/// route notes are left out; the same name read twice (or a partial read of
-/// it in smaller or equal text) is kept once, preferring the reading with spaces.
+/// Does `key` (letters, upper case) occur in `name` starting inside one of its words?
+fn inside_a_word(name: &str, key: &str) -> bool {
+    let full = letters_key(name);
+    let mut starts = vec![0usize];
+    for w in name.split_whitespace() {
+        let n = letters_key(w).len();
+        starts.push(starts.last().copied().unwrap_or(0) + n);
+    }
+    full.match_indices(key).any(|(i, _)| !starts.contains(&i))
+}
+
+/// Lettering this many times the median font size, across the map, is a title.
+const TITLE_FONT: f64 = 1.6;
+
+/// Names on the map worth geocoding, best first (at most `MAX_HINT_QUERIES`):
+///
+/// 1. the title (large lettering across the map) and the series name from furniture lines
+///    ("MCSA MAGALIESBERG SHEET 7 OF 10" → "MAGALIESBERG"): first those another read on the
+///    sheet confirms (the title "CASTLE GORGE" and the "CASTLE GORGE WATERFALL" on the map),
+///    then the others, less a misread of a confirmed one ("DOTKLOOF" beside "GROOTKLOOF");
+/// 2. the names of `classify_pois` (place, peak and water names, cleaned of legend entries,
+///    pieces and misreads), names of several words first, larger lettering first.
+///
+/// Route notes, words that only say what a place is ("KRAAL", "TENTED CAMP"), credits,
+/// coordinates and heights are left out; the same name read twice (or a partial read of it in
+/// smaller or equal text) is kept once, preferring the reading with spaces.
 pub fn hint_queries(obs: &[OcrObservation]) -> Vec<String> {
-    let mut merged: Vec<OcrObservation> = Vec::new();
+    let mut reads: Vec<OcrObservation> = Vec::new();
     for o in obs {
         let text = o.text.split_whitespace().collect::<Vec<_>>().join(" ");
         if text.is_empty() || !o.bbox.iter().all(|v| v.is_finite()) || o.bbox[2] <= 0.0 || o.bbox[3] <= 0.0 {
             continue;
         }
-        merged.push(OcrObservation { text, bbox: o.bbox, confidence: o.confidence });
+        reads.push(OcrObservation { text, bbox: o.bbox, confidence: o.confidence });
     }
-    if merged.is_empty() {
+    if reads.is_empty() {
         return Vec::new();
     }
-    let th = median(merged.iter().map(|o| o.text_height()).collect()).unwrap_or(20.0).max(1.0);
-    let fonts: Vec<f64> = merged.iter().map(font_px).collect();
-    let font_med = median(fonts.clone()).unwrap_or(th).max(1.0);
-    let scale_bar = scale_bar_members(&merged, th);
-    let legend = legend_members(&merged, th);
-    // (name, key, score, font)
-    let mut found: Vec<(String, String, f64, f64)> = Vec::new();
-    for (i, o) in merged.iter().enumerate() {
-        if scale_bar[i] || legend[i] {
-            continue;
-        }
+    let th = median(reads.iter().map(|o| o.text_height()).collect()).unwrap_or(20.0).max(1.0);
+    let font_med = median(reads.iter().map(font_px).collect()).unwrap_or(th).max(1.0);
+    let scale_bar = scale_bar_members(&reads, th);
+    let legend = legend_members(&reads, th);
+    let vocab = Vocabulary::new(&reads);
+    let keys: Vec<String> = reads.iter().map(|o| letters_key(&o.text)).collect();
+    #[derive(Clone)]
+    struct Query {
+        name: String,
+        key: String,
+        /// 0: confirmed title, 1: other title, 2: name of several words, 3: one word.
+        group: u8,
+        score: f64,
+        font: f64,
+    }
+    let mut found: Vec<Query> = Vec::new();
+    // Titles and series names.
+    let mut titles: Vec<(Query, bool)> = Vec::new();
+    for (i, o) in reads.iter().enumerate() {
         let text = o.text.as_str();
-        if parse_coordinate(text).is_some()
+        if scale_bar[i]
+            || legend[i]
+            || !reads_across(o)
+            || parse_coordinate(text).is_some()
             || parse_coordinate_pair(text).is_some()
             || parse_scale(text).is_some()
             || has_angle_mark(text)
             || parse_height(text).is_some()
             || text.contains('©')
             || text.to_lowercase().contains("(c)")
+            || imprint_text(text)
         {
             continue;
         }
-        let size = (fonts[i] / font_med).clamp(0.3, 4.0);
-        let horiz = horizontal(o);
+        let size = font_px(o) / font_med;
+        let series = words_of(text).iter().any(|w| letter_runs(w).iter().any(|x| META_WORDS.contains(&x.as_str())));
+        if size < TITLE_FONT && !series {
+            continue;
+        }
         for part in name_parts(text) {
+            let Some(name) = clean_name(&part).map(|n| mend_name(&n, &vocab, &[])) else { continue };
+            let key = letters_key(&name);
+            let confirmed = keys.iter().enumerate().any(|(j, k)| j != i && k.contains(key.as_str()));
+            let score = size.clamp(0.3, 4.0) + 0.3 * o.confidence as f64;
+            titles
+                .push((Query { name, key, group: if confirmed { 0 } else { 1 }, score, font: font_px(o) }, confirmed));
+        }
+    }
+    for (t, confirmed) in &titles {
+        // An unconfirmed title that shares most of its letters with a confirmed one is a misread of it.
+        let misread = !confirmed
+            && titles.iter().any(|(c, ok)| {
+                *ok && c.key != t.key && {
+                    let (a, b): (Vec<char>, Vec<char>) = (t.key.chars().collect(), c.key.chars().collect());
+                    longest_common_run(&a, &b) as f64 >= 0.6 * a.len() as f64
+                }
+            });
+        if !misread {
+            found.push(t.clone());
+        }
+    }
+    // Names on the map.
+    for (p, o) in classify_pois_reads(obs) {
+        if p.kind == PoiKind::SpotHeight {
+            continue;
+        }
+        let size = (font_px(&o) / font_med).clamp(0.3, 4.0);
+        for part in name_parts(&p.name) {
             let Some(name) = clean_name(&part) else { continue };
-            let n_words = name.split_whitespace().count() as f64;
-            let title = horiz && size >= 1.6;
-            let mut score = size + if title { 1.5 } else { 0.0 } + 0.3 * o.confidence as f64 + 0.15 * n_words.min(3.0);
-            if !horiz {
+            let n_words = name.split_whitespace().count();
+            // Words that only say what a place is ("KRAAL", "FARM GATE", "LONG POOL") find no place.
+            if words_of(&name).iter().all(|w| w.chars().count() <= 2 || lexicon_word(w)) {
+                continue;
+            }
+            let mut score = size + 0.3 * o.confidence as f64;
+            if !reads_across(&o) {
                 // Turned labels (ridges, kloofs, boundaries) read poorly.
                 score *= 0.6;
             }
-            found.push((name.clone(), letters_key(&name), score, fonts[i]));
+            let key = letters_key(&name);
+            found.push(Query { name, key, group: if n_words >= 2 { 2 } else { 3 }, score, font: font_px(&o) });
         }
     }
-    // Same name read twice: keep the best score, the spaced reading.
-    found.sort_by(|a, b| b.2.total_cmp(&a.2));
-    let mut out: Vec<(String, String, f64, f64)> = Vec::new();
+    // Best first; the same name read twice: keep the best, the spaced reading.
+    found.sort_by(|a, b| a.group.cmp(&b.group).then(b.score.total_cmp(&a.score)));
+    let mut out: Vec<Query> = Vec::new();
     for f in found {
-        if let Some(o) = out.iter_mut().find(|o| o.1 == f.1) {
-            if f.0.split_whitespace().count() > o.0.split_whitespace().count() {
-                o.0 = f.0;
+        if let Some(o) = out.iter_mut().find(|o| o.key == f.key) {
+            if f.name.split_whitespace().count() > o.name.split_whitespace().count() {
+                o.name = f.name;
             }
+            o.font = o.font.max(f.font);
             continue;
         }
         out.push(f);
     }
+    // Glued words with their spacing from another read of the same letters ("CASTLEGORGE" and
+    // "CASTLE GORGE").
+    for q in out.iter_mut() {
+        let n = q.name.split_whitespace().count();
+        let spaced = reads.iter().find_map(|r| {
+            // Words only: no number or symbol joins the name ("RAND WATER BOX 2").
+            let toks: Vec<&str> = r
+                .text
+                .split_whitespace()
+                .map(|t| t.trim_matches(|c: char| !c.is_alphabetic()))
+                .filter(|t| !t.is_empty() && t.chars().all(|c| c.is_alphabetic() || "'-".contains(c)))
+                .collect();
+            (n + 1..=toks.len().min(6))
+                .find_map(|w| toks.windows(w).find(|win| letters_key(&win.join(" ")) == q.key).map(|win| win.join(" ")))
+        });
+        if let Some(t) = spaced {
+            q.name = t;
+        }
+    }
     // Partial reads: a key inside a longer key read in text at least as
-    // large; and glued reads: another name with a short token (an acronym,
-    // a symbol read as a letter) stuck to it ("MCSAMAGALIESBERG", "PLONG POOL").
+    // large, or inside a word of a name ranked as high ("ABATINI" of
+    // "MHLABATINI"); and glued reads: another name with a short token (an
+    // acronym, a symbol read as a letter) stuck to it ("MCSAMAGALIESBERG",
+    // "PLONG POOL").
     let keep: Vec<bool> = out
         .iter()
         .map(|a| {
-            let partial = out.iter().any(|b| b.1.len() > a.1.len() && b.1.contains(a.1.as_str()) && b.3 >= 0.9 * a.3);
+            let partial = out.iter().any(|b| {
+                b.key.len() > a.key.len()
+                    && b.key.contains(a.key.as_str())
+                    && (b.font >= 0.9 * a.font || (b.group <= a.group && inside_a_word(&b.name, &a.key)))
+            });
             let glued = out.iter().any(|b| {
-                if b.1.len() < 5 || a.1.len() <= b.1.len() {
+                if b.key.len() < 5 || a.key.len() <= b.key.len() {
                     return false;
                 }
-                let extra = if a.1.starts_with(b.1.as_str()) {
-                    &a.1[b.1.len()..]
-                } else if a.1.ends_with(b.1.as_str()) {
-                    &a.1[..a.1.len() - b.1.len()]
+                let extra = if a.key.starts_with(b.key.as_str()) {
+                    &a.key[b.key.len()..]
+                } else if a.key.ends_with(b.key.as_str()) {
+                    &a.key[..a.key.len() - b.key.len()]
                 } else {
                     return false;
                 };
@@ -586,7 +633,7 @@ pub fn hint_queries(obs: &[OcrObservation]) -> Vec<String> {
             !partial && !glued
         })
         .collect();
-    out.into_iter().zip(keep).filter(|(_, k)| *k).map(|(o, _)| o.0).take(MAX_HINT_QUERIES).collect()
+    out.into_iter().zip(keep).filter(|(_, k)| *k).map(|(o, _)| o.name).take(MAX_HINT_QUERIES).collect()
 }
 
 #[cfg(test)]
@@ -680,6 +727,54 @@ mod tests {
         assert_eq!(o[2].lat, -25.0);
         assert_eq!(HintSource::parse("USER"), HintSource::User);
         assert_eq!(HintSource::parse("geocoder"), HintSource::Place);
+    }
+
+    #[test]
+    fn titles_the_map_confirms_come_first() {
+        // Grootkloof as Apple Vision reads it: the title twice (once misread), the series line,
+        // a partial read of the declination note, names.
+        let obs = vec![
+            ob("DOTKLOOF & HAMERKOP..", 954.0, 4595.0, 884.0, 80.0),
+            ob("GROOTKLOOF & HAME", 833.0, 4603.0, 765.0, 67.0),
+            ob("MCSA MAGALIESBERG", 827.0, 4683.0, 767.0, 67.0),
+            ob("OF 10", 1931.0, 4685.0, 193.0, 55.0),
+            ob("GROOTKLOOF PEDESTRIAN GATE", 1858.0, 1562.0, 416.0, 30.0),
+            ob("HAMERKOP KLOOF", 2858.0, 2968.0, 58.0, 249.0),
+            ob("KWAMI LODGE", 2877.0, 4481.0, 175.0, 33.0),
+            ob("KRAAL", 2133.0, 2340.0, 86.0, 26.0),
+            ob("BARTLETT/FARM GATE", 1745.0, 1519.0, 281.0, 28.0),
+            ob("ual Change: 4.8 per year West", 2877.0, 4735.0, 387.0, 26.0),
+            ob("Annual Change: 4.8' per year West", 2829.0, 4733.0, 435.0, 28.0),
+            ob("1523", 2430.0, 4428.0, 54.0, 20.0),
+        ];
+        let q = hint_queries(&obs);
+        assert_eq!(&q[..3], &["HAMERKOP", "GROOTKLOOF", "MAGALIESBERG"], "{q:?}");
+        for n in ["GROOTKLOOF PEDESTRIAN GATE", "HAMERKOP KLOOF", "KWAMI LODGE", "BARTLETT"] {
+            assert!(q.contains(&n.to_string()), "{n}: {q:?}");
+        }
+        for bad in ["DOTKLOOF", "HAME", "KRAAL", "FARM GATE", "ual Change per year West", "Change", "1523"] {
+            assert!(!q.contains(&bad.to_string()), "{bad}: {q:?}");
+        }
+        // A title read without its space takes it from another read of the same words; a title
+        // read without its first letters is a piece of the one with them.
+        let mut obs: Vec<OcrObservation> = ["1416", "1754", "1556", "1471", "1533", "1514", "1497", "1503"]
+            .iter()
+            .enumerate()
+            .map(|(k, h)| ob(h, 400.0 + 300.0 * k as f64, 3400.0, 58.0, 22.0))
+            .collect();
+        obs.extend([
+            ob("CASTLEGORGE", 836.0, 4604.0, 540.0, 58.0),
+            ob("CASTLE GORGE", 421.0, 2100.0, 199.0, 32.0),
+            ob("CASTLEGORGEWATERFALL(UPPER)", 423.0, 2104.0, 466.0, 27.0),
+            ob("ABATINI & FERN KLOOF", 978.0, 4598.0, 834.0, 77.0),
+            ob("MHLABATINI & FERN K", 836.0, 4610.0, 758.0, 49.0),
+            ob("MHLABATINI PARKING", 1398.0, 1042.0, 277.0, 28.0),
+            ob("FERN KLOOF", 387.0, 1176.0, 105.0, 194.0),
+        ]);
+        let q = hint_queries(&obs);
+        assert_eq!(&q[..3], &["FERN KLOOF", "CASTLE GORGE", "MHLABATINI"], "{q:?}");
+        assert!(!q.iter().any(|x| x == "ABATINI" || x == "FERN K"), "{q:?}");
+        assert!(inside_a_word("MHLABATINI", "ABATINI") && !inside_a_word("CASTLE GORGE WATERFALL", "CASTLEGORGE"));
     }
 
     #[test]
