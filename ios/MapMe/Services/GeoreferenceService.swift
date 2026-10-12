@@ -74,6 +74,9 @@ struct WideSearchOptions: Equatable {
 final class GeoreferenceService {
     /// The most tiles the core may list in one `need_dem` answer.
     static let maxTilesPerRound = 64
+    /// A wide search's grid-only first call returns its answer at this confidence or more; below
+    /// it the core flags the fit for checking, and the search goes on.
+    static let probeMinConfidence = 0.5
     static let progressPollInterval: UInt64 = 150_000_000
 
     private let dem: TerrainTileSource
@@ -174,7 +177,10 @@ final class GeoreferenceService {
                 do {
                     let answer = try await runCore(engine, probe, reporter: reporter) { _, _ in (.analysing, 0.37) }
                     calls += 1
-                    if answer.georeference != nil {
+                    // Only a grid answer that needs no checking ends the search here. Without terrain
+                    // the core cannot check a fit with one label on an axis and flags it (confidence
+                    // below 0.5), even one the terrain ruled out in the first search.
+                    if let g = answer.georeference, g.confidence >= Self.probeMinConfidence {
                         reporter.report(.finished, 1)
                         return Self.outcome(from: answer, hadGPS: fix != nil, searchRadiusKm: radiusKm)
                     }

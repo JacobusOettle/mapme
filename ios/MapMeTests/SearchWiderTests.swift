@@ -286,6 +286,41 @@ final class SearchWiderTests: XCTestCase {
         XCTAssertTrue(engine.requests[0].hints.isEmpty)
     }
 
+    /// The grid-only call that lists the names cannot check a fit with one label on an axis against
+    /// the terrain, so the core flags it (confidence below 0.5), even one the first search's terrain
+    /// check ruled out: the wide search goes on. A confident grid answer ends it at once.
+    func testOnlyAConfidentGridAnswerEndsAWideSearchEarly() async throws {
+        let affine: [Double] = [2, 0, 3_046_000, 0, -2, -2_975_000, 0, 0, 1]
+        func wideSearch(gridConfidence: Double) async -> (GeorefOutcome, [GeorefRequest]) {
+            let engine = FakeEngine { request, _ in
+                if request.methods == ["grid"] {
+                    return GeorefResponse(status: "ok", method: "grid", pixelToMercator: affine, confidence: gridConfidence,
+                                          message: "Located from 1 latitude and 3 longitude grid labels (±2 m).",
+                                          hintQueries: ["CASTLE GORGE"])
+                }
+                return GeorefResponse(status: "failed",
+                                      message: "Only one latitude label could be read, and the terrain under the map doesn't match it.")
+            }
+            let service = GeoreferenceService(dem: FakeTerrain(), geocoder: MockGeocoder(results: [:]), isOnline: { true })
+            var request = GeorefRequest()
+            request.gps = GPSFix(lat: -25.85, lon: 27.40, accuracyM: 10)
+            request.ocr = [OCRObservation(text: "CASTLE GORGE", bbox: [10, 10, 200, 30], confidence: 0.9)]
+            request.searchRadiusM = 250_000
+            let outcome = await service.run(engine: engine, request: request, wide: WideSearchOptions(useMapNames: true),
+                                            reporter: MonotonicProgress { _, _ in })
+            return (outcome, engine.requests)
+        }
+
+        let (flagged, flaggedCalls) = await wideSearch(gridConfidence: 0.45)
+        XCTAssertEqual(flaggedCalls.map(\.methods), [["grid"], ["grid", "contours"]])
+        XCTAssertNil(flagged.georef)
+        XCTAssertEqual(flagged.hintQueries, ["CASTLE GORGE"])
+
+        let (confident, confidentCalls) = await wideSearch(gridConfidence: 0.97)
+        XCTAssertEqual(confidentCalls.map(\.methods), [["grid"]])
+        XCTAssertEqual(confident.georef?.method, .grid)
+    }
+
     func testOfflineTerrainIsReportedAsSuch() async throws {
         let engine = FakeEngine { request, index in
             index < 3 ? Self.needDEM([TileID(z: 11, x: index, y: 3)]) : Self.failed("Terrain data for your area couldn't be downloaded.")

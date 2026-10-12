@@ -41,8 +41,9 @@ final class SheetE2ETests: XCTestCase {
     /// Where the user probably is when importing: Pretoria, 60 km from Castle Gorge's centre,
     /// 80 km from Grootkloof's, 86 km from Mhlabatini's.
     private static let farGPS = LatLon(lat: -25.75, lon: 28.19)
-    /// The app's default search radius (`AppSettings.searchRadiusKm`); the fixtures' terrain tiles
-    /// cover a 20 km search around each sheet's centre.
+    /// The search radius of these runs: the app's default when they were written (it is 50 km now,
+    /// `AppSettings.searchRadiusKm`), kept because the fixtures' terrain tiles cover a 20 km search
+    /// around each sheet's centre; `farGPS` is outside either radius.
     private static let searchRadiusKm = 20.0
 
     func testGrootkloofControl() async throws {
