@@ -10,8 +10,10 @@ use crate::dark::{DarkProfile, DarkStyle, TileRect};
 use crate::dem::TileId;
 use crate::georef::{failed_json, fit_control_points_json, Session};
 use crate::image::{Rgb8, RgbaView};
+use std::collections::BTreeSet;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Mutex, MutexGuard};
 
 /// Opaque session handle (`MMSession` in C).
 pub struct MMSession {
@@ -21,6 +23,14 @@ pub struct MMSession {
 /// Opaque, immutable dark map style (`MMDarkStyle` in C); shared by the threads that render tiles.
 pub struct MMDarkStyle {
     inner: DarkStyle,
+}
+
+/// The styles `mm_dark_style_new` made that are not freed yet (their addresses): freeing anything
+/// else (a style a second time, a stray pointer) is ignored instead of corrupting the heap.
+static LIVE_STYLES: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
+
+fn live_styles() -> MutexGuard<'static, BTreeSet<usize>> {
+    LIVE_STYLES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Largest raster accepted (pixels per side and in total).
@@ -318,23 +328,31 @@ pub unsafe extern "C" fn mm_dark_style_new(profile_json: *const c_char) -> *mut 
         return std::ptr::null_mut();
     };
     catch_unwind(AssertUnwindSafe(|| match DarkStyle::from_json(json) {
-        Ok(inner) => Box::into_raw(Box::new(MMDarkStyle { inner })),
+        Ok(inner) => {
+            let style = Box::into_raw(Box::new(MMDarkStyle { inner }));
+            live_styles().insert(style as usize);
+            style
+        }
         Err(_) => std::ptr::null_mut(),
     }))
     .unwrap_or(std::ptr::null_mut())
 }
 
-/// Destroy a dark style. NULL is ignored.
+/// Destroy a dark style. NULL, a style already freed and any pointer that is
+/// not a live style are ignored.
 ///
 /// # Safety
-/// `style` must be NULL or a pointer returned by `mm_dark_style_new` that was
-/// not freed yet, with no render on it still running.
+/// No render may still be running on `style`.
 #[no_mangle]
 pub unsafe extern "C" fn mm_dark_style_free(style: *mut MMDarkStyle) {
     if style.is_null() {
         return;
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| drop(Box::from_raw(style))));
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if live_styles().remove(&(style as usize)) {
+            drop(Box::from_raw(style));
+        }
+    }));
 }
 
 /// Render one tile of the map dark, in place (8-bit RGBA, alpha untouched).

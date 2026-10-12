@@ -398,27 +398,45 @@ photo's shading and paper tint invert into blotches. The core renders it instead
      cell centres at `((i + 0.5) / cols, (j + 0.5) / rows)`, clamped at the edges. The grid
      position is quantised to 1/4096 of a cell, so every tiling of the map computes the same
      paper for the same map position.
+   * *digital map* (a PDF's render, an exported image): one exact colour, its background, covers
+     at least 5 % of the overview's pixels and shows up in at least a quarter of the grid's cells
+     (the print's white: 29–33 % of its pixels at any overview scale; a photo's noise never
+     repeats a colour that often: the real photo's commonest covers 0.3 %, the synthetic photo's
+     0.04 %; a smooth, noise-free lighting gradient repeats colours, but each along a narrow
+     band). Its paper is flat: one cell, the per-channel maximum of the cells' 90th percentiles.
+     A solid fill wider than a cell or two (a sea, a lake, a forest tint) is then never taken for
+     paper: with the grid it faded into the night paper away from its shore, with a glowing band
+     along it (a pale sea's bare pixels at L′ 0.25 … 0.44, now all 0.41).
    * *flat field*: `x = min(rgb / paper(u, v), 1)` per channel (sRGB-encoded values). White
      paper becomes exactly white wherever it is, in shadow or not.
-   * on the flat-fielded overview in OKLab: `ink = clamp(P0.7 %(L), 0.12, 0.65)` (the map's
-     darkest ink: 0.12 for the Grootkloof print, 0.38 for the phone photo of it).
+   * *print or photo*: on the flat-fielded overview in OKLab, the paper noise `dead` (below);
+     a digital map, or one with `dead < 0.035`, is a print: `ink` 0.12, `gain` 1, no flare and
+     no edge bands (a PDF's full-bleed content is never cropped). Neither estimate is reliable
+     on a print: its darkest 0.7 % of pixels are not always black ink (a sparse map's are paper:
+     "ink" 0.65, whose flare removal turned an orange track salmon; the Grootkloof print's give
+     0.12 at 1/3 scale but 0.21 at 1/4, the overview the app uses), and its ink chroma depends
+     on the scale and on what the ink is printed over (gain 1.0 at 1/3, 1.16 at 1/4, 1.7 with a
+     sea under it). Here `dead` is 0.015 for the print, 0.059 for the real photo and 0.069 for
+     the synthetic one; the rest of the profile is for photos.
+   * a photo's darkest ink on the flat-fielded overview: `ink = clamp(P0.7 %(L), 0.12, 0.65)`
+     (0.38 for the phone photo of the print).
    * *flare*: a photo's blacks are lifted by veiling light (lens flare, the camera's tone
      curve), which also washes out its colours. It is removed in linear light before anything
-     else: `φ = max(ink³ − 0.12³, 0) / (1 − 0.12³)` (0 for a print, 0.053 for the real photo),
+     else: `φ = max(ink³ − 0.12³, 0) / (1 − 0.12³)` (0.053 for the real photo),
      `lin′ = clamp((lin − φ) / (1 − φ), 0, 1)` per channel, after which the photo's darkest ink
      is at L 0.12 like a print's. (Stretching L between `ink` and paper instead left the
      photo's contours near white: half of them neutral grey, the hierarchy flat.)
    * on the flare-free values: paper noise from the pixels above the 55th percentile of L,
      `dead = clamp(1 − median + 3 · 1.4826 · MAD, 0.015, 0.12)` (paper grain and JPEG noise stay
-     paper: 0.015 print, 0.062 photo); `gain = clamp(0.12 / median C, 1, 1.8)` over coloured ink
-     pixels (`t ≥ 0.5`, `C ≥ 0.025`; 1 when fewer than 200), so a photo's washed-out colours
+     paper: 0.015 print, 0.062 photo); `gain = clamp(0.12 / median C, 1, 1.8)` over coloured
+     ink pixels (`t ≥ 0.5`, `C ≥ 0.025`; 1 when fewer than 200), so a photo's washed-out colours
      come back. 0.12 is a print's typical ink chroma: the print's coloured ink has a median C of
      0.135 (gain 1), a synthetic photo of it (lighting, blur, noise) gain 1.11, the real phone
      photo gain 1.8 (its `t ≥ 0.5` pixels are mostly black text; the grey gate below keeps
      greys grey at any gain).
-   * *edge bands* (photos only: `dead ≥ 0.035`, so a PDF's full-bleed content is never
-     cropped): where the flattened page's corners include a sliver of the table (the real photo:
-     wood along both long edges, 1.2 % of the image, which rendered as a glowing orange frame).
+   * *edge bands* (photos only): where the flattened page's corners include a sliver of the
+     table (the real photo: wood along both long edges, 1.2 % of the image, which rendered as a
+     glowing orange frame).
      On the flat-fielded overview a pixel is paper when `t < 0.2` and `C · gain < 0.05`; per
      scanline across each edge the band's depth is the distance from the border to the first run
      of 3 paper pixels, capped at 3 % of the scanline; smoothed along the edge by a running median
@@ -430,9 +448,10 @@ photo's shading and paper tint invert into blotches. The core renders it instead
      Real photo: up to 3.2 % deep, 1.76 % of the map; synthetic photo 0.02 %; print: none.
    * JSON: `{"status":"ok","version":1,"ink","dead","gain","paper":{"cols","rows","rgb":[…]}}`
      plus `"edge":{"left","right","top","bottom"}` when there are edge bands; numbers with 4
-     decimals (8.9 KB for the print's 23 × 32 cells, 23 KB for the photo); ~180 ms for the
-     print's 1169 × 1653 overview (one pass over the pixels; a photo takes a second one with the
-     flare removed: ~150 ms for its 850 × 1116 overview).
+     decimals (110 bytes for the print's flat paper, 23 KB for the photo's 25 × 33 cells); ~200 ms
+     for the print's 1169 × 1653 overview (one pass over the pixels, and a sort of them for the
+     digital test; a photo takes a second pass with the flare removed: ~150 ms for its
+     850 × 1116 overview).
 2. **Render** each pixel of the flat-fielded tile, flare removed (OKLab `L, a, b`,
    `C = |(a, b)|`):
    * `t = clamp(((1 − L) − dead) / ((1 − min(ink, 0.12)) − dead), 0, 1)` – how much ink, by
@@ -495,8 +514,15 @@ photo's shading and paper tint invert into blotches. The core renders it instead
    0.0095 on the real (folded) photo, 0.0869 → 0.0072 on the synthetic photo with its one-sided
    shadow (night paper L 0.249). `print_inks_keep_their_hierarchy` prints and checks the
    print's inks above; the real photo has no bright orange left at its edges and stays calm
-   (mean L ≤ 0.335). `dark_dump` (ignored) writes before/after images of the print, the real
-   photo and a synthetic photo.
+   (mean L ≤ 0.335). The print profiled at 1/2, 1/3, 1/4 and 1/6 scale gets the same flat white
+   paper, `ink` 0.12, `gain` 1, no edge bands; a pale or a mid-blue sea printed over 40 % of it
+   renders its bare pixels at one L′ (0.41, 0.51); a sparse print (0.5 % ink) keeps its orange
+   track orange. Degenerate overviews (blank, black, one colour, 8 × 8, 8 × 2048, noise) profile
+   without panics (smaller than 8 px a side: `"status":"failed"`); random valid profiles render
+   random tiles, rectangles far outside the map and strides with padding without panics.
+   `mm_dark_style_free` ignores NULL, a style freed already and any pointer that is not a live
+   style (the core keeps the set of live styles). `dark_dump` (ignored) writes before/after
+   images of the print, the real photo and a synthetic photo.
 
    Known limits, accepted: pale point symbols (the police station's pale cyan, the place of
    worship's light grey, the legend's pale vegetation disc) keep their paper contrast (1.4–1.9:1)
@@ -505,7 +531,12 @@ photo's shading and paper tint invert into blotches. The core renders it instead
    greys, so the grey gate keeps most river pixels grey; a laxer gate gave casts on text and no
    clear gain. In direct sun a dark map is less legible than paper (glare adds the same light to
    both colours, which hurts the darker contours and text most): the app's Paper appearance
-   stays one setting away.
+   stays one setting away. A *photo* of a map with a solid fill wider than a cell or two (a sea)
+   still takes the fill for paper (its shading cannot be told from the fill's tint by the 90th
+   percentile); a photo whose paper is clipped to pure white over a quarter of the page passes
+   the digital test and is not flattened; a photo with paper as clean as a print's
+   (`dead < 0.035`, e.g. a document camera scan) is treated as a print (no flare removal, no
+   chroma gain), which suits a scan whose paper the camera already whitened.
 
    Tried and not adopted: trading lightness for chroma in the gamut mapping (pure red keeps
    C 0.21 at L 0.68) turns the map's reds into the app's own trail and position-puck red;

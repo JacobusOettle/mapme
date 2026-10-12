@@ -108,7 +108,9 @@ char *mm_dark_profile(const uint8_t *rgba, uint32_t width, uint32_t height, uint
  * Thread-safe: any number of threads may render with one style at once. */
 typedef struct MMDarkStyle MMDarkStyle;
 
-/* NULL when the JSON is not a valid profile. Free with mm_dark_style_free. */
+/* NULL when the JSON is not a valid profile. Free with mm_dark_style_free (NULL, a style freed
+ * already and any pointer that is not a live style are ignored; a style must not be freed while a
+ * render on it is running). */
 MMDarkStyle *mm_dark_style_new(const char *profile_json);
 void mm_dark_style_free(MMDarkStyle *style);
 

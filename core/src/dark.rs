@@ -7,11 +7,13 @@
 //! 1. **Profile** ([`DarkProfile::from_rgb8`] / [`DarkProfile::from_rgba`]),
 //!    once per map from an overview of the whole map: the *paper grid* (the
 //!    paper white per block: 90th percentile per channel, 3 × 3 maximum, 3 × 3
-//!    box blur, floored at 0.2), and on the flat-fielded overview (`rgb /
-//!    paper`) in OKLab the darkest ink level `ink` (which sets a photo's
-//!    *flare*, removed in linear light), the paper noise `dead` and the chroma
-//!    `gain` that brings a photo's washed-out colours back; for a photo, the
-//!    *edge bands* where the table shows inside the page's corners.
+//!    box blur, floored at 0.2; one flat colour for a digital map, whose
+//!    background repeats one exact colour), and on the flat-fielded overview
+//!    (`rgb / paper`) in OKLab the paper noise `dead`, which tells a photo from
+//!    a print. For a photo only: the darkest ink level `ink` (which sets its
+//!    *flare*, removed in linear light), the chroma `gain` that brings its
+//!    washed-out colours back, and the *edge bands* where the table shows
+//!    inside the page's corners.
 //! 2. **Render** ([`DarkStyle::render`]), per tile: flat-field each pixel by
 //!    the paper grid at its normalised map position, remove the flare (a
 //!    per-channel curve), then map it through the style's 65³ lookup table
@@ -85,6 +87,13 @@ pub const EDGE_MAX_DEPTH: f64 = 0.03;
 const EDGE_PAPER_RUN: usize = 3;
 /// Edge depths are stored in at most this many bins per edge.
 const EDGE_BINS: usize = 256;
+
+/// A digital map (a PDF's render, an exported image) has a flat background: at least this share
+/// of its overview's pixels have one exact colour, ...
+pub const DIGITAL_MIN_SHARE: f64 = 0.05;
+/// ... found in at least this share of the paper grid's cells. Its paper is one colour, it has no
+/// flare and no edge bands.
+pub const DIGITAL_MIN_CELLS: f64 = 0.25;
 
 /// Paper white is never taken darker than this (sRGB), so deep shadow is not blown up.
 const PAPER_FLOOR: f32 = 0.2;
@@ -609,18 +618,26 @@ fn filter3(g: &[[f32; 3]], cols: usize, rows: usize, max: bool) -> Vec<[f32; 3]>
     out
 }
 
-/// The paper grid of an overview (see the module docs).
-fn paper_grid(ov: &Rgb8) -> PaperGrid {
-    let (w, h) = (ov.w, ov.h);
+/// Paper grid cells of a `w × h` overview: `round(w / B) × round(h / B)` (at least 1 × 1) of
+/// `B = max(8, long side / 32)` px.
+fn grid_size(w: usize, h: usize) -> (usize, usize) {
     let block = (w.max(h) / 32).max(8);
-    let cols = ((w as f64 / block as f64).round() as usize).max(1);
-    let rows = ((h as f64 / block as f64).round() as usize).max(1);
-    let cells: Vec<[f32; 3]> = (0..cols * rows)
+    (((w as f64 / block as f64).round() as usize).max(1), ((h as f64 / block as f64).round() as usize).max(1))
+}
+
+/// Pixels `[i·len/n, (i+1)·len/n)` of cell `i` of `n` along an axis `len` pixels long (at least one).
+fn cell_span(i: usize, n: usize, len: usize) -> (usize, usize) {
+    let a = i * len / n;
+    (a, ((i + 1) * len / n).max(a + 1).min(len))
+}
+
+/// Per cell (row-major) and channel, the 90th percentile of the overview's pixels: the paper white there.
+fn paper_cells(ov: &Rgb8, cols: usize, rows: usize) -> Vec<[f32; 3]> {
+    let w = ov.w;
+    (0..cols * rows)
         .into_par_iter()
         .map(|c| {
-            let (i, j) = (c % cols, c / cols);
-            let (x0, x1) = (i * w / cols, ((i + 1) * w / cols).max(i * w / cols + 1).min(w));
-            let (y0, y1) = (j * h / rows, ((j + 1) * h / rows).max(j * h / rows + 1).min(h));
+            let ((x0, x1), (y0, y1)) = (cell_span(c % cols, cols, w), cell_span(c / cols, rows, ov.h));
             let mut hist = [[0u32; 256]; 3];
             for y in y0..y1 {
                 let row = &ov.data[(y * w + x0) * 3..(y * w + x1) * 3];
@@ -633,22 +650,90 @@ fn paper_grid(ov: &Rgb8) -> PaperGrid {
             let n = (x1 - x0) * (y1 - y0);
             [0, 1, 2].map(|k| (hist_quantile(&hist[k], n, 0.9) / 255.0) as f32)
         })
-        .collect();
+        .collect()
+}
+
+/// Whether an overview is a digital map (a PDF's render, an exported image) rather than a photo:
+/// one exact colour, its background, covers at least [`DIGITAL_MIN_SHARE`] of its pixels and shows
+/// up in at least [`DIGITAL_MIN_CELLS`] of the paper grid's cells. A photo's noise never repeats
+/// one colour that often (the real photo's commonest colour: 0.3 % of its pixels, the print's
+/// white: 29–33 %); a smooth, noise-free lighting gradient does, but each colour only along a
+/// narrow band.
+fn is_digital(ov: &Rgb8, cols: usize, rows: usize) -> bool {
+    let n = ov.w * ov.h;
+    let mut px: Vec<u32> = ov.data.par_chunks_exact(3).map(|p| u32::from_be_bytes([0, p[0], p[1], p[2]])).collect();
+    px.par_sort_unstable();
+    let Some(run) = px.chunk_by(|a, b| a == b).max_by_key(|r| r.len()) else {
+        return false;
+    };
+    if (run.len() as f64) < DIGITAL_MIN_SHARE * n as f64 {
+        return false;
+    }
+    let [_, r, g, b] = run[0].to_be_bytes();
+    let colour = [r, g, b];
+    let with_colour = (0..cols * rows)
+        .into_par_iter()
+        .filter(|&c| {
+            let ((x0, x1), (y0, y1)) = (cell_span(c % cols, cols, ov.w), cell_span(c / cols, rows, ov.h));
+            (y0..y1).any(|y| ov.data[(y * ov.w + x0) * 3..(y * ov.w + x1) * 3].chunks_exact(3).any(|p| p == colour))
+        })
+        .count();
+    with_colour as f64 >= DIGITAL_MIN_CELLS * (cols * rows) as f64
+}
+
+/// The paper grid of an overview (see the module docs), and whether the overview is a digital
+/// map. A digital map's paper is flat: one cell, the per-channel maximum of the cells' paper
+/// whites, so a solid fill (a sea, a lake, a forest tint) wider than a cell or two is never taken
+/// for paper (it faded into the night paper away from its shore, with a glowing band along it).
+fn paper_grid(ov: &Rgb8) -> (PaperGrid, bool) {
+    let (cols, rows) = grid_size(ov.w, ov.h);
+    let cells = paper_cells(ov, cols, rows);
+    let floor = |v: f32| round4(v.max(PAPER_FLOOR) as f64) as f32;
+    if is_digital(ov, cols, rows) {
+        let max = cells.iter().fold([0.0f32; 3], |m, c| [m[0].max(c[0]), m[1].max(c[1]), m[2].max(c[2])]);
+        return (PaperGrid::uniform(max.map(floor)), true);
+    }
     let g = filter3(&filter3(&cells, cols, rows, true), cols, rows, false);
-    let rgb = g.iter().flat_map(|c| c.map(|v| round4(v.max(PAPER_FLOOR) as f64) as f32)).collect();
-    PaperGrid { cols, rows, rgb }
+    let rgb = g.iter().flat_map(|c| c.map(floor)).collect();
+    (PaperGrid { cols, rows, rgb }, false)
+}
+
+/// Paper noise of a flat-fielded overview (OKLab L and C per pixel): over the pixels above the
+/// 55th percentile of L, `clamp(1 − median + 3 · 1.4826 · MAD, 0.015, 0.12)`.
+fn paper_noise(lc: &[(f32, f32)]) -> f64 {
+    let mut ls: Vec<f32> = lc.iter().map(|p| p.0).collect();
+    let l55 = quantile(&mut ls, 0.55) as f32;
+    let mut bright: Vec<f32> = ls.iter().copied().filter(|&l| l > l55).collect();
+    if bright.is_empty() {
+        bright = ls.iter().copied().filter(|&l| l >= l55).collect();
+    }
+    let med = quantile(&mut bright, 0.5);
+    let mut dev: Vec<f32> = bright.iter().map(|&l| (l as f64 - med).abs() as f32).collect();
+    let mad = quantile(&mut dev, 0.5);
+    round4((1.0 - med + 3.0 * 1.4826 * mad).clamp(0.015, 0.12))
 }
 
 impl DarkProfile {
     /// Profile of a map from an overview of the whole map (8-bit RGBA, alpha ignored).
     pub fn from_rgba(view: &RgbaView) -> Result<DarkProfile, String> {
-        let factor = view.width.max(view.height).div_ceil(MAX_OVERVIEW_SIDE);
-        let ov = downsample(view.width, view.height, factor, |x, y| view.rgb(x, y));
+        let (w, h, stride) = (view.width, view.height, view.stride);
+        let need = w
+            .checked_mul(4)
+            .filter(|&row| row <= stride)
+            .and_then(|row| stride.checked_mul(h.checked_sub(1)?)?.checked_add(row));
+        if w == 0 || need.is_none_or(|n| view.data.len() < n) {
+            return Err(format!("Invalid image: {w}×{h} pixels, {stride} bytes per row, {} bytes", view.data.len()));
+        }
+        let factor = w.max(h).div_ceil(MAX_OVERVIEW_SIDE);
+        let ov = downsample(w, h, factor, |x, y| view.rgb(x, y));
         Self::from_overview(&ov)
     }
 
     /// Profile of a map from an overview of the whole map (packed RGB).
     pub fn from_rgb8(img: &Rgb8) -> Result<DarkProfile, String> {
+        if img.w == 0 || img.w.checked_mul(img.h).and_then(|n| n.checked_mul(3)) != Some(img.data.len()) {
+            return Err(format!("Invalid image: {}×{} pixels, {} bytes", img.w, img.h, img.data.len()));
+        }
         let factor = img.w.max(img.h).div_ceil(MAX_OVERVIEW_SIDE);
         let ov = if factor <= 1 {
             Cow::Borrowed(img)
@@ -663,12 +748,13 @@ impl DarkProfile {
         if w < 8 || h < 8 || ov.data.len() != w * h * 3 {
             return Err(format!("Overview too small for a dark profile: {w}×{h} pixels"));
         }
-        let paper = paper_grid(ov);
-        let (params, lc) = Self::tone(ov, &paper);
+        let (paper, digital) = paper_grid(ov);
+        let (params, lc, photo) = Self::tone(ov, &paper, digital);
         let DarkParams { ink, dead, gain } = params;
         let t_of = |l: f32| ((1.0 - l as f64) - dead) / ((1.0 - ink.min(FLARE_FREE_INK)) - dead);
-        // A photo's page edges: where the flat-fielded overview is not light grey paper.
-        let edge = if dead >= EDGE_MIN_DEAD {
+        // A photo's page edges: where the flat-fielded overview is not light grey paper. Never on
+        // a print, whose full-bleed content must not be cropped.
+        let edge = if photo {
             EdgeInset::from_paper_mask(w, h, |x, y| {
                 let (l, c) = lc[y * w + x];
                 t_of(l) < 0.2 && c as f64 * gain < 0.05
@@ -679,9 +765,15 @@ impl DarkProfile {
         Ok(DarkProfile { params, paper, edge })
     }
 
-    /// The tone parameters of an overview flat-fielded by `paper`, and the OKLab L and C of
-    /// its pixels (flare removed).
-    fn tone(ov: &Rgb8, paper: &PaperGrid) -> (DarkParams, Vec<(f32, f32)>) {
+    /// The tone parameters of an overview flat-fielded by `paper`, the OKLab L and C of its
+    /// pixels (flare removed), and whether it is a photo: not a digital map, and its paper as
+    /// noisy as a photo's (`dead ≥ 0.035` before any flare removal). A print has no flare and its
+    /// colours are not washed out: `ink` 0.12, `gain` 1. (On a print the darkest 0.7 % of the
+    /// pixels are not always black ink: a sparse map's are paper, ink 0.65, and removing that
+    /// "flare" turned an orange track salmon; and the chroma of its coloured ink depends on the
+    /// overview's scale and on what it is printed over: gain 1.0 at 1/3, 1.16 at 1/4, 1.7 with
+    /// a sea under the ink.)
+    fn tone(ov: &Rgb8, paper: &PaperGrid, digital: bool) -> (DarkParams, Vec<(f32, f32)>, bool) {
         let (w, h) = (ov.w, ov.h);
         // The flat-fielded overview in linear light, by rows (computed per pass, not stored).
         let flat_rows = |f: &(dyn Fn([f64; 3]) -> (f32, f32) + Sync)| -> Vec<(f32, f32)> {
@@ -701,24 +793,23 @@ impl DarkProfile {
             let [l, a, b] = linear_to_oklab(lin);
             (l as f32, a.hypot(b) as f32)
         };
-        // The darkest ink, and the flare over it (none on a print: its L and C are final).
         let lc = flat_rows(&lab_lc);
+        let dead = paper_noise(&lc);
+        if digital || dead < EDGE_MIN_DEAD {
+            return (DarkParams { ink: FLARE_FREE_INK, dead, gain: 1.0 }, lc, false);
+        }
+        // A photo: its darkest ink, and the flare over it.
         let mut ls: Vec<f32> = lc.iter().map(|p| p.0).collect();
         let ink = round4(quantile(&mut ls, 0.007).clamp(FLARE_FREE_INK, 0.65));
         let phi = DarkParams { ink, dead: 0.0, gain: 1.0 }.flare();
-        // OKLab L and C with the flare removed.
-        let lc = if phi > 0.0 { flat_rows(&|lin| lab_lc(remove_flare(lin, phi))) } else { lc };
-        let mut ls: Vec<f32> = lc.iter().map(|p| p.0).collect();
-        // Paper noise: the brighter 45 % of the pixels.
-        let l55 = quantile(&mut ls, 0.55) as f32;
-        let mut bright: Vec<f32> = ls.iter().copied().filter(|&l| l > l55).collect();
-        if bright.is_empty() {
-            bright = ls.iter().copied().filter(|&l| l >= l55).collect();
-        }
-        let med = quantile(&mut bright, 0.5);
-        let mut dev: Vec<f32> = bright.iter().map(|&l| (l as f64 - med).abs() as f32).collect();
-        let mad = quantile(&mut dev, 0.5);
-        let dead = round4((1.0 - med + 3.0 * 1.4826 * mad).clamp(0.015, 0.12));
+        // OKLab L and C with the flare removed, and their paper noise.
+        let (lc, dead) = if phi > 0.0 {
+            let lf = flat_rows(&|lin| lab_lc(remove_flare(lin, phi)));
+            let dead = paper_noise(&lf);
+            (lf, dead)
+        } else {
+            (lc, dead)
+        };
         let ink_l = ink.min(FLARE_FREE_INK);
         let t_of = |l: f32| ((1.0 - l as f64) - dead) / ((1.0 - ink_l) - dead);
         // Chroma of clearly coloured ink.
@@ -728,7 +819,7 @@ impl DarkProfile {
         } else {
             (INK_CHROMA / quantile(&mut chroma, 0.5)).clamp(1.0, MAX_GAIN)
         });
-        (DarkParams { ink, dead, gain }, lc)
+        (DarkParams { ink, dead, gain }, lc, true)
     }
 
     /// `{"status":"ok","version":1,"ink","dead","gain","paper":{"cols","rows","rgb":[...]}}`, plus
@@ -1006,10 +1097,11 @@ impl DarkStyle {
         shade: F,
     ) -> Result<(), String> {
         rect.validate()?;
-        if w == 0 || h == 0 || stride < w * 4 {
+        let row_bytes = w.checked_mul(4).ok_or("tile too large")?;
+        if w == 0 || h == 0 || stride < row_bytes {
             return Err(format!("invalid tile: {w}×{h} pixels, {stride} bytes per row"));
         }
-        let need = stride.checked_mul(h - 1).and_then(|n| n.checked_add(w * 4)).ok_or("tile too large")?;
+        let need = stride.checked_mul(h - 1).and_then(|n| n.checked_add(row_bytes)).ok_or("tile too large")?;
         if rgba.len() < need {
             return Err(format!("tile buffer holds {} bytes, needs {need}", rgba.len()));
         }
@@ -1273,5 +1365,18 @@ mod tests {
         for r in bad {
             assert!(style.render(&mut buf, 4, 4, 16, r).is_err(), "{r:?}");
         }
+        // Sizes whose byte counts overflow are rejected, not wrapped (or allocated).
+        assert!(style.render(&mut buf, 1 << 62, 1, 0, TileRect::FULL).is_err());
+        assert!(style.render(&mut buf, usize::MAX / 2, 1, usize::MAX, TileRect::FULL).is_err());
+        assert!(style.render(&mut buf, 4, usize::MAX, 16, TileRect::FULL).is_err());
+    }
+
+    #[test]
+    fn profile_rejects_empty_and_inconsistent_images() {
+        let empty = RgbaView { data: &[], width: 0, height: 0, stride: 0 };
+        assert!(DarkProfile::from_rgba(&empty).is_err());
+        let short = Rgb8 { w: 4096, h: 4096, data: vec![255; 300] };
+        assert!(DarkProfile::from_rgb8(&short).is_err());
+        assert!(DarkProfile::from_rgb8(&Rgb8 { w: 0, h: 0, data: vec![] }).is_err());
     }
 }

@@ -768,6 +768,112 @@ fn synthetic_photo_paper_is_even() {
 }
 
 // ---------------------------------------------------------------------------
+// Digital maps: flat paper, no flare, no edge bands
+// ---------------------------------------------------------------------------
+
+/// The print profiled from the overview the app uses (pyramid level 2 of the 3507 × 4960 sheet,
+/// 876 × 1240), from the tests' 1169 × 1653 one, and from larger and smaller ones: the darkest
+/// 0.7 % of an overview's pixels depend on its scale (L 0.12 at 1/3, 0.21 at 1/4), which on a
+/// print must not turn into a flare removal (that is for a photo's veiling light). A print gets
+/// the same white paper, no flare and no edge bands at any scale.
+#[test]
+fn print_profile_does_not_depend_on_the_overview_scale() {
+    let _g = serial();
+    let map = &map_fixture().image;
+    for f in [2, 3, 4, 6] {
+        let p = DarkProfile::from_rgb8(&box_downsample(map, f)).unwrap();
+        print_profile(&format!("map.jpg at 1/{f}"), &p);
+        assert_eq!(p.params.flare(), 0.0, "1/{f}: a print with a flare: {:?}", p.params);
+        assert!(p.params.ink <= FLARE_FREE_INK, "1/{f}: {:?}", p.params);
+        assert!(p.params.dead <= 0.03 && p.params.gain == 1.0, "1/{f}: {:?}", p.params);
+        assert!(p.edge.is_none(), "1/{f}: edge bands on a print");
+        assert!(p.paper.rgb.iter().all(|&v| v == 1.0), "1/{f}: paper not white everywhere");
+    }
+}
+
+/// A print with a large solid fill (a sea or a lake over the left 40 % of the sheet, the map's
+/// ink on it): the fill is not mistaken for paper, so it renders as one even tone. Taken for
+/// paper beyond a cell or two from its shore, it faded into the night paper away from the shore,
+/// with a glowing band along it (L′ 0.25 … 0.44 over the sea's bare pixels).
+#[test]
+fn large_fills_on_a_print_render_evenly() {
+    let _g = serial();
+    let ov = box_downsample(&map_fixture().image, 4);
+    let (w, h) = (ov.w, ov.h);
+    for fill in [0xAAD3DF, 0x6FA8DC] {
+        let f = hex(fill);
+        let mut img = ov.clone();
+        // The sea's bare pixels: white paper before the fill was printed over it.
+        let mut bare = vec![];
+        for y in 0..h {
+            for x in 0..w * 2 / 5 {
+                let i = (y * w + x) * 3;
+                if img.data[i..i + 3] == [255, 255, 255] {
+                    bare.push(i);
+                }
+                for (k, fk) in f.iter().enumerate() {
+                    img.data[i + k] = (img.data[i + k] as f64 * fk).round() as u8;
+                }
+            }
+        }
+        let profile = DarkProfile::from_rgb8(&img).unwrap();
+        let style = DarkStyle::from_json(&profile.to_json()).unwrap();
+        let out = render_rgb(&style, &img, TileRect::FULL);
+        let mut ls: Vec<f64> = bare.iter().map(|&i| lab_u8(&out.data[i..i + 3])[0]).collect();
+        ls.sort_by(f64::total_cmp);
+        let (lo, hi) = (ls[ls.len() / 100], ls[ls.len() * 99 / 100]);
+        println!(
+            "fill #{fill:06X}: {:?}, paper grid {}×{}; its {} bare pixels render at L′ {lo:.3} … {hi:.3} (1st … 99th percentile)",
+            profile.params,
+            profile.paper.cols,
+            profile.paper.rows,
+            ls.len()
+        );
+        assert!(hi - lo <= 0.01, "fill #{fill:06X} renders unevenly: L′ {lo:.3} … {hi:.3}");
+        assert!(lo >= night_paper_lab()[0] + 0.08, "fill #{fill:06X} renders as the night paper");
+        assert_eq!(profile.params.gain, 1.0);
+    }
+}
+
+/// A sparse print (thin black lines and an orange track on white, 0.5 % ink): the darkest 0.7 %
+/// of its pixels are paper, which made it look like a photo with a heavy flare (`ink` 0.65,
+/// φ 0.27) whose removal turned the orange track salmon. A print has no flare: its colours keep
+/// their hue.
+#[test]
+fn a_sparse_print_keeps_its_colours() {
+    let (w, h) = (1200usize, 1700usize);
+    let orange = [230u8, 120, 20];
+    let mut img = Rgb8::from_rgb(w, h, vec![255; w * h * 3]).unwrap();
+    for y in 0..h {
+        for x in 0..w {
+            let c = if x % 400 == 7 || y % 500 == 9 {
+                [0, 0, 0]
+            } else if (x + y) % 600 < 2 {
+                orange
+            } else {
+                continue;
+            };
+            img.data[(y * w + x) * 3..][..3].copy_from_slice(&c);
+        }
+    }
+    let profile = DarkProfile::from_rgb8(&img).unwrap();
+    print_profile("sparse print", &profile);
+    assert_eq!(profile.params.flare(), 0.0, "{:?}", profile.params);
+    let out = render_rgb(&DarkStyle::new(&profile), &img, TileRect::FULL);
+    let at = |x: usize, y: usize| lab_u8(&out.data[(y * w + x) * 3..][..3]);
+    let (track, line) = (at(600, 0), at(7, 100));
+    let d = hue_diff(lab_u8(&orange), track);
+    println!(
+        "orange track → L′ {:.3} C {:.3}, hue moved {d:.1}°; black line → L′ {:.3}",
+        track[0],
+        chroma(track),
+        line[0]
+    );
+    assert!(d < 10.0, "orange track hue moved {d:.1}°");
+    assert!(line[0] >= 0.88);
+}
+
+// ---------------------------------------------------------------------------
 // C ABI, determinism, threads, speed
 // ---------------------------------------------------------------------------
 
@@ -878,6 +984,133 @@ fn c_abi_rejects_bad_input() {
         assert_eq!(mm_dark_render(style, p, 32, 32, 128, 0.9, -0.1, 0.25, 0.25), MM_OK);
         assert!(tile.chunks_exact(4).all(|q| q == [33, 33, 36, 255]));
         mm_dark_style_free(style);
+    }
+}
+
+/// Degenerate overviews (blank, black, one colour, tiny, very thin, noise, a checkerboard, a
+/// ramp) profile without panics through the C ABI: too small ones fail, the others give a
+/// profile that builds a style and renders, the lookup table close to the formula.
+#[test]
+fn degenerate_overviews_profile_without_panics() {
+    let solid = |w: usize, h: usize, c: [u8; 3]| Rgb8::from_rgb(w, h, c.repeat(w * h)).unwrap();
+    let mut rng = Rng::new(5);
+    let noise = Rgb8::from_rgb(300, 300, (0..300 * 300 * 3).map(|_| (rng.next_f64() * 256.0) as u8).collect()).unwrap();
+    let checker = Rgb8::from_rgb(
+        256,
+        256,
+        (0..256 * 256).flat_map(|i| [if ((i % 256) / 4 + (i / 256) / 4) % 2 == 0 { 0 } else { 255 }; 3]).collect(),
+    )
+    .unwrap();
+    let ramp = Rgb8::from_rgb(512, 512, (0..512 * 512).flat_map(|i| [((i % 512) / 2) as u8; 3]).collect()).unwrap();
+    let cases = [
+        ("white", solid(64, 64, [255; 3]), true),
+        ("black", solid(64, 64, [0; 3]), true),
+        ("mid grey", solid(64, 64, [128; 3]), true),
+        ("red", solid(64, 64, [255, 0, 0]), true),
+        ("1×1", solid(1, 1, [200; 3]), false),
+        ("7×100", solid(7, 100, [200; 3]), false),
+        ("8×8", solid(8, 8, [10; 3]), true),
+        ("8×2048", solid(8, 2048, [240; 3]), true),
+        ("2048×8", solid(2048, 8, [240; 3]), true),
+        ("4100×17", solid(4100, 17, [240; 3]), false),
+        ("noise", noise, true),
+        ("checkerboard", checker, true),
+        ("ramp", ramp, true),
+    ];
+    for (name, img, ok) in cases {
+        let rgba = rgba_from_rgb(&img);
+        let v = take_json(unsafe { mm_dark_profile(rgba.as_ptr(), img.w as u32, img.h as u32, img.w as u32 * 4) });
+        assert_eq!(v["status"] == "ok", ok, "{name}: {v}");
+        if !ok {
+            continue;
+        }
+        let json = v.to_string();
+        let style = DarkStyle::from_json(&json).unwrap_or_else(|e| panic!("{name}: {e}: {json}"));
+        let tile = crop_rgb(&img, 0, 0, img.w.min(64), img.h.min(64));
+        let rect = TileRect::of_pixels(0, 0, tile.w, tile.h, img.w, img.h);
+        let lut = render_rgb(&style, &tile, rect);
+        let mut exact = rgba_from_rgb(&tile);
+        style.render_exact(&mut exact, tile.w, tile.h, tile.w * 4, rect).unwrap();
+        let exact = rgb_from_rgba(&exact, tile.w, tile.h);
+        let worst = lut.data.iter().zip(&exact.data).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+        println!("{name}: {:?}, edge bands {}, LUT vs exact ≤ {worst}", style.params(), style.edge().is_some());
+        assert!(worst <= 24, "{name}: LUT differs from the formula by {worst}");
+    }
+}
+
+/// Random valid profiles (any paper, edge bands, tone parameters at the limits the JSON
+/// accepts) render random tiles (padded strides, rectangles far outside the map or at the
+/// limits of f64) without panics, the lookup table close to the formula.
+#[test]
+fn random_profiles_and_tiles_render_without_panics() {
+    let mut rng = Rng::new(77);
+    for it in 0..60 {
+        let ink = 0.02 + rng.next_f64() * 0.8;
+        let dead = rng.next_f64() * (0.9 - ink).min(0.5);
+        let gain = 0.25 + rng.next_f64() * 3.75;
+        let (cols, rows) = (1 + (rng.next_f64() * 40.0) as usize, 1 + (rng.next_f64() * 40.0) as usize);
+        // Paper down to 0 (a value the profile never writes, but the JSON accepts).
+        let floor = if it % 7 == 0 { 0.0 } else { 0.2 };
+        let rgb: Vec<f32> = (0..cols * rows * 3).map(|_| (rng.next_f64() as f32).max(floor)).collect();
+        let edge = (it % 2 == 0).then(|| EdgeInset {
+            left: (0..1 + it % 5).map(|_| (rng.next_f64() * 0.05) as f32).collect(),
+            right: vec![0.0; 3],
+            top: (0..1 + it % 3).map(|_| (rng.next_f64() * 0.25) as f32).collect(),
+            bottom: vec![0.25],
+        });
+        let profile =
+            DarkProfile { params: DarkParams { ink, dead, gain }, paper: PaperGrid { cols, rows, rgb }, edge };
+        let json = profile.to_json();
+        let style = DarkStyle::from_json(&json).unwrap_or_else(|e| panic!("{e}: {json}"));
+        let mut worst = 0;
+        for _ in 0..4 {
+            let (w, h) = (1 + (rng.next_f64() * 70.0) as usize, 1 + (rng.next_f64() * 70.0) as usize);
+            let stride = w * 4 + (rng.next_f64() * 9.0) as usize;
+            let mut exact: Vec<u8> = (0..stride * h).map(|_| (rng.next_f64() * 256.0) as u8).collect();
+            let rect = match (rng.next_f64() * 6.0) as usize {
+                0 => TileRect { u0: -1e300, v0: 1e300, du: 1e300, dv: 1e-300 },
+                1 => TileRect { u0: 0.99, v0: 0.99, du: 0.5, dv: 0.5 },
+                2 => TileRect { u0: -0.3, v0: -0.3, du: 1.6, dv: 1.6 },
+                3 => TileRect { u0: f64::MAX, v0: -f64::MAX, du: f64::MAX, dv: f64::MAX },
+                _ => TileRect {
+                    u0: rng.next_f64(),
+                    v0: rng.next_f64(),
+                    du: rng.next_f64() + 1e-9,
+                    dv: rng.next_f64() + 1e-9,
+                },
+            };
+            let mut lut = exact.clone();
+            style.render(&mut lut, w, h, stride, rect).unwrap();
+            style.render_exact(&mut exact, w, h, stride, rect).unwrap();
+            worst = worst.max(lut.iter().zip(&exact).map(|(a, b)| a.abs_diff(*b)).max().unwrap());
+        }
+        println!("profile {it}: {:?}, {cols}×{rows} cells: LUT vs exact ≤ {worst}", style.params());
+        assert!(worst <= 96, "profile {it}: LUT differs from the formula by {worst}");
+    }
+}
+
+/// Freeing a style twice, or freeing a pointer that never was a style, is ignored rather than
+/// undefined behaviour (a double free corrupted the heap).
+#[test]
+fn c_abi_style_double_free_is_ignored() {
+    let good = CString::new(
+        r#"{"status":"ok","version":1,"ink":0.2,"dead":0.02,"gain":1.0,"paper":{"cols":1,"rows":1,"rgb":[1,1,1]}}"#,
+    )
+    .unwrap();
+    unsafe {
+        let a = mm_dark_style_new(good.as_ptr());
+        assert!(!a.is_null());
+        mm_dark_style_free(a);
+        mm_dark_style_free(a);
+        let mut not_a_style = [0u64; 8];
+        mm_dark_style_free(not_a_style.as_mut_ptr() as *mut MMDarkStyle);
+        // Styles made afterwards work as usual.
+        let b = mm_dark_style_new(good.as_ptr());
+        let mut tile = vec![255u8; 8 * 8 * 4];
+        assert_eq!(mm_dark_render(b, tile.as_mut_ptr(), 8, 8, 32, 0.0, 0.0, 1.0, 1.0), MM_OK);
+        assert!(tile.chunks_exact(4).all(|q| q == [33, 33, 36, 255]));
+        mm_dark_style_free(b);
+        mm_dark_style_free(b);
     }
 }
 
