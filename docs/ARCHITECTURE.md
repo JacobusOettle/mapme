@@ -935,8 +935,13 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
                       warp.rs: the warp contract and its accuracy on that photo;
                       dark.rs: dark map rendering; wide.rs: hints, hint_queries,
                       the chunked wide search on synthetic terrain;
-                      wide_measure.rs: ignored network measurements)
+                      wide_measure.rs: ignored network measurements;
+                      sheets.rs: the Castle Gorge and Mhlabatini sheets; stress.rs:
+                      the grid under simulated phone-OCR damage)
 fixtures/grootkloof/  the real map (PDF + extracted JPEG), DEM tiles, OCR fixture, truth
+fixtures/castle-gorge/, fixtures/mhlabatini/  two more sheets of the series: PDF, JPEG,
+                      DEM tiles, truth, RapidOCR (ocr.json) and Apple Vision OCR
+                      (vision-ocr.json); fixtures/tools/ builds them
 ios/                  XcodeGen project (project.yml), app, unit tests, UI tests
 scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
 .github/workflows/    core.yml (Linux), ios.yml (macOS build, test, IPA)
