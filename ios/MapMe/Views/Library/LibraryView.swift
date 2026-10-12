@@ -161,7 +161,7 @@ struct LibraryView: View {
             } label: {
                 Label("Locate again", systemImage: "scope")
             }
-            if !map.isGeoreferenced {
+            if !map.isGeoreferenced, map.locateAttempt?.failure.widerSearchMayHelp ?? true {
                 Button {
                     searchWiderTarget = map
                 } label: {

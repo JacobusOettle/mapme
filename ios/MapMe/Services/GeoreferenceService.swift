@@ -392,14 +392,19 @@ final class GeoreferenceService {
         return .other
     }
 
-    /// What the result screen says. The core's own message is used when it explains the failure
-    /// (it says what was searched); the app's own words otherwise.
+    /// What the result screen says. After a wide search the core's own message is used when it
+    /// has one (it says what was searched); after the first search a terrain miss gets the app's
+    /// words, which lead to the buttons on offer ("Search wider…", "Calibrate manually").
     static func failureMessage(_ failure: GeorefFailure, response: GeorefResponse?, searchRadiusKm: Double,
                                hintsSent: Int, tally: TerrainPullLoop.Tally, isWide: Bool) -> String {
         let core = response?.message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let radius = SearchText.distance(km: searchRadiusKm, units: .metric)
         switch failure {
         case .noPosition:
+            if !isWide, !(response?.hintQueries ?? []).isEmpty {
+                // The result screen offers "Search wider…" for the names (`WideSearch.resultActions`).
+                return "No coordinate grid could be read on this map. Turn on location so MapMe can match the contours near you, look for the places named on the map with Search wider, or calibrate manually."
+            }
             return "No coordinate grid could be read on this map. Turn on location so MapMe can match the contours near you, or calibrate manually."
         case .stoppedAtTileLimit:
             var text = "Stopped after downloading \(SearchText.grouped(tally.requested)) terrain tiles"
@@ -414,8 +419,8 @@ final class GeoreferenceService {
         case .engineError:
             return core.isEmpty ? "MapMe couldn't analyse this map." : core
         case .noTerrainMatch:
-            if !core.isEmpty { return core }
             if isWide {
+                if !core.isEmpty { return core }
                 var details = ["searched \(SearchText.grouped(tally.requested)) terrain tiles"]
                 if hintsSent > 0 {
                     details.append("tried \(hintsSent) \(hintsSent == 1 ? "place" : "places") named on the map")
@@ -449,9 +454,8 @@ final class GeoreferenceService {
     /// `radiusKm`, without running the core.
     static func simulatedTerrainMiss(radiusKm: Double, isWide: Bool) async -> GeorefOutcome {
         try? await Task.sleep(nanoseconds: 600_000_000)
-        let message = isWide
-            ? "No match within \(SearchText.distance(km: radiusKm, units: .metric)) of you (searched 0 terrain tiles)."
-            : "Couldn't match this map's contours to terrain within \(SearchText.distance(km: radiusKm, units: .metric)) of you."
+        let message = failureMessage(.noTerrainMatch, response: nil, searchRadiusKm: radiusKm, hintsSent: 0,
+                                     tally: TerrainPullLoop.Tally(), isWide: isWide)
         return GeorefOutcome(georef: nil, message: message, pois: [], response: nil, failure: .noTerrainMatch,
                              radiusKm: radiusKm, hintQueries: ["Grootkloof", "Magaliesberg", "Hartbeespoort"])
     }

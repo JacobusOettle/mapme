@@ -225,6 +225,7 @@ struct SearchWiderSheet: View {
     }
 
     private var notFoundText: String {
+        guard position != nil else { return "Not found yet. Look for the places named on the map?" }
         let radius = SearchText.distance(km: previousRadiusKm ?? WideSearch.nearRadiusKm, units: units)
         return "Not found within \(radius) of you. Look farther away?"
     }
@@ -296,12 +297,12 @@ struct SearchWiderSheet: View {
     // MARK: - Wording
 
     /// A preset's number in the user's units (accessibility identifiers: "radiusOption-1000").
-    static func displayValue(_ km: Double, units: DistanceUnits) -> Int {
+    nonisolated static func displayValue(_ km: Double, units: DistanceUnits) -> Int {
         Int((units == .metric ? km : km / WideSearch.kmPerMile).rounded())
     }
 
     /// What "Use names on the map" will do, naming up to two of the names.
-    static func namesFooter(_ names: [String]) -> String {
+    nonisolated static func namesFooter(_ names: [String]) -> String {
         let cleaned = Array(HintGeocoder.cleanQueries(names).prefix(HintGeocoder.defaultMaxQueries))
         let quoted = cleaned.prefix(2).map { "\u{201C}\($0)\u{201D}" }
         let list: String

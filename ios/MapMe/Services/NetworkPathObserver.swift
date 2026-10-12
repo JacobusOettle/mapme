@@ -22,7 +22,7 @@ final class NetworkPathObserver {
     private(set) var isConstrained = false
 
     @ObservationIgnored private var monitor: NWPathMonitor?
-    @ObservationIgnored private let lock = NSLock()
+    private let lock = NSLock()
     @ObservationIgnored private var latest = (online: true, expensive: false, constrained: false)
 
     /// Latest path as seen from any thread.

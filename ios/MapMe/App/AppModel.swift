@@ -278,13 +278,23 @@ final class AppModel {
         let options = WideSearchOptions(useMapNames: choice.useMapNames,
                                         knownHintQueries: storedQueries.isEmpty ? nil : storedQueries,
                                         tileCap: choice.tileCap)
+        let here = location.location.flatMap { GeoreferenceService.gpsFix(from: $0) }.map { LatLon(lat: $0.lat, lon: $0.lon) }
         importTask = Task { [weak self] in
             guard let self else { return }
+            var wide = options
             do {
+                if choice.estimate == nil, let here {
+                    // Started before the sheet had its estimate: the tile cap still follows the search's size.
+                    let radiusKm = choice.radiusKm
+                    let estimate = await Task.detached(priority: .userInitiated) {
+                        MapMeCore.searchEstimate(radiusKm: radiusKm, gps: here)
+                    }.value
+                    wide.tileCap = WideSearch.tileCap(for: estimate)
+                }
                 let image = try await self.importer.loadBaseImage(for: map)
                 let ocr = await Task.detached(priority: .userInitiated) { library.loadOCR(for: map) }.value
                 guard !Task.isCancelled, self.importJob?.id == jobID else { return }
-                await self.locate(map: map, image: image, radiusKm: choice.radiusKm, wide: options, knownText: ocr)
+                await self.locate(map: map, image: image, radiusKm: choice.radiusKm, wide: wide, knownText: ocr)
             } catch {
                 guard self.importJob?.id == jobID else { return }
                 self.importJob?.phase = .needsCalibration

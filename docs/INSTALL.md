@@ -189,8 +189,11 @@ Run `scripts/build-core-ios.sh` again after changes in `core/`, and
    (25°49'S, 27°23'E, ...): located in a few seconds, no internet needed.
    Maps without coordinates are matched by their contour lines against real
    terrain near your GPS position; this downloads elevation tiles once (internet
-   needed) and only searches within the *Search radius* in Settings (20 km by
-   default), so do it near the area or raise the radius.
+   needed) and first searches within the *Terrain search radius* in Settings
+   (50 km by default). If the map is farther away, **Search wider…** on the
+   result screen (or in the library menu of the map) looks up to 2 000 km out,
+   checking the places named on the map first, and says beforehand how much it
+   will download.
 5. **On the map**: the red dot is you, the halo is the GPS accuracy and the cone
    is your heading. The orientation button switches between *North up*,
    *Heading up* (the map turns with you) and *Free rotate*. Tap **Record** for

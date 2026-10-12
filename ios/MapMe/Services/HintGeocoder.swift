@@ -160,19 +160,68 @@ struct HintGeocoder {
         return places ?? []
     }
 
-    /// `operation`'s result, or nil when it throws or takes longer than `seconds` (it is then
-    /// cancelled).
-    static func withTimeout<T: Sendable>(_ seconds: Double,
+    /// `operation`'s result, or nil when it throws, takes longer than `seconds` or the caller is
+    /// cancelled. A late operation is cancelled and given `grace` seconds to wind down, but never
+    /// waited on beyond that: a lookup that ignores cancellation (an `MKLocalSearch` whose
+    /// completion handler never comes) cannot hold up the search.
+    static func withTimeout<T: Sendable>(_ seconds: Double, grace: Double = 1,
                                          _ operation: @escaping @Sendable () async throws -> T) async -> T? {
-        await withTaskGroup(of: Optional<T>.self) { group in
-            group.addTask { try? await operation() }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
+        let work = Task { () -> T? in try? await operation() }
+        let result = await value(of: work, within: seconds)
+        work.cancel()
+        if let result { return result }
+        _ = await value(of: work, within: grace)
+        return nil
+    }
+
+    /// `.some(work's value)` when it comes within `seconds`; nil when time runs out or the caller is
+    /// cancelled first. Never waits longer than that, whatever `work` does.
+    private static func value<T: Sendable>(of work: Task<T?, Never>, within seconds: Double) async -> T?? {
+        let race = FirstAnswer<T?>()
+        let waiter = Task {
+            let value = await work.value
+            race.answer(.some(value))
         }
+        let timer = Task {
+            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+            race.answer(nil)
+        }
+        let result = await withTaskCancellationHandler {
+            await withCheckedContinuation { race.wait($0) }
+        } onCancel: {
+            race.answer(nil)
+        }
+        timer.cancel()
+        waiter.cancel()
+        return result
+    }
+}
+
+/// The first of several racing answers, handed to one waiting continuation. Thread-safe.
+private final class FirstAnswer<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value?, Never>?
+    private var answered = false
+    private var value: Value?
+
+    func wait(_ c: CheckedContinuation<Value?, Never>) {
+        let ready: Value?? = lock.withLock {
+            if answered { return .some(value) }
+            continuation = c
+            return nil
+        }
+        if let ready { c.resume(returning: ready) }
+    }
+
+    /// The first call wins; later ones are ignored.
+    func answer(_ v: Value?) {
+        let waiting: CheckedContinuation<Value?, Never>? = lock.withLock {
+            guard !answered else { return nil }
+            answered = true
+            value = v
+            defer { continuation = nil }
+            return continuation
+        }
+        waiting?.resume(returning: v)
     }
 }

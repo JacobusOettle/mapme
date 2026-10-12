@@ -225,8 +225,10 @@ struct ImportProgressView: View {
             .buttonStyle(ImportActionButtonStyle(kind: .primary))
             .accessibilityIdentifier("openMapButton")
         case .needsCalibration:
-            // A terrain miss after the first search leads with "Search wider…".
-            let offered = WideSearch.resultActions(failure: job.failure, radiusKm: job.radiusKm, canCalibrate: job.mapID != nil)
+            // A terrain miss after the first search leads with "Search wider…"; without a position,
+            // the names on the map can still say where to look.
+            let offered = WideSearch.resultActions(failure: job.failure, radiusKm: job.radiusKm, canCalibrate: job.mapID != nil,
+                                                   hasMapNames: !job.isWideSearch && !job.hintQueries.isEmpty)
             VStack(spacing: 10) {
                 ForEach(Array(offered.enumerated()), id: \.offset) { index, action in
                     resultButton(action, job: job, kind: index == 0 ? .primary : index == 1 ? .secondary : .plain)

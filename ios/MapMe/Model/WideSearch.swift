@@ -28,6 +28,12 @@ enum GeorefFailure: String, Codable, Equatable, Sendable {
     var offersWiderSearch: Bool {
         self == .noTerrainMatch || self == .stoppedAtTileLimit
     }
+
+    /// "Search wider" may still help (the library menu): not when the map has no contour lines to
+    /// match or the engine could not read it.
+    var widerSearchMayHelp: Bool {
+        self != .noContours && self != .engineError
+    }
 }
 
 /// The last automatic locate that did not find a map (stored in `MapDocument`), for "Search wider":
@@ -82,9 +88,10 @@ enum ImportResultAction: Equatable {
 
 /// Limits, presets and wording of "Search wider".
 enum WideSearch {
-    /// The first search's radius never goes beyond this (Settings: 10…100 km); above it a search
-    /// counts as wide.
+    /// The first search's default radius; beyond it the core searches wide (in chunks, coarser).
     static let nearRadiusKm = 50.0
+    /// The first search's radius is at most this (Settings: 10…100 km).
+    static let firstSearchMaxRadiusKm = 100.0
     static let maxRadiusKm = 2_000.0
     static let customRangeKm: ClosedRange<Double> = 10...2_000
     /// Safety cap on terrain tiles for a wide search without an estimate (≈ 150 MB at zoom 9).
@@ -139,15 +146,21 @@ enum WideSearch {
     }
 
     /// Which buttons the result screen shows for a map that was not located, first = primary.
-    /// After the first (near) search a terrain miss leads with "Search wider…"; after a wide one
-    /// with "Calibrate manually" (still offering a wider search below the 2 000 km limit).
-    static func resultActions(failure: GeorefFailure?, radiusKm: Double?, canCalibrate: Bool) -> [ImportResultAction] {
+    /// After the first search (up to 100 km) a terrain miss leads with "Search wider…"; after a
+    /// wide one with "Calibrate manually" (still offering a wider search below the 2 000 km limit).
+    /// Without a position to search around, names on the map (`hasMapNames`) can still say where
+    /// to look, so "Search wider…" is offered after "Calibrate manually".
+    static func resultActions(failure: GeorefFailure?, radiusKm: Double?, canCalibrate: Bool,
+                              hasMapNames: Bool = false) -> [ImportResultAction] {
         guard canCalibrate else { return [.openAnyway] }
         let radius = radiusKm ?? nearRadiusKm
         if let failure, failure.offersWiderSearch, radius < maxRadiusKm - 0.5 {
-            if radius <= nearRadiusKm + 0.5 {
+            if radius <= firstSearchMaxRadiusKm + 0.5 {
                 return [.searchWider, .calibrate, .openAnyway]
             }
+            return [.calibrate, .searchWider, .openAnyway]
+        }
+        if failure == .noPosition, hasMapNames {
             return [.calibrate, .searchWider, .openAnyway]
         }
         return [.calibrate, .openAnyway, .tryAgain]

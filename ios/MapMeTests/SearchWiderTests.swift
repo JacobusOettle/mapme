@@ -356,11 +356,28 @@ final class SearchWiderTests: XCTestCase {
         XCTAssertEqual(noGPS.failure, .noPosition)
         XCTAssertTrue(noGPS.message.contains("Turn on location"))
 
-        // The core's own message wins when it has one.
+        // After a wide search the core's own message wins when it has one.
         let core = GeoreferenceService.outcome(from: GeorefResponse(status: "failed", message: "No match within 250 km of you.",
                                                                     search: SearchStatus(tilesPlanned: 160)),
                                                hadGPS: true, searchRadiusKm: 250, isWide: true)
         XCTAssertEqual(core.message, "No match within 250 km of you.")
+
+        // After the first search the app's words lead to the buttons on offer.
+        let near = GeoreferenceService.outcome(
+            from: GeorefResponse(status: "failed",
+                                 message: "Couldn't match this map's contours to terrain within 50 km of you. Try calibrating manually or pick the contour colour.",
+                                 search: SearchStatus(radiusM: 50_000, searchedRadiusM: 50_000, tilesPlanned: 25, tilesFetched: 25)),
+            hadGPS: true, searchRadiusKm: 50)
+        XCTAssertEqual(near.failure, .noTerrainMatch)
+        XCTAssertEqual(near.message,
+                       "This map's contour lines didn't match the terrain within 50 km of you. Search wider, or calibrate it manually.")
+
+        // No position, but names on the map: the message points at them.
+        let named = GeoreferenceService.outcome(from: GeorefResponse(status: "failed", message: "No coordinate labels found.",
+                                                                     hintQueries: ["CASTLE GORGE"]),
+                                                hadGPS: false, searchRadiusKm: 50)
+        XCTAssertEqual(named.failure, .noPosition)
+        XCTAssertTrue(named.message.contains("Turn on location") && named.message.contains("Search wider"), named.message)
     }
 
     func testResultActionsFollowTheOutcome() {
@@ -382,6 +399,19 @@ final class SearchWiderTests: XCTestCase {
                            [.calibrate, .openAnyway, .tryAgain], "\(String(describing: failure))")
         }
         XCTAssertEqual(WideSearch.resultActions(failure: .noTerrainMatch, radiusKm: 50, canCalibrate: false), [.openAnyway])
+        // A first search set to 100 km in Settings still leads with "Search wider…".
+        XCTAssertEqual(WideSearch.resultActions(failure: .noTerrainMatch, radiusKm: 100, canCalibrate: true),
+                       [.searchWider, .calibrate, .openAnyway])
+        // No position, but names on the map to look up.
+        XCTAssertEqual(WideSearch.resultActions(failure: .noPosition, radiusKm: 50, canCalibrate: true, hasMapNames: true),
+                       [.calibrate, .searchWider, .openAnyway])
+        XCTAssertEqual(WideSearch.resultActions(failure: .noContours, radiusKm: 50, canCalibrate: true, hasMapNames: true),
+                       [.calibrate, .openAnyway, .tryAgain])
+        // The library menu offers it unless the map has no contours or could not be read.
+        let kinds: [GeorefFailure] = [.noTerrainMatch, .stoppedAtTileLimit, .noPosition, .noContours, .terrainUnavailable,
+                                      .engineError, .cancelled, .other]
+        XCTAssertEqual(kinds.filter(\.widerSearchMayHelp),
+                       [.noTerrainMatch, .stoppedAtTileLimit, .noPosition, .terrainUnavailable, .cancelled, .other])
     }
 
     // MARK: - Place-name hints
@@ -441,6 +471,25 @@ final class SearchWiderTests: XCTestCase {
         offline.isOnline = { false }
         let none = await offline.hints(for: ["ALPHA"], near: here, searchRadiusM: 100_000)
         XCTAssertTrue(none.isEmpty)
+    }
+
+    func testTimeoutDoesNotWaitForALookupThatIgnoresCancellation() async {
+        let started = Date()
+        let value: Int? = await HintGeocoder.withTimeout(0.2, grace: 0.2) {
+            // Awaiting a detached task does not pass the cancel on: like an MKLocalSearch that
+            // never calls back.
+            await Task.detached { () -> Int in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                return 7
+            }.value
+        }
+        XCTAssertNil(value)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.5)
+
+        let quick: Int? = await HintGeocoder.withTimeout(2) { 42 }
+        XCTAssertEqual(quick, 42)
+        let failing: Int? = await HintGeocoder.withTimeout(2) { () throws -> Int in throw URLError(.notConnectedToInternet) }
+        XCTAssertNil(failing)
     }
 
     // MARK: - Estimates and wording
