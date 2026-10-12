@@ -432,9 +432,11 @@ fn parse_tokens(toks: &[Tok]) -> Option<CoordValue> {
 
 /// Parse a coordinate label: DMS (25°49'00"S, 25 49 00 S, 25°49′S, OCR
 /// variants with *, º, ’, ”), decimal degrees (-25.8167, 25.8167°S) and
-/// projected grid values (540000, 540 000mE). Plain 2–4 digit numbers (spot
-/// heights, abbreviated grid labels) are not coordinates here; `grid.rs`
-/// resolves abbreviated grid labels against detected lines.
+/// projected grid values (540000, 540 000mE); failing those, a garbled DMS
+/// label whose cheapest readings agree (`coordinate_readings`). Plain 2–4
+/// digit numbers (spot heights, abbreviated grid labels) are not
+/// coordinates here; `grid.rs` resolves abbreviated grid labels against
+/// detected lines.
 pub fn parse_coordinate(text: &str) -> Option<CoordValue> {
     parse_strict(text).or_else(|| {
         // A garbled DMS label (`fuzzy_dms`) when every cheapest reading agrees.
@@ -626,6 +628,10 @@ fn fuzzy_dms(c: &[char]) -> Vec<CoordReading> {
             continue;
         }
         if start >= 2 && mark_cost(c[start - 1], MarkSlot::Deg).is_some() && c[start - 2].is_ascii_digit() {
+            continue;
+        }
+        // Nor a degree, minute or second sign: "°53'00\"S" is the end of a label cut off.
+        if start >= 1 && matches!(c[start - 1], DEG | MIN | SEC) {
             continue;
         }
         for dlen in 1..=3 {
@@ -1723,6 +1729,7 @@ mod tests {
             "12 34 Street",
             "12 34 56 Street",
             "25 53 00",
+            "°53'00\"S",
             "Sept 2017-E",
             "1:25 000",
             "Annual Change: 4.8' per year West",

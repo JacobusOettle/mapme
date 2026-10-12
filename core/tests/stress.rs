@@ -6,8 +6,9 @@
 //! the sheet's other OCR text, then damages the labels the way a phone OCR
 //! does (seeded, reproducible):
 //!
-//! * only some labels survive (at least `min_keep` per axis), some read twice
-//!   (overlapping passes) with independent damage;
+//! * only some labels survive (two or more per axis, one on one axis in
+//!   every fifth trial), some read twice (overlapping passes) with
+//!   independent damage;
 //! * marks misread as other symbols, letters or digits, or lost; zeros read
 //!   as O or Q; a lowercase or misread hemisphere letter, or none; stray spaces;
 //! * a read cut off at a tile edge (part of the text, a shorter box);
@@ -18,10 +19,15 @@
 //! The app's request is replayed (dpi 300, GPS 60 km away, grid only) and the
 //! answer scored at the true graticule intersections. A trial is "confident
 //! and wrong" when the answer is off by more than 50 m with confidence ≥ 0.5;
-//! there must be none. With at least two correct labels on each axis the
-//! sheet must be located (≥ 95 %) within 5 m.
+//! there must be none. With at least two correct labels read whole on each
+//! axis ("Clean", "OneWrong") the sheet must be located (≥ 95 %) within 5 m.
+//! With fewer on an axis ("Short") an answer can only come from one label
+//! there (`GridResult::lone_label`): nothing outvotes a misread, so it is
+//! flagged (confidence < 0.5) and only reported.
 //!
-//! `cargo test --release --test stress -- --nocapture` prints the table.
+//! `cargo test --release --test stress -- --nocapture` prints the table;
+//! `STRESS_TRIALS` and `STRESS_SEED` run more or other trials, `STRESS_DUMP`
+//! names a directory to write every trial's OCR to.
 
 mod common;
 use common::*;
@@ -277,6 +283,8 @@ struct Tally {
     max_err: f64,
     confident_wrong: usize,
     low_conf: usize,
+    /// Answers off by more than 50 m (flagged with confidence < 0.5 or not).
+    wrong: usize,
 }
 
 #[test]
@@ -284,6 +292,7 @@ fn grid_survives_phone_ocr_damage() {
     let mut table = String::new();
     let mut failures = Vec::new();
     let mut confident_wrong = Vec::new();
+    let mut flagged_wrong = Vec::new();
     let mut totals: Vec<(String, Kind, Tally)> = Vec::new();
     // STRESS_TRIALS / STRESS_SEED run more trials or other ones.
     let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
@@ -325,6 +334,15 @@ fn grid_survives_phone_ocr_damage() {
             if r.status == Status::Ok && conf < 0.5 {
                 t.low_conf += 1;
             }
+            if r.status == Status::Ok && err > 50.0 {
+                t.wrong += 1;
+                if conf < 0.5 && flagged_wrong.len() < 30 {
+                    flagged_wrong.push(format!(
+                        "[{} #{k} {:?}] {err:.0} m off, conf {conf:.2}: {} | {}",
+                        sheet.dir, tr.kind, r.message, tr.log
+                    ));
+                }
+            }
             if r.status == Status::Ok && err > 50.0 && conf >= 0.5 {
                 t.confident_wrong += 1;
                 confident_wrong.push(format!(
@@ -352,25 +370,29 @@ fn grid_survives_phone_ocr_damage() {
     }
     let _ = writeln!(
         table,
-        "{:<13} {:<9} {:>6} {:>8} {:>9} {:>11} {:>9} {:>16}",
-        "sheet", "case", "trials", "located", "rate", "max err m", "conf<0.5", "confident wrong"
+        "{:<13} {:<9} {:>6} {:>8} {:>9} {:>11} {:>9} {:>6} {:>16}",
+        "sheet", "case", "trials", "located", "rate", "max err m", "conf<0.5", "wrong", "confident wrong"
     );
     for (dir, kind, t) in &totals {
         let _ = writeln!(
             table,
-            "{dir:<13} {:<9} {:>6} {:>8} {:>8.1}% {:>11.1} {:>9} {:>16}",
+            "{dir:<13} {:<9} {:>6} {:>8} {:>8.1}% {:>11.1} {:>9} {:>6} {:>16}",
             format!("{kind:?}"),
             t.n,
             t.located,
             100.0 * t.located as f64 / t.n.max(1) as f64,
             t.max_err,
             t.low_conf,
+            t.wrong,
             t.confident_wrong
         );
     }
     println!("{table}");
     for f in &failures {
         println!("not located: {f}");
+    }
+    for f in &flagged_wrong {
+        println!("wrong, flagged for checking: {f}");
     }
     for f in &confident_wrong {
         println!("CONFIDENT AND WRONG: {f}");

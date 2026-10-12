@@ -613,3 +613,69 @@ fn mhlabatini_long_vegetation_hatching_is_no_grid() {
     assert_eq!(r.method, Some(Method::Grid), "{}", r.message);
     assert!(err <= GRID_MAX_ERR_M, "max error {err:.1} m");
 }
+
+// ---------------------------------------------------------------------------
+// One latitude label read
+// ---------------------------------------------------------------------------
+
+/// The phone read one latitude label (`lat_text` at line `lat`, or its printed
+/// text) and the sheet's phone-OCR pair of longitude labels.
+fn one_latitude_label(sheet: &Sheet, lat: usize, lat_text: Option<&str>) -> Vec<OcrObservation> {
+    let mut out: Vec<OcrObservation> = sheet
+        .ocr()
+        .into_iter()
+        .filter(|o| {
+            let (cx, cy) = o.center();
+            cx >= 200.0 && cy <= 4790.0
+        })
+        .collect();
+    let (lats, lons) = printed_labels(sheet);
+    let mut l = lats[lat].clone();
+    if let Some(t) = lat_text {
+        l.text = t.into();
+    }
+    out.push(l);
+    out.extend(sheet.phone.keep_lon.iter().map(|&i| lons[i].clone()));
+    out.push(OcrObservation { text: CREDIT.into(), bbox: CREDIT_BBOX, confidence: 0.7 });
+    out
+}
+
+/// One latitude label: the latitudes follow from the longitudes' scale and the
+/// graticule lines. Offline and 60 km away nothing can confirm it, so it is
+/// answered flagged for checking; with the terrain under the map it is
+/// confirmed; read wrong, the terrain rules it out and no answer is given.
+fn lone_latitude_label(sheet: &Sheet, lat: usize, misread: &str) {
+    let _g = serial();
+    let req = request(one_latitude_label(sheet, lat, None), sheet.far, &["grid", "contours"]);
+    let r = run(sheet, &req, None);
+    let err = report("one latitude label, no DEM", sheet, &r);
+    assert_eq!((r.status, r.method), (Status::Ok, Some(Method::Grid)), "{}", r.message);
+    assert!(err <= GRID_MAX_ERR_M, "max error {err:.1} m");
+    assert!(r.confidence.unwrap() < 0.5 && r.message.contains("Only one latitude label"), "{}", r.message);
+    assert_eq!(r.diagnostics["grid"]["lone_label"], true);
+
+    let r = run(sheet, &req, Some(&sheet.path().join("dem")));
+    let err = report("one latitude label, DEM under the map", sheet, &r);
+    assert_eq!((r.status, r.method), (Status::Ok, Some(Method::Grid)), "{}", r.message);
+    assert!(err <= GRID_MAX_ERR_M, "max error {err:.1} m");
+    assert!(r.confidence.unwrap() >= 0.9 && r.message.contains("confirmed by the terrain"), "{}", r.message);
+
+    let req = request(one_latitude_label(sheet, lat, Some(misread)), sheet.far, &["grid", "contours"]);
+    let r = run(sheet, &req, Some(&sheet.path().join("dem")));
+    let err = report("one latitude label read wrong, DEM under the map", sheet, &r);
+    println!("    contour_check: {}", r.diagnostics["contour_check"]);
+    assert_eq!(r.diagnostics["contour_check"]["agrees"], false, "{}", r.diagnostics);
+    assert_eq!(r.status, Status::Failed, "wrong answer {err:.0} m off: {}", r.message);
+}
+
+#[test]
+fn castle_gorge_one_latitude_label() {
+    // 25°49' on its line; misread as 25°48'.
+    lone_latitude_label(&CASTLE_GORGE, 2, "25°48'00\"S");
+}
+
+#[test]
+fn mhlabatini_one_latitude_label() {
+    // 25°50' on its line; misread as 25°56'.
+    lone_latitude_label(&MHLABATINI, 2, "25°56'00\"S");
+}

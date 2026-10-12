@@ -5,11 +5,15 @@
 //! *Line detection*: every thin dark (or strongly coloured) run across a row or
 //! column is reduced to one sub-pixel centre. A projection-profile Hough over
 //! ±5° then finds long straight lines, refined at 0.02° and by least squares.
+//! Runs of closely spaced coloured lines are fill hatching, not a grid.
 //!
-//! *Georeferencing*: coordinate labels are paired with nearby lines of their
+//! *Georeferencing*: coordinate labels (every reading of a garbled one,
+//! `labels::coordinate_readings`) are paired with nearby lines of their
 //! axis and an exhaustive RANSAC fits `value = a + b·position` per axis.
-//! Unlabelled lines that land on round grid values join in. Line
-//! intersections become GCPs for an affine fit.
+//! Unlabelled lines that land on round grid values join in; label values
+//! sharing only a unit far finer than the line step are misreads. Line
+//! intersections become GCPs for an affine fit. An axis with a single label
+//! value may take the other axis' scale (`GridResult::lone_label`).
 //!
 //! *Photos* (`GridOptions::photo`, `detect_lines_photo`): lines are found on
 //! a sharpened copy and against their local background, may converge, and
@@ -21,7 +25,8 @@
 
 use crate::contour::photo_grey_ink;
 use crate::geo::{
-    latlon_to_merc, latlon_to_utm, merc_to_latlon, utm_to_latlon, Affine, Homography, LatLon, Utm, EARTH_RADIUS,
+    haversine_m, latlon_to_merc, latlon_to_utm, merc_to_latlon, utm_to_latlon, Affine, Homography, LatLon, Utm,
+    EARTH_RADIUS,
 };
 use crate::image::{unsharp_mask, Rgb8};
 use crate::labels::{coordinate_readings, CoordValue, OcrObservation};
@@ -1120,6 +1125,12 @@ pub struct GridResult {
     /// None for a graticule (degrees).
     #[serde(default)]
     pub utm_zone: Option<(u8, bool)>,
+    /// One axis was fitted from a single label value, on the other axis'
+    /// scale (`n_lat` or `n_lon` is 1): no other label could outvote a
+    /// misread, so the answer needs checking (against the terrain, or by
+    /// the user).
+    #[serde(default)]
+    pub lone_label: bool,
 }
 
 /// A grid line with its grid value.
@@ -1177,6 +1188,12 @@ const MAX_LINE_STEP_UNITS: f64 = 4.5;
 /// Conformality tolerance of label-only fits (label centres are a few
 /// pixels off their lines; a misread label is off by a whole interval).
 const LABELS_CONFORMAL_TOL: f64 = 0.15;
+/// One-label axes (`solve_axis_lone`): grid lines each axis needs (the
+/// label's, and others on round values)…
+const LONE_MIN_LINES: usize = 3;
+/// …and how far from the GPS fix, when there is one, the map may be (km): a
+/// label cut short reads as another degree ("7°35'" for 27°35').
+const LONE_MAX_GPS_KM: f64 = 250.0;
 
 /// Grid intervals for graticules, in degrees (DMS and decimal).
 const GEO_UNITS: [f64; 27] = [
@@ -1620,6 +1637,8 @@ struct AxisLines<'a> {
     t_mid: f64,
     /// Coverage of every line (which of two traces of one value to keep).
     coverage: Vec<f64>,
+    /// Distinct label values a fit needs (1 for `solve_axis_lone`).
+    min_values: usize,
 }
 
 impl AxisLines<'_> {
@@ -1666,7 +1685,7 @@ impl AxisLines<'_> {
         }
         let mut vals: Vec<f64> = inl.iter().map(|&(ci, _)| self.cands[ci].value).collect();
         sort_dedup(&mut vals);
-        if vals.len() < 2 {
+        if vals.len() < self.min_values.max(1) {
             return None;
         }
         // (grid value, labelled) per line.
@@ -1792,13 +1811,16 @@ fn label_unit(cands: &[Cand]) -> Option<(f64, f64)> {
     (unit > 0.0 && px > 2.0).then_some((unit, px))
 }
 
-/// Exhaustive RANSAC over (label, line) pairs. Returns the best fit for
-/// b > 0 and for b < 0.
-fn solve_axis_lines(cands: &[Cand], lines: &[GridLine], ax: Ax, sys: Sys, ctx: &Ctx, ground_per_lin: f64) -> TopFits {
-    let mut out = TopFits::default();
-    if lines.len() < 2 || cands.len() < 2 {
-        return out;
-    }
+/// The lines of one axis with the labels' candidate lines (`AxisLines`),
+/// and every label's candidate lines with their distances.
+#[allow(clippy::type_complexity)]
+fn axis_lines<'a>(
+    cands: &'a [Cand],
+    lines: &[GridLine],
+    ax: Ax,
+    sys: Sys,
+    ctx: &Ctx,
+) -> Option<(AxisLines<'a>, Vec<Vec<(usize, f64)>>)> {
     let centre = match ax {
         Ax::Y => ctx.w / 2.0,
         Ax::X => ctx.h / 2.0,
@@ -1815,7 +1837,7 @@ fn solve_axis_lines(cands: &[Cand], lines: &[GridLine], ax: Ax, sys: Sys, ctx: &
         spacing = unit_px;
     }
     if spacing <= 2.0 {
-        return out;
+        return None;
     }
     // Up to three candidate lines per label, as (line, distance), nearest first.
     let near_d: Vec<Vec<(usize, f64)>> = cands
@@ -1836,22 +1858,12 @@ fn solve_axis_lines(cands: &[Cand], lines: &[GridLine], ax: Ax, sys: Sys, ctx: &
             d
         })
         .collect();
-    let mut pairs: Vec<(usize, usize)> =
-        near_d.iter().enumerate().flat_map(|(ci, ls)| ls.iter().map(move |&(li, _)| (ci, li))).collect();
-    if pairs.len() > MAX_HYPOTHESIS_PAIRS {
-        // Very many candidates (noisy OCR): hypotheses only from the labels
-        // closest to a line, each with its nearest line.
-        let mut firsts: Vec<(f64, usize, usize)> =
-            near_d.iter().enumerate().filter_map(|(ci, ls)| ls.first().map(|&(li, d)| (d, ci, li))).collect();
-        firsts.sort_by(|x, y| x.0.total_cmp(&y.0));
-        pairs = firsts.into_iter().take(MAX_HYPOTHESIS_PAIRS).map(|(_, ci, li)| (ci, li)).collect();
-    }
     let near = near_d
-        .into_iter()
+        .iter()
         .zip(cands)
         .map(|(ls, c)| {
             let s = 0.5 * c.text_height() + 4.0;
-            ls.into_iter().map(|(li, d)| (li, 1.0 / (1.0 + (d / s).powi(2)))).collect()
+            ls.iter().map(|&(li, d)| (li, 1.0 / (1.0 + (d / s).powi(2)))).collect()
         })
         .collect();
     let tol = if ctx.photo { PHOTO_AXIS_TOL * spacing } else { 0.005 * spacing };
@@ -1867,7 +1879,29 @@ fn solve_axis_lines(cands: &[Cand], lines: &[GridLine], ax: Ax, sys: Sys, ctx: &
         unit_lin: unit.map_or(0.0, |u| u.0),
         t_mid: centre_pos(ax, ctx),
         coverage: lines.iter().map(|l| l.coverage).collect(),
+        min_values: 2,
     };
+    Some((al, near_d))
+}
+
+/// Exhaustive RANSAC over (label, line) pairs. Returns the best fit for
+/// b > 0 and for b < 0.
+fn solve_axis_lines(cands: &[Cand], lines: &[GridLine], ax: Ax, sys: Sys, ctx: &Ctx, ground_per_lin: f64) -> TopFits {
+    let mut out = TopFits::default();
+    if lines.len() < 2 || cands.len() < 2 {
+        return out;
+    }
+    let Some((al, near_d)) = axis_lines(cands, lines, ax, sys, ctx) else { return out };
+    let mut pairs: Vec<(usize, usize)> =
+        near_d.iter().enumerate().flat_map(|(ci, ls)| ls.iter().map(move |&(li, _)| (ci, li))).collect();
+    if pairs.len() > MAX_HYPOTHESIS_PAIRS {
+        // Very many candidates (noisy OCR): hypotheses only from the labels
+        // closest to a line, each with its nearest line.
+        let mut firsts: Vec<(f64, usize, usize)> =
+            near_d.iter().enumerate().filter_map(|(ci, ls)| ls.first().map(|&(li, d)| (d, ci, li))).collect();
+        firsts.sort_by(|x, y| x.0.total_cmp(&y.0));
+        pairs = firsts.into_iter().take(MAX_HYPOTHESIS_PAIRS).map(|(_, ci, li)| (ci, li)).collect();
+    }
     for (k, &(ci, li)) in pairs.iter().enumerate() {
         for &(cj, lj) in &pairs[k + 1..] {
             if ci == cj || li == lj {
@@ -1900,6 +1934,105 @@ fn solve_axis_lines(cands: &[Cand], lines: &[GridLine], ax: Ax, sys: Sys, ctx: &
         refined.push(best);
     }
     refined
+}
+
+/// The one value the labels of an axis give, read on its edge of the map:
+/// every label there must allow it (a label read several ways allows each
+/// reading), and no other value may be read there. With it, the candidate
+/// line the labels are centred on. None for no value, several values or no
+/// centred line.
+fn lone_label(cands: &[Cand], lines: &[GridLine], ax: Ax, ctx: &Ctx) -> Option<(f64, usize)> {
+    let on_edge = |c: &Cand| {
+        let (ex, ey) = ((c.cx / ctx.w).min(1.0 - c.cx / ctx.w), (c.cy / ctx.h).min(1.0 - c.cy / ctx.h));
+        match ax {
+            Ax::Y => ex < EDGE_BAND,
+            Ax::X => ey < EDGE_BAND,
+        }
+    };
+    let edge: Vec<&Cand> = cands.iter().filter(|c| !c.abbrev && on_edge(c)).collect();
+    let mut obs: Vec<usize> = edge.iter().map(|c| c.obs).collect();
+    obs.sort_unstable();
+    obs.dedup();
+    let mut common: Option<Vec<f64>> = None;
+    for o in obs {
+        let mut vals: Vec<f64> = edge.iter().filter(|c| c.obs == o).map(|c| c.value).collect();
+        sort_dedup(&mut vals);
+        common = Some(match common {
+            None => vals,
+            Some(prev) => {
+                prev.into_iter().filter(|p| vals.iter().any(|v| (v - p).abs() <= 1e-9 * p.abs().max(1.0))).collect()
+            }
+        });
+    }
+    let common = common?;
+    let &[v] = common.as_slice() else { return None };
+    // Every label of that value sits centred on one line.
+    let mut line: Option<usize> = None;
+    for c in edge.iter().filter(|c| (c.value - v).abs() <= 1e-9 * v.abs().max(1.0)) {
+        let (along, across, ext) = c.geom();
+        let gate = (0.25 * ext).max(c.text_height());
+        let near = lines
+            .iter()
+            .enumerate()
+            .map(|(li, l)| (li, (l.pos_at(along) - across).abs()))
+            .filter(|x| x.1 <= gate)
+            .min_by(|x, y| x.1.total_cmp(&y.1))?;
+        if line.is_some_and(|l| l != near.0) {
+            return None;
+        }
+        line = Some(near.0);
+    }
+    Some((v, line?))
+}
+
+/// An axis whose labels give one value (`lone_label`), from the other
+/// axis' fit `strong`: a map's scale in Mercator metres is the same along x
+/// and y when it is conformal (UTM, Mercator) and 1/cos φ times more along y
+/// when it is plain lat/lon, and x and y slopes have opposite signs (not
+/// mirrored), so the slope follows; the label puts its value on its line and
+/// the other lines take their round values by counting (at least one must,
+/// within the usual tolerance). Then refitted through those lines.
+fn solve_axis_lone(
+    cands: &[Cand],
+    lines: &[GridLine],
+    ax: Ax,
+    sys: Sys,
+    ctx: &Ctx,
+    strong: &AxisFit,
+    lat: f64,
+) -> Vec<AxisFit> {
+    let mut out = Vec::new();
+    // The other axis' scale must be the lines' own: three or more of its lines on their values
+    // (two misread labels on two lines make a fit of any scale).
+    let strong_ok = strong.lines.len() >= LONE_MIN_LINES;
+    if lines.len() < LONE_MIN_LINES
+        || cands.is_empty()
+        || ctx.photo
+        || !strong.from_lines
+        || strong.c != 0.0
+        || !strong_ok
+    {
+        return out;
+    }
+    let Some((v, li)) = lone_label(cands, lines, ax, ctx) else { return out };
+    let Some((mut al, _)) = axis_lines(cands, lines, ax, sys, ctx) else { return out };
+    al.min_values = 1;
+    let ratios: &[f64] = match sys {
+        Sys::Geo => &[1.0, 1.0 / lat.to_radians().cos().max(0.05)],
+        Sys::Utm => &[1.0],
+    };
+    for &r in ratios {
+        let b = match ax {
+            Ax::Y => -strong.b * r,
+            Ax::X => -strong.b / r,
+        };
+        let a = lin_of(sys, ax, v) - b * al.ts[li];
+        let Some(f) = al.evaluate(a, b).filter(|f| f.lines.len() >= LONE_MIN_LINES) else { continue };
+        if let Some(f) = al.refit(&f).filter(|g| g.lines.len() >= LONE_MIN_LINES && (g.b > 0.0) == (f.b > 0.0)) {
+            out.push(f);
+        }
+    }
+    out
 }
 
 /// Label-only fit on label centres (assumes an axis-aligned map).
@@ -1993,6 +2126,8 @@ struct Solution {
     used: Vec<usize>,
     lines: Vec<ValuedLine>,
     score: f64,
+    /// One axis was fitted from a single label value (`solve_axis_lone`).
+    lone: bool,
 }
 
 impl Solution {
@@ -2149,13 +2284,14 @@ fn combine(
         // Photos: a looser line tolerance lets a stray stroke stand in for a
         // grid line; the 2-D fit of the intersections tells them apart.
         score: fx.score + fy.score - if ctx.photo { rms_m / PHOTO_RMS_PER_SCORE } else { 0.0 },
+        lone: false,
     })
 }
 
 fn solve_system(sys: Sys, cands: &[Cand], lines_x: &[GridLine], lines_y: &[GridLine], ctx: &Ctx) -> Option<Solution> {
     let cx: Vec<Cand> = cands.iter().filter(|c| c.ax == Ax::X).cloned().collect();
     let cy: Vec<Cand> = cands.iter().filter(|c| c.ax == Ax::Y).cloned().collect();
-    if cx.len() < 2 || cy.len() < 2 {
+    if cx.is_empty() || cy.is_empty() || cx.len() + cy.len() < 3 {
         return None;
     }
     let ref_lat = match sys {
@@ -2185,7 +2321,66 @@ fn solve_system(sys: Sys, cands: &[Cand], lines_x: &[GridLine], lines_y: &[GridL
             }
         }
     }
-    best
+    best.or_else(|| solve_lone(sys, &cx, &cy, (&lx, &ly), lines_x, lines_y, ctx, ref_lat))
+}
+
+/// No fit through two labels on each axis: one axis with a single label
+/// value (`solve_axis_lone`) on the scale of the other axis' line fits.
+/// Every such solution must put the map in the same place (one value, read
+/// once, cannot be outvoted: the caller flags the answer for checking).
+#[allow(clippy::too_many_arguments)]
+fn solve_lone(
+    sys: Sys,
+    cx: &[Cand],
+    cy: &[Cand],
+    (lx, ly): (&TopFits, &TopFits),
+    lines_x: &[GridLine],
+    lines_y: &[GridLine],
+    ctx: &Ctx,
+    ref_lat: f64,
+) -> Option<Solution> {
+    let lat = match sys {
+        Sys::Geo => lone_label(cy, lines_y, Ax::Y, ctx).map_or(ref_lat, |(v, _)| v),
+        Sys::Utm => ref_lat,
+    };
+    let mut sols: Vec<Solution> = Vec::new();
+    for (strong, weak_ax) in [(lx, Ax::Y), (ly, Ax::X)] {
+        for fs in strong.0.iter().flatten() {
+            let (cands, lines) = if weak_ax == Ax::Y { (cy, lines_y) } else { (cx, lines_x) };
+            for fw in solve_axis_lone(cands, lines, weak_ax, sys, ctx, fs, lat) {
+                let (fx, fy) = if weak_ax == Ax::Y { (fs, &fw) } else { (&fw, fs) };
+                if let Some(mut s) = combine(sys, cx, cy, fx, fy, lines_x, lines_y, ctx) {
+                    s.lone = true;
+                    sols.push(s);
+                }
+            }
+        }
+    }
+    // Near the GPS fix, when there is one.
+    if let Some(g) = ctx.gps {
+        sols.retain(|s| {
+            let (mx, my) = s.affine.apply(ctx.w / 2.0, ctx.h / 2.0);
+            let (lat, lon) = merc_to_latlon(mx, my);
+            haversine_m(LatLon::new(lat, lon), g) <= 1000.0 * LONE_MAX_GPS_KM
+        });
+    }
+    let best = sols.iter().enumerate().fold(None::<usize>, |b, (i, s)| match b {
+        Some(j) if !s.better_than(&sols[j]) => Some(j),
+        _ => Some(i),
+    })?;
+    // All of them nearly as well supported (within one line or label of the best) in one
+    // place (within 2 px at the corners): a stretched aspect that puts only the frame line on
+    // a round value does not count against the graticule.
+    let corners = [(0.0, 0.0), (ctx.w, 0.0), (0.0, ctx.h), (ctx.w, ctx.h)];
+    let px = |s: &Solution| -> Vec<(f64, f64)> { corners.iter().map(|&(x, y)| s.affine.apply(x, y)).collect() };
+    let reference = px(&sols[best]);
+    let scale = sols[best].affine.mean_scale();
+    let floor = sols[best].score - 1.0;
+    let agree = sols
+        .iter()
+        .filter(|s| s.score > floor)
+        .all(|s| px(s).iter().zip(&reference).all(|(p, q)| (p.0 - q.0).hypot(p.1 - q.1) <= 2.0 * scale));
+    agree.then(|| sols.swap_remove(best))
 }
 
 /// Lines of one family that are parallel to the family's consensus: grid
@@ -2263,6 +2458,7 @@ pub fn georeference_from_grid_with(
             Sys::Geo => None,
             Sys::Utm => ctx.utm.map(|u| (u.zone, u.north)),
         },
+        lone_label: s.lone,
     })
 }
 

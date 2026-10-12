@@ -425,3 +425,26 @@ fn utm_grid_with_abbreviated_labels() {
     // Without a GPS fix the UTM zone is unknown.
     assert!(georeference_from_grid(&img, &ls, &obs, None).is_none());
 }
+
+#[test]
+fn one_latitude_label_on_the_longitudes_scale() {
+    // Only 25°51'00"S of the latitude labels (obs 2), all three longitudes.
+    let obs: Vec<OcrObservation> =
+        ocr_fixture().into_iter().enumerate().filter(|(i, _)| ![0usize, 1, 3, 4].contains(i)).map(|(_, o)| o).collect();
+    for g in [None, gps()] {
+        let r = georeference_from_grid(map(), lines(), &obs, g).expect("grid result");
+        let err = report("one latitude label", &r);
+        assert_eq!(r.method, GridMethod::Lines);
+        assert!(r.lone_label);
+        assert_eq!((r.n_lat, r.n_lon), (1, 3));
+        assert_eq!(r.gcps.len(), 15, "every graticule line on its round value");
+        assert!(err < 8.0, "max error {err:.2} m");
+    }
+    // Two latitude labels that disagree: neither can be trusted alone.
+    let mut two = obs.clone();
+    two.push(OcrObservation { text: "25°55'00\"S".into(), bbox: [116.0, 3376.0, 36.0, 185.0], confidence: 0.9 });
+    assert!(georeference_from_grid(map(), lines(), &two, gps()).is_none());
+    // Two labels on each axis never take the one-label path.
+    let r = georeference_from_grid(map(), lines(), &ocr_fixture(), gps()).unwrap();
+    assert!(!r.lone_label);
+}
