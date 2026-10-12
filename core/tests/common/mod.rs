@@ -7,6 +7,8 @@ use mapme_core::image::Rgb8;
 use mapme_core::labels::OcrObservation;
 use std::path::PathBuf;
 
+pub mod synth;
+
 pub fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/grootkloof")
 }

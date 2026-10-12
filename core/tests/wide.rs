@@ -5,8 +5,8 @@
 
 mod common;
 use common::*;
-use mapme_core::dem::{resolution, tile_bounds, TileId, TILE_SIZE};
-use mapme_core::geo::{destination, latlon_to_merc, merc_to_latlon, Affine, Homography, LatLon};
+use mapme_core::dem::{tile_bounds, TileId};
+use mapme_core::geo::{destination, latlon_to_merc, merc_to_latlon, Homography, LatLon};
 use mapme_core::georef::{GeorefRequest, Session};
 use mapme_core::hints::hint_queries;
 use mapme_core::image::Rgb8;
@@ -293,11 +293,21 @@ fn hint_queries_of_the_three_sheets() {
         ("castle-gorge (RapidOCR)", ocr_file(data.join("castle-gorge-ocr.json")), vec!["CASTLE GORGE", "MAGALIESBERG"]),
         ("mhlabatini (RapidOCR)", ocr_file(data.join("mhlabatini-ocr.json")), vec!["MHLABATINI", "MAGALIESBERG"]),
     ];
-    // The sheets' own fixtures, once committed.
-    for (dir, want) in [("castle-gorge", vec!["MAGALIESBERG"]), ("mhlabatini", vec!["MAGALIESBERG"])] {
-        let p = fixtures.join(dir).join("ocr.json");
-        if p.exists() {
-            sheets.push((dir, ocr_file(p), want));
+    // The sheets' own fixtures, once committed: emulated OCR and Apple
+    // Vision's (iOS 26.2 simulator).
+    for (dir, want) in [
+        ("castle-gorge", vec!["CASTLE GORGE", "MAGALIESBERG"]),
+        ("mhlabatini", vec!["MHLABATINI", "MAGALIESBERG"]),
+        ("grootkloof", vec!["GROOTKLOOF", "MAGALIESBERG"]),
+    ] {
+        for file in ["ocr.json", "vision-ocr.json"] {
+            let p = fixtures.join(dir).join(file);
+            if p.exists() && !(dir == "grootkloof" && file == "ocr.json") {
+                // The emulated OCR garbles the titles ("CASTEEGORGE"): only
+                // Vision's must name them.
+                let want = if file == "ocr.json" { Vec::new() } else { want.clone() };
+                sheets.push((Box::leak(format!("{dir} {file}").into_boxed_str()), ocr_file(p), want));
+            }
         }
     }
     let legend = [
@@ -343,7 +353,7 @@ fn hint_queries_of_the_three_sheets() {
             assert!(pos.is_some(), "{name}: {w} missing from {q:?}");
         }
         // The title and the series name come first.
-        for w in &want[..2] {
+        for w in want.iter().take(2) {
             let pos = q.iter().position(|x| x.eq_ignore_ascii_case(w)).unwrap();
             assert!(pos < 4, "{name}: {w} at {pos} in {q:?}");
         }
@@ -362,143 +372,6 @@ fn hint_queries_of_the_three_sheets() {
 // ---------------------------------------------------------------------------
 // Synthetic wide search
 // ---------------------------------------------------------------------------
-
-/// Smooth random terrain anywhere on Earth: hashed value noise (smoothstep
-/// interpolation) in four octaves over ground-ish metres.
-fn noise_terrain(mx: f64, my: f64) -> f64 {
-    fn hash(i: i64, j: i64, o: u64) -> f64 {
-        let mut h = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (j as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ o;
-        h ^= h >> 29;
-        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        h ^= h >> 32;
-        (h >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
-    }
-    let s = |t: f64| t * t * (3.0 - 2.0 * t);
-    let mut z = 1200.0;
-    for (o, &(lambda, amp)) in [(9_000.0, 320.0), (3_200.0, 130.0), (1_200.0, 45.0), (450.0, 12.0)].iter().enumerate() {
-        let (u, v) = (mx / lambda, my / lambda);
-        let (i, j) = (u.floor(), v.floor());
-        let (fu, fv) = (s(u - i), s(v - j));
-        let (i, j) = (i as i64, j as i64);
-        let o = o as u64 * 7919;
-        let a = hash(i, j, o) * (1.0 - fu) + hash(i + 1, j, o) * fu;
-        let b = hash(i, j + 1, o) * (1.0 - fu) + hash(i + 1, j + 1, o) * fu;
-        z += amp * (a * (1.0 - fv) + b * fv);
-    }
-    z
-}
-
-/// A Terrarium PNG of any tile of `noise_terrain`.
-fn terrarium_png(t: TileId) -> Vec<u8> {
-    let b = tile_bounds(t);
-    let res = resolution(t.z);
-    let mut rgb = vec![0u8; TILE_SIZE * TILE_SIZE * 3];
-    for r in 0..TILE_SIZE {
-        for c in 0..TILE_SIZE {
-            let e = noise_terrain(b.min_x + (c as f64 + 0.5) * res, b.max_y - (r as f64 + 0.5) * res) + 32768.0;
-            let i = (r * TILE_SIZE + c) * 3;
-            rgb[i] = (e / 256.0).floor() as u8;
-            rgb[i + 1] = (e.floor() as i64).rem_euclid(256) as u8;
-            rgb[i + 2] = ((e - e.floor()) * 256.0).floor() as u8;
-        }
-    }
-    let mut out = Vec::new();
-    {
-        let mut enc = png::Encoder::new(&mut out, TILE_SIZE as u32, TILE_SIZE as u32);
-        enc.set_color(png::ColorType::Rgb);
-        enc.set_depth(png::BitDepth::Eight);
-        let mut w = enc.write_header().unwrap();
-        w.write_image_data(&rgb).unwrap();
-    }
-    out
-}
-
-/// A 1:50 000 sheet of the synthetic terrain (20 m contours, brown on
-/// white, 6.4 × 8.0 km) centred at `at`, and its "1:50 000" label.
-fn synthetic_sheet(at: LatLon) -> (Rgb8, Value) {
-    use rayon::prelude::*;
-    let (w, h) = (1500usize, 1900usize);
-    let scale = 50_000.0 * 0.0254 / 300.0; // ground m/px of 1:50 000 at 300 dpi
-    let c = latlon_to_merc(at.lat, at.lon);
-    let k = 1.0 / at.lat.to_radians().cos();
-    let tr = Affine::pixel_to_merc_similarity(scale * k, 0.0, w as f64 / 2.0, h as f64 / 2.0, c.0, c.1);
-    let lvl: Vec<i64> = (0..w * h)
-        .into_par_iter()
-        .map(|i| {
-            let (mx, my) = tr.apply((i % w) as f64 + 0.5, (i / w) as f64 + 0.5);
-            (noise_terrain(mx, my) / 20.0).floor() as i64
-        })
-        .collect();
-    let mut data = vec![255u8; w * h * 3];
-    for y in 0..h {
-        for x in 0..w {
-            let l = lvl[y * w + x];
-            if (x + 1 < w && lvl[y * w + x + 1] != l) || (y + 1 < h && lvl[(y + 1) * w + x] != l) {
-                for (dx, dy) in [(0usize, 0usize), (1, 0), (0, 1)] {
-                    if x + dx < w && y + dy < h {
-                        let i = ((y + dy) * w + x + dx) * 3;
-                        data[i..i + 3].copy_from_slice(&[168, 120, 70]);
-                    }
-                }
-            }
-        }
-    }
-    let ocr = json!([{"text": "1:50 000", "bbox": [1200, 1850, 120, 25], "confidence": 0.9}]);
-    (Rgb8::from_rgb(w, h, data).unwrap(), ocr)
-}
-
-/// The app's loop with synthetic terrain served for every tile asked for.
-/// Returns the responses, the tiles served and a per-round log.
-fn synthetic_loop(s: &Session, req: &Value, max_tiles: usize) -> (Vec<Value>, HashSet<TileId>, String) {
-    use rayon::prelude::*;
-    let t = Instant::now();
-    let mut rs: Vec<Value> = Vec::new();
-    let mut served: HashSet<TileId> = HashSet::new();
-    let (mut core_s, mut tiles_s) = (0.0, 0.0);
-    let mut rounds: Vec<String> = Vec::new();
-    for _ in 0..80 {
-        let tc = Instant::now();
-        let r = call(s, req);
-        core_s += tc.elapsed().as_secs_f64();
-        let n = r["need_tiles"].as_array().map_or(0, |v| v.len());
-        rounds.push(format!("{}:{n}", r["search"]["stage"].as_str().unwrap_or("-")));
-        let need = r["status"] == "need_dem";
-        if need {
-            let tiles: Vec<TileId> = r["need_tiles"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|t| TileId {
-                    z: t["z"].as_u64().unwrap() as u8,
-                    x: t["x"].as_u64().unwrap() as u32,
-                    y: t["y"].as_u64().unwrap() as u32,
-                })
-                .collect();
-            assert!(!tiles.is_empty() && tiles.len() <= max_tiles, "{} tiles in one round", tiles.len());
-            let tt = Instant::now();
-            let pngs: Vec<(TileId, Vec<u8>)> = tiles.par_iter().map(|&t| (t, terrarium_png(t))).collect();
-            tiles_s += tt.elapsed().as_secs_f64();
-            for (t, png) in pngs {
-                s.add_dem_tile(t, &png).unwrap();
-                served.insert(t);
-            }
-        }
-        rs.push(r);
-        if !need {
-            let log = format!(
-                "{:.1} s total ({:.1} s core, {:.1} s making tiles), {} tiles served, {} rounds: {}",
-                t.elapsed().as_secs_f64(),
-                core_s,
-                tiles_s,
-                served.len(),
-                rounds.len(),
-                rounds.join(" ")
-            );
-            return (rs, served, log);
-        }
-    }
-    panic!("still need_dem after 80 rounds");
-}
 
 /// A 1:50 000 sheet of synthetic terrain 120 km from the fix, R = 150 km:
 /// the near area fails, the wide search (zoom 10, chunks nearest first,
@@ -549,10 +422,24 @@ fn synthetic_wide_search_outside_the_radius_fails_honestly() {
     let s = Session::new(img);
     let req = json!({"gps": gps(fix), "dpi": 300.0, "ocr": ocr, "methods": ["contours"],
                      "search_radius_m": 200_000.0, "max_tiles_per_round": 36});
-    let (rs, _, log) = synthetic_loop(&s, &req, 36);
+    let out = serve(&s, &req, 36, 80, &noise_terrain, &mut |_| {});
+    let (rs, log) = (&out.responses, &out.log);
     let r = rs.last().unwrap();
-    summary("synthetic wide, map outside", &rs, None);
+    summary("synthetic wide, map outside", rs, None);
     eprintln!("    {log}");
+    // Memory: the zoom-9 tiles go once their chunks are searched; at most
+    // two chunks' worth (one searched, the next fetched with its checks)
+    // are held at any time, on top of the near area's and refinements'.
+    let z9 = out.served.iter().filter(|t| t.z == 9).count();
+    let other = out.served.len() - z9;
+    let max_held = *out.held.iter().max().unwrap();
+    eprintln!(
+        "    held at most {max_held} tiles (served {z9} zoom-9, {other} others), {} at the end",
+        out.held.last().unwrap()
+    );
+    assert!(*out.held.last().unwrap() <= other, "zoom-9 tiles left after the search");
+    assert!(max_held <= other + 2 * 36, "{max_held} tiles held");
+    assert_eq!(out.asked_twice(9), 0, "zoom-9 tiles asked for twice");
     assert_eq!(r["status"], "failed", "{r}");
     assert!(r["pixel_to_mercator"].is_null());
     let m = r["message"].as_str().unwrap();
@@ -567,6 +454,7 @@ fn synthetic_wide_search_outside_the_radius_fails_honestly() {
     for v in wide["refined"].as_array().unwrap() {
         assert_eq!(v["accepted"], false);
     }
+    repeat_is_free(&s, &req, r);
 }
 
 /// One latitude label and the scale on a synthetic sheet 150 km from the
@@ -601,12 +489,474 @@ fn one_latitude_label_cuts_the_wide_search_to_a_band() {
     assert!(mapme_core::geo::haversine_m(LatLon::new(glat, glon), at) < 60.0);
     let band = &r["diagnostics"]["label_band"];
     assert_eq!(band["name"], text.replace("00\"", "").as_str());
+    // The near disc is searched all the same (a misread label must not hide
+    // a map next to the user), then the band's chunks first.
     let areas = r["diagnostics"]["search_areas"].as_array().unwrap();
-    assert_eq!(areas[0]["outcome"], "outside the labels' band", "{areas:?}");
+    assert_eq!(areas[0]["area"], "near", "{areas:?}");
     let sp = &r["search"];
     assert_eq!(sp["coarse_zoom"], 9);
-    // The full disc of 200 km at zoom 9 is ~100 coarse tiles plus the near
-    // area's 81; the band needs a fraction.
-    assert!(sp["tiles_planned"].as_u64().unwrap() < 60, "{sp}");
-    assert!(served.iter().filter(|t| t.z == 11).count() < 40, "zoom-11 tiles: near area searched?");
+    let wide = &r["diagnostics"]["wide"];
+    let band_chunks = wide["band_chunks"].as_u64().unwrap();
+    assert!(band_chunks > 0 && wide["chunks_searched"].as_u64().unwrap() <= band_chunks, "{wide}");
+    // The full disc of 200 km at zoom 9 is ~100 coarse tiles; the band's
+    // chunks need a fraction.
+    let z9 = served.iter().filter(|t| t.z == 9).count();
+    assert!(z9 < 30, "{z9} zoom-9 tiles served");
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial: chunk boundaries, the antimeridian and poles, cancel and
+// resume, tile caps, hints that should not hide others, misread labels,
+// small maps, decoys, memory and the cost of every call.
+// ---------------------------------------------------------------------------
+
+use common::synth::*;
+use mapme_core::search::{map_half_extent, SearchParams};
+use mapme_core::wide::{plan_wide, wide_reach, WidePlan};
+
+/// The wide plan the core makes around `fix` for a `w` × `h` sheet whose
+/// label gives 1:`denom` at 300 dpi (scale range as `georef` derives it).
+fn plan_for(fix: LatLon, radius: f64, w: usize, h: usize, denom: f64) -> WidePlan {
+    let prior = sheet_scale(denom);
+    let (lo, hi) = (0.75 * prior * fix.lat.to_radians().cos(), 1.25 * prior);
+    let (zoom, reach) = wide_reach(radius, hi, w, h, fix.lat).unwrap();
+    let origin = latlon_to_merc(fix.lat, fix.lon);
+    let base = SearchParams { center_merc: origin, scale_min: lo, scale_max: hi, ..SearchParams::default() };
+    plan_wide(origin, reach, 50_000.0, zoom, map_half_extent(&base, w, h), 64, None)
+}
+
+/// Ground distance (m) of the located map centre from `at`.
+fn centre_off_m(r: &Value, w: usize, h: usize, at: LatLon) -> f64 {
+    let (gx, gy) = homography(r).apply(w as f64 / 2.0, h as f64 / 2.0);
+    let (glat, glon) = merc_to_latlon(gx, gy);
+    mapme_core::geo::haversine_m(LatLon::new(glat, glon), at)
+}
+
+/// Run a synthetic sheet at `at` from `fix` (R, tile cap) and check it is
+/// found within 60 m with a confident answer; returns what the loop saw.
+fn find_sheet(name: &str, fix: LatLon, at: LatLon, radius: f64, max_tiles: usize) -> Served {
+    let (img, ocr) = synthetic_sheet(at);
+    let (w, h) = (img.w, img.h);
+    let s = Session::new(img);
+    let req = json!({"gps": gps(fix), "dpi": 300.0, "ocr": ocr, "methods": ["contours"],
+                     "search_radius_m": radius, "max_tiles_per_round": max_tiles});
+    let out = serve(&s, &req, max_tiles, 400, &noise_terrain, &mut |_| {});
+    let r = out.last();
+    summary(name, &out.responses, None);
+    eprintln!("    {}", out.log);
+    assert_eq!(r["status"], "ok", "{name}: {}", r["message"]);
+    let off = centre_off_m(r, w, h, at);
+    assert!(off < 60.0, "{name}: map centre {off:.0} m off");
+    assert!(r["confidence"].as_f64().unwrap() >= 0.7, "{name}: {}", r["confidence"]);
+    out
+}
+
+/// A sheet centred on the corner where four wide chunks meet (its extent
+/// spans all four) is found, as is one centred on a chunk edge.
+#[test]
+fn map_across_chunk_boundaries_is_found() {
+    let _g = serial();
+    let fix = LatLon::new(46.5, 8.0);
+    let radius = 500_000.0;
+    let plan = plan_for(fix, radius, 1500, 1900, 50_000.0);
+    assert_eq!(plan.zoom, 9);
+    // The interior corner (shared by four chunks) nearest the fix.
+    let mut corners: Vec<((f64, f64), f64)> = Vec::new();
+    for c in &plan.chunks {
+        let p = (c.placement.min_x, c.placement.min_y);
+        let shared = plan
+            .chunks
+            .iter()
+            .filter(|d| {
+                let b = &d.placement;
+                [(b.min_x, b.min_y), (b.max_x, b.min_y), (b.min_x, b.max_y), (b.max_x, b.max_y)]
+                    .iter()
+                    .any(|q| (q.0 - p.0).abs() < 1.0 && (q.1 - p.1).abs() < 1.0)
+            })
+            .count();
+        let (la, lo) = merc_to_latlon(p.0, p.1);
+        let d = mapme_core::geo::haversine_m(fix, LatLon::new(la, lo));
+        if shared == 4 && d > 60_000.0 {
+            corners.push((p, d));
+        }
+    }
+    corners.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let (corner, d) = *corners.first().expect("an interior chunk corner");
+    eprintln!("[chunk corner] {:.0} km from the fix, {} chunks", d / 1000.0, plan.chunks.len());
+    assert!((55_000.0..radius - 20_000.0).contains(&d), "corner {d:.0} m from the fix");
+    let (la, lo) = merc_to_latlon(corner.0, corner.1);
+    let out = find_sheet("chunk corner", fix, LatLon::new(la, lo), radius, 64);
+    assert_eq!(out.last()["diagnostics"]["selected"]["source"], "wide");
+    // An edge: the middle of the corner's vertical boundary to the north.
+    let edge = (corner.0, corner.1 + 0.5 * tile_bounds(TileId { z: 9, x: 0, y: 0 }).height());
+    let (la, lo) = merc_to_latlon(edge.0, edge.1);
+    find_sheet("chunk edge", fix, LatLon::new(la, lo), radius, 64);
+}
+
+/// Sheets just inside and just outside the near disc (49.3 / 50.7 km): the
+/// near search and the wide search meet without a gap.
+#[test]
+fn map_on_the_near_and_wide_boundary_is_found() {
+    let _g = serial();
+    let fix = LatLon::new(46.5, 8.0);
+    for d in [49_300.0, 50_700.0] {
+        let at = destination(fix, 200.0, d);
+        let out = find_sheet(&format!("boundary {:.1} km", d / 1000.0), fix, at, 120_000.0, 64);
+        let src = &out.last()["diagnostics"]["selected"]["source"];
+        if d > 50_000.0 {
+            assert_eq!(src, "wide", "{d}");
+        }
+    }
+}
+
+/// A fix 75 km west of the antimeridian (Fiji) and a sheet 25 km east of
+/// it: the search reaches across, asks only for tiles inside the world, and
+/// plans as many tiles as the same search away from it.
+#[test]
+fn search_across_the_antimeridian() {
+    let _g = serial();
+    let fix = LatLon::new(-17.8, 179.3);
+    let at = LatLon::new(-17.7, -179.75);
+    let d = mapme_core::geo::haversine_m(fix, at);
+    assert!((90_000.0..115_000.0).contains(&d), "{d}");
+    // Planned tiles near and away from the antimeridian (first call only).
+    let planned = |lon: f64| {
+        let (img, ocr) = synthetic_sheet(LatLon::new(-17.7, 0.0));
+        let s = Session::new(img);
+        let req = json!({"gps": gps(LatLon::new(-17.8, lon)), "dpi": 300.0, "ocr": ocr, "methods": ["contours"],
+                         "search_radius_m": 1_000_000.0});
+        let r = call(&s, &req);
+        for t in tiles_of(&r) {
+            assert!(t.x < 1 << t.z && t.y < 1 << t.z, "{t:?}");
+        }
+        r["search"]["tiles_planned"].as_u64().unwrap()
+    };
+    let (here, away) = (planned(179.3), planned(20.0));
+    eprintln!("[antimeridian] tiles planned for 1 000 km: {here} at 179.3°E, {away} at 20°E");
+    assert!(here as f64 > 0.9 * away as f64 && (here as f64) < 1.1 * away as f64, "{here} vs {away}");
+    find_sheet("antimeridian", fix, at, 200_000.0, 64);
+}
+
+/// First call of a search around `fix`: (tiles the whole search plans,
+/// tiles the near area needs) for a typical sheet without a scale label.
+fn first_call_tiles(fix: LatLon, radius: f64) -> (u64, usize, Value) {
+    let s = Session::new(map().clone());
+    let req = json!({"gps": gps(fix), "methods": ["contours"], "search_radius_m": radius, "max_tiles_per_round": 4096});
+    let r = call(&s, &req);
+    for t in tiles_of(&r) {
+        assert!(t.x < 1 << t.z && t.y < 1 << t.z, "{t:?}");
+    }
+    (r["search"]["tiles_planned"].as_u64().unwrap(), tiles_of(&r).len(), r)
+}
+
+/// Far north (Tromsø 69.6°N, Longyearbyen 78.2°N, 84°N) Mercator tiles
+/// shrink on the ground: the near area and a 1 000 km search plan about as
+/// many tiles as at 26°S (a few hundred, not tens of thousands), and the
+/// estimate says the same.
+#[test]
+fn high_latitudes_plan_bounded_searches() {
+    let estimate = |lat: f64, lon: f64| -> Value {
+        serde_json::from_str(&mapme_core::wide::search_estimate_json(
+            &json!({"radius_m": 1_000_000.0, "gps": {"lat": lat, "lon": lon}}).to_string(),
+        ))
+        .unwrap()
+    };
+    let (ref_wide, ref_near, _) = first_call_tiles(LatLon::new(-25.85, 27.4), 1_000_000.0);
+    let ref_est = estimate(-25.85, 27.4)["tiles"].as_f64().unwrap();
+    eprintln!("[latitude] 25.9°S: {ref_wide} tiles planned for 1 000 km, near area {ref_near}, estimate {ref_est}");
+    for (lat, lon) in [(69.65, 18.96), (78.22, 15.65), (84.0, 20.0)] {
+        let (wide, near, r) = first_call_tiles(LatLon::new(lat, lon), 1_000_000.0);
+        let est = estimate(lat, lon);
+        eprintln!(
+            "[latitude] {lat}°N: {wide} tiles planned for 1 000 km, near area {near} (zoom {}), estimate {} tiles \
+             {} MB",
+            r["search"]["coarse_zoom"], est["tiles"], est["approx_megabytes"]
+        );
+        assert!((wide as f64) < 2.0 * ref_wide as f64, "{lat}: {wide} tiles planned vs {ref_wide}");
+        assert!((near as f64) < 2.0 * ref_near as f64, "{lat}: near area {near} tiles vs {ref_near}");
+        assert!(est["tiles"].as_f64().unwrap() < 2.0 * ref_est, "{lat}: {est}");
+    }
+}
+
+/// A small sheet (1.5 × 1.9 km at 1:25 000) searched over 1 000 km: too
+/// small for the wide search's zooms (zoom 11 over 1 000 km would be ~18 000
+/// tiles), so only the near disc is searched, and the answer says so.
+#[test]
+fn small_map_wide_search_stays_bounded() {
+    let _g = serial();
+    let fix = LatLon::new(46.5, 8.0);
+    let (img, ocr) = sheet_of(destination(fix, 10.0, 400_000.0), 700, 900, 25_000.0, &noise_terrain);
+    let s = Session::new(img);
+    let req = json!({"gps": gps(fix), "dpi": 300.0, "ocr": ocr, "methods": ["contours"],
+                     "search_radius_m": 1_000_000.0});
+    let first = call(&s, &req);
+    eprintln!("[small map] first call: {}", first["search"]);
+    let planned = first["search"]["tiles_planned"].as_u64().unwrap();
+    assert!(planned < 200, "{planned} tiles planned");
+    let out = serve(&s, &req, 64, 40, &noise_terrain, &mut |_| {});
+    let r = out.last();
+    summary("small map, 1 000 km", &out.responses, None);
+    assert_eq!(r["status"], "failed");
+    let m = r["message"].as_str().unwrap();
+    assert!(m.starts_with("No match within 50 km of you"), "{m}");
+    assert!(m.contains("too small an area to be searched farther than 50 km"), "{m}");
+    assert!(!m.contains("Search a wider area"), "{m}");
+    assert_eq!(r["search"]["radius_m"], 1_000_000.0);
+    assert_eq!(r["search"]["searched_radius_m"], 50_000.0);
+    assert!(out.served.iter().all(|t| t.z >= 11), "wide tiles served for a map too small to search wide");
+}
+
+/// The app answers every round with the same request: after an `ok` or a
+/// `failed` the same call answers the same at once (nothing is searched or
+/// asked for again).
+fn repeat_is_free(s: &Session, req: &Value, last: &Value) {
+    let t = Instant::now();
+    let again = call(s, req);
+    let secs = t.elapsed().as_secs_f64();
+    eprintln!("    repeat call: {} in {secs:.2} s", again["status"]);
+    assert_eq!(again["status"], last["status"]);
+    assert_eq!(again["message"], last["message"]);
+    assert!(tiles_of(&again).is_empty());
+    assert_eq!(again["pixel_to_mercator"], last["pixel_to_mercator"]);
+    assert!(secs < 1.5, "a repeated call took {secs:.2} s");
+}
+
+/// Cancel the wide search several times mid-chunk: every cancelled call
+/// returns at once and the next continues where the last stopped (no chunk
+/// searched twice, no coarse tile asked for twice), then finds the sheet.
+#[test]
+fn cancel_mid_wide_search_resumes() {
+    let _g = serial();
+    let fix = LatLon::new(46.5, 8.0);
+    let at = destination(fix, 120.0, 170_000.0);
+    let (img, ocr) = synthetic_sheet(at);
+    let (w, h) = (img.w, img.h);
+    let s = std::sync::Arc::new(Session::new(img));
+    let req = json!({"gps": gps(fix), "dpi": 300.0, "ocr": ocr, "methods": ["contours"],
+                     "search_radius_m": 250_000.0});
+    let mut cancels = 0;
+    let mut prev_stage = String::new();
+    let mut statuses: Vec<String> = Vec::new();
+    let mut rs: Vec<Value> = Vec::new();
+    let mut asked: std::collections::HashMap<TileId, usize> = std::collections::HashMap::new();
+    let delays = [40u64, 120, 250, 500, 800];
+    for _ in 0..200 {
+        // Cancel calls of the wide stage at growing delays.
+        let canceller = (matches!(prev_stage.as_str(), "wide" | "refine") && cancels < delays.len()).then(|| {
+            let ms = delays[cancels];
+            cancels += 1;
+            let s2 = s.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                s2.cancel();
+            })
+        });
+        let r = call(&s, &req);
+        if let Some(c) = canceller {
+            c.join().unwrap();
+        }
+        prev_stage = r["search"]["stage"].as_str().unwrap_or("").to_string();
+        let cancelled = r["diagnostics"]["cancelled"] == true;
+        statuses.push(format!(
+            "{}:{}{}",
+            r["status"].as_str().unwrap(),
+            prev_stage,
+            if cancelled { format!("(cancelled {})", r["timings_ms"]) } else { String::new() }
+        ));
+        if cancelled {
+            // Cancelled calls report no progress object: keep the stage.
+            prev_stage = "wide".into();
+        }
+        let need = r["status"] == "need_dem";
+        if need {
+            for t in tiles_of(&r) {
+                s.add_dem_tile(t, &terrarium_png(t)).unwrap();
+                *asked.entry(t).or_insert(0) += 1;
+            }
+        }
+        rs.push(r);
+        if !need && !cancelled {
+            break;
+        }
+    }
+    let r = rs.last().unwrap();
+    eprintln!("[cancel] {cancels} cancels: {}", statuses.join(" "));
+    summary("cancel and resume", &rs, None);
+    let n_cancelled = rs.iter().filter(|x| x["diagnostics"]["cancelled"] == true).count();
+    assert!(n_cancelled >= 1, "no call was cancelled");
+    assert_eq!(r["status"], "ok", "{}", r["message"]);
+    assert!(centre_off_m(r, w, h, at) < 60.0);
+    let twice: Vec<&TileId> = asked.iter().filter(|(t, n)| t.z == 9 && **n > 1).map(|(t, _)| t).collect();
+    assert!(twice.is_empty(), "coarse tiles asked for again: {twice:?}");
+    let wide = &r["diagnostics"]["wide"];
+    let found_in = wide["refined"].as_array().unwrap().iter().find(|v| v["accepted"] == true).unwrap()["chunk"].clone();
+    assert_eq!(wide["chunks_searched"].as_u64().unwrap(), found_in.as_u64().unwrap() + 1, "{wide}");
+    repeat_is_free(&s, &req, r);
+}
+
+/// One tile per answer (and a cap of 0, read as 1): the search still
+/// finishes, every answer holds one tile, and the per-call overhead of the
+/// many calls stays small. A huge cap asks for a whole area at once.
+#[test]
+fn tile_cap_of_one_and_huge() {
+    let _g = serial();
+    let fix = LatLon::new(46.5, 8.0);
+    let at = destination(fix, 30.0, 58_000.0);
+    let out = find_sheet("one tile per round", fix, at, 70_000.0, 1);
+    let rounds = out.responses.len();
+    let core: f64 = out.core_s.iter().sum();
+    let tiles = out.served.len();
+    eprintln!("    {rounds} rounds for {tiles} tiles, {:.3} s core per call", core / rounds as f64);
+    assert!(rounds <= tiles + 3, "{rounds} rounds for {tiles} tiles");
+    // The calls that searched nothing new: median per-call time.
+    let mut per: Vec<f64> = out.core_s.clone();
+    per.sort_by(|a, b| a.total_cmp(b));
+    let median = per[per.len() / 2];
+    assert!(median < 0.25, "median call {median:.3} s");
+    // A cap of 0 is read as 1; a huge cap is read as 4 096.
+    let s = Session::new(map().clone());
+    let r = call(&s, &json!({"gps": gps(fix), "methods": ["contours"], "max_tiles_per_round": 0}));
+    assert_eq!(tiles_of(&r).len(), 1);
+    let r = call(&s, &json!({"gps": gps(fix), "methods": ["contours"], "max_tiles_per_round": 1e12}));
+    assert!(tiles_of(&r).len() > 1);
+    assert_eq!(r["diagnostics"]["tiles_requested"], r["diagnostics"]["tiles_unknown"], "{}", r["diagnostics"]);
+}
+
+/// A hint with a huge radius (searched at 50 km at most) does not count as
+/// covering the other hints: the right one after it is still searched.
+#[test]
+fn huge_hint_radius_does_not_hide_other_hints() {
+    let _g = serial();
+    let wrong = destination(centre(), 90.0, 60_000.0);
+    let right = destination(centre(), 200.0, 4_000.0);
+    let s = Session::new(map().clone());
+    let req = json!({
+        "dpi": 300.0, "methods": ["contours"],
+        "hints": [{"lat": wrong.lat, "lon": wrong.lon, "radius_m": 5e6, "source": "user", "name": "Somewhere"},
+                  {"lat": right.lat, "lon": right.lon, "name": "Grootkloof"}]
+    });
+    let (rs, _) = fixture_loop(&s, &req, 12);
+    let r = rs.last().unwrap();
+    summary("huge hint radius", &rs, None);
+    assert_eq!(r["status"], "ok", "{}", r["message"]);
+    assert!(max_error_m(&homography(r)) < 40.0);
+    assert_eq!(r["search"]["hints_planned"], 2, "{}", r["search"]);
+}
+
+/// The grid fit fails (one latitude label left, misread by a degree: 26°
+/// for 25°) and the GPS is on the sheet: the near area is still searched
+/// (the band the label gives must not overrule the fix), as before the
+/// wide search existed.
+#[test]
+fn misread_latitude_label_does_not_skip_the_near_area() {
+    let _g = serial();
+    let obs: Vec<OcrObservation> = ocr_fixture()
+        .into_iter()
+        .filter(|o| !(o.text.contains('°') || o.text.contains('\'')) || o.text == "25°51'00\"S")
+        .map(|mut o| {
+            if o.text == "25°51'00\"S" {
+                o.text = "26°51'00\"S".into();
+            }
+            o
+        })
+        .collect();
+    let s = Session::new(map().clone());
+    let req = json!({"gps": gps(centre()), "dpi": 300.0, "ocr": obs});
+    let (rs, _) = fixture_loop(&s, &req, 12);
+    let r = rs.last().unwrap();
+    summary("misread latitude label", &rs, None);
+    eprintln!("    band: {}", r["diagnostics"]["label_band"]);
+    assert_eq!(r["status"], "ok", "{}", r["message"]);
+    assert!(max_error_m(&homography(r)) < 40.0);
+}
+
+/// Terrain with a decoy: around `decoy` (Mercator, 14 km, tapered) a blend
+/// of `alpha` × the terrain under the true sheet at `truth` and (1 − alpha)
+/// × an unrelated landscape; `noise_terrain` elsewhere.
+fn decoy_terrain(truth: (f64, f64), decoy: (f64, f64), alpha: f64) -> impl Fn(f64, f64) -> f64 + Sync {
+    move |mx: f64, my: f64| {
+        let d = (mx - decoy.0).hypot(my - decoy.1);
+        let wgt = if d < 10_000.0 {
+            1.0
+        } else if d < 14_000.0 {
+            let t = (14_000.0 - d) / 4_000.0;
+            t * t * (3.0 - 2.0 * t)
+        } else {
+            0.0
+        };
+        if wgt == 0.0 {
+            return noise_terrain(mx, my);
+        }
+        let copy = noise_terrain(mx - decoy.0 + truth.0, my - decoy.1 + truth.1);
+        let other = noise_terrain_seeded(mx, my, 5);
+        let blend = alpha * copy + (1.0 - alpha) * other;
+        wgt * blend + (1.0 - wgt) * noise_terrain(mx, my)
+    }
+}
+
+/// Decoys: the sheet's terrain partly copied elsewhere (`alpha` of it),
+/// with the true place outside the search. Searched through a place hint
+/// (zoom 11) and by the wide search (zoom 9). Returns (status, confidence)
+/// of both.
+fn decoy_case(alpha: f64) -> [(String, f64); 2] {
+    let fix = LatLon::new(46.5, 8.0);
+    let truth_ll = destination(fix, 0.0, 900_000.0);
+    let truth = latlon_to_merc(truth_ll.lat, truth_ll.lon);
+    let decoy_ll = destination(fix, 100.0, 170_000.0);
+    let decoy = latlon_to_merc(decoy_ll.lat, decoy_ll.lon);
+    let terrain = decoy_terrain(truth, decoy, alpha);
+    let (img, ocr) = sheet_of(truth_ll, 1500, 1900, 50_000.0, &noise_terrain);
+    let mut out: [(String, f64); 2] = Default::default();
+    for (i, hint) in [true, false].into_iter().enumerate() {
+        let s = Session::new(img.clone());
+        // Through a place hint alone (no fix), or the wide search from the fix.
+        let mut req = json!({"dpi": 300.0, "ocr": ocr, "methods": ["contours"], "search_radius_m": 250_000.0});
+        if hint {
+            let h = destination(decoy_ll, 45.0, 3_000.0);
+            req["hints"] = json!([{"lat": h.lat, "lon": h.lon, "name": "Decoy", "radius_m": 15000}]);
+        } else {
+            req["gps"] = gps(fix);
+        }
+        let got = serve(&s, &req, 64, 400, &terrain, &mut |_| {});
+        let r = got.last();
+        let name = format!("decoy alpha {alpha} via {}", if hint { "hint" } else { "wide" });
+        summary(&name, &got.responses, None);
+        eprintln!("    {}", got.log);
+        let conf = r["confidence"].as_f64().unwrap_or(0.0);
+        if r["status"] == "ok" {
+            let off = centre_off_m(r, img.w, img.h, decoy_ll);
+            eprintln!("    [{name}] located {off:.0} m from the decoy centre, confidence {conf}");
+        }
+        out[i] = (r["status"].as_str().unwrap().to_string(), conf);
+    }
+    out
+}
+
+/// A decoy holding 65 % of the sheet's terrain (its true place outside the
+/// search): passes the wide search's re-check gate (ratio ~4.5) but its
+/// refinement fits at ~0.0, so it is never accepted, through a place hint or
+/// the wide search. (From ~80 % likeness the decoy fits at ±20 m and is
+/// accepted: it is then the same landscape; `decoy_likeness`.)
+#[test]
+fn partial_decoy_is_not_accepted() {
+    let _g = serial();
+    let [hint, wide] = decoy_case(0.65);
+    assert_eq!(hint.0, "failed", "decoy accepted through the hint: {hint:?}");
+    assert_eq!(wide.0, "failed", "decoy accepted by the wide search: {wide:?}");
+}
+
+/// MEASUREMENT: decoys of growing likeness (`DECOY_ALPHAS`, default
+/// 0.5,0.65,0.8). Run with --ignored --nocapture.
+#[test]
+#[ignore]
+fn decoy_likeness() {
+    let alphas: Vec<f64> = std::env::var("DECOY_ALPHAS")
+        .unwrap_or_else(|_| "0.5,0.65,0.8".into())
+        .split(',')
+        .filter_map(|v| v.parse().ok())
+        .collect();
+    for a in alphas {
+        let r = decoy_case(a);
+        eprintln!("[decoy] alpha {a}: hint {:?}, wide {:?}", r[0], r[1]);
+    }
 }

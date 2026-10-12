@@ -1,6 +1,8 @@
 //! The wide search: the part of the search radius beyond the near disc,
 //! chunk by chunk, nearest first (`wide::plan_wide`), on zoom-10 tiles up
-//! to 150 km and zoom-9 tiles beyond (`wide::wide_zoom`).
+//! to 150 km and zoom-9 tiles beyond (one zoom coarser per halving of
+//! cos(latitude) past 60°; a map too small for them is searched to 150 km
+//! or not at all: `wide::wide_reach`).
 //!
 //! Per chunk: the coarse search over the chunk's placements (a DEM mosaic of
 //! at most 8 × 8 tiles; the chunk's tiles are released once no later chunk
@@ -10,7 +12,9 @@
 //! confident (≥ `CONFIDENT`, not just `ACCEPT`) and its re-check correlation
 //! beats every other re-checked candidate's by 10 %. The search stops at the
 //! first accepted match. Every result is cached in the session, so the
-//! app's need_dem loop continues where it left off.
+//! app's need_dem loop continues where it left off; a chunk's coarse tiles,
+//! its re-check tiles and a rejected candidate's zoom-13 tiles are released
+//! once used.
 //!
 //! Measured (`tests/wide_measure.rs`, five cases: the Grootkloof scan, a
 //! synthetic and the real phone photo of it, Castle Gorge, Mhlabatini): the
@@ -21,7 +25,7 @@
 
 use super::*;
 use crate::search::{map_half_extent, min_searchable_scale, Region, DISTINCT_M};
-use crate::wide::{plan_wide, wide_zoom, WidePlan};
+use crate::wide::{near_zoom, plan_wide, wide_reach, WidePlan};
 
 /// Candidates a chunk's coarse search returns (by significance) and of
 /// those kept (by correlation) for re-checking.
@@ -34,7 +38,7 @@ const RECHECK_SCALE_TOL: f64 = 1.1;
 /// A re-checked candidate is refined when its local peak ratio and
 /// correlation reach these…
 pub(crate) const WIDE_MIN_RATIO: f32 = 2.2;
-const WIDE_MIN_NCC: f32 = 0.2;
+pub(crate) const WIDE_MIN_NCC: f32 = 0.2;
 /// …and accepted when its re-check correlation is this many times every
 /// other re-checked candidate's (≥ 2 km away).
 pub(crate) const WIDE_NCC_MARGIN: f32 = 1.1;
@@ -100,8 +104,8 @@ impl Run<'_> {
         let key = self.contour_key();
         let near = NEAR_RADIUS_M.min(self.radius_m);
         let origin = latlon_to_merc(gps.lat, gps.lon);
-        let (wkey, plan, base) = self.wide_setup(gps, scale);
-        let (zoom, radius) = (plan.zoom, self.radius_m);
+        let Some((wkey, plan, base)) = self.wide_setup(gps, scale) else { return Ok(None) };
+        let (zoom, radius) = (plan.zoom, wkey.radius_m as f64);
         let n = plan.chunks.len();
         let min_scale = min_searchable_scale(w, h, crate::dem::resolution(zoom), gps.lat);
         let mut log: Vec<Value> = Vec::new();
@@ -120,8 +124,12 @@ impl Run<'_> {
             self.searched_tiles.extend(res.present.iter().copied());
             self.missing_tiles.extend(res.missing.iter().copied());
             self.wide_counts(&wkey, &plan);
+            // The next chunk's tiles ride along with this one's checks; not
+            // past the labels' band (whose chunks usually hold the map).
             let lookahead = match plan.chunks.get(ci + 1) {
-                Some(next) if self.wide_chunk(&wkey, ci + 1).is_none() => next.tiles.clone(),
+                Some(next) if self.wide_chunk(&wkey, ci + 1).is_none() && ci + 1 != plan.band_chunks => {
+                    next.tiles.clone()
+                }
                 _ => Vec::new(),
             };
             let found = self.verify_chunk(prod, &wkey, ci, &res, &lookahead, &mut log);
@@ -132,6 +140,8 @@ impl Run<'_> {
                     "zoom": zoom,
                     "chunks": n,
                     "chunks_searched": ci + 1,
+                    "band_chunks": plan.band_chunks,
+                    "radius_m": radius,
                     "tiles": plan.unique_tiles,
                     "min_scale_m_per_px": round_dp(min_scale, 3),
                     "rechecked": rechecked,
@@ -148,15 +158,23 @@ impl Run<'_> {
     }
 
     /// The wide search's key, plan (cached in the session) and the coarse
-    /// search parameters its chunks share.
-    fn wide_setup(&mut self, gps: LatLon, scale: (f64, f64)) -> (WideKey, Arc<WidePlan>, SearchParams) {
+    /// search parameters its chunks share; None when the map is too small
+    /// to be searched beyond the near disc (`wide_reach`). The plan covers
+    /// the radius the map's size allows (`wide_limit`).
+    fn wide_setup(&mut self, gps: LatLon, scale: (f64, f64)) -> Option<(WideKey, Arc<WidePlan>, SearchParams)> {
         let (w, h) = self.size();
         let near = NEAR_RADIUS_M.min(self.radius_m);
-        let zoom = wide_zoom(self.radius_m, scale.1, w, h, gps.lat);
+        let reach = wide_reach(self.radius_m, scale.1, w, h, gps.lat);
+        self.wide_limit = match reach {
+            Some((_, r)) if r < self.radius_m => Some(r),
+            Some(_) => None,
+            None => Some(near),
+        };
+        let (zoom, reach_m) = reach?;
         let origin = latlon_to_merc(gps.lat, gps.lon);
         let base = SearchParams {
             center_merc: origin,
-            search_radius_m: self.radius_m,
+            search_radius_m: reach_m,
             scale_min: scale.0,
             scale_max: scale.1,
             // North up: a rotation sweep would cost 36 times as much.
@@ -167,24 +185,25 @@ impl Run<'_> {
         let wkey = WideKey {
             contour: self.contour_key(),
             origin: [origin.0.round() as i64, origin.1.round() as i64],
-            radius_m: self.radius_m.round() as i64,
+            radius_m: reach_m.round() as i64,
             near_m: near.round() as i64,
             zoom,
             scale: [scale.0.to_bits(), scale.1.to_bits()],
             max_tiles: self.max_tiles,
             band: self.band_merc().map(|b| [b.min_x, b.min_y, b.max_x, b.max_y].map(f64::to_bits)),
         };
-        let (radius, max_tiles, band) = (self.radius_m, self.max_tiles, self.band_merc());
+        let (max_tiles, band) = (self.max_tiles, self.band_merc());
         let plan = self
-            .wide_plan(&wkey, || plan_wide(origin, radius, near, zoom, map_half_extent(&base, w, h), max_tiles, band));
-        (wkey, plan, base)
+            .wide_plan(&wkey, || plan_wide(origin, reach_m, near, zoom, map_half_extent(&base, w, h), max_tiles, band));
+        Some((wkey, plan, base))
     }
 
     /// Plan the wide search before the hint and near areas run, so the
     /// progress counts its tiles from the first call.
     pub(super) fn plan_wide_progress(&mut self, gps: LatLon, scale: (f64, f64)) {
-        let (wkey, plan, _) = self.wide_setup(gps, scale);
-        self.wide_counts(&wkey, &plan);
+        if let Some((wkey, plan, _)) = self.wide_setup(gps, scale) {
+            self.wide_counts(&wkey, &plan);
+        }
     }
 
     /// The cached plan for `wkey`, or a new one (replacing any other wide search).
@@ -246,7 +265,13 @@ impl Run<'_> {
             let b = chunk.placement;
             let params = SearchParams {
                 center_merc: ((b.min_x + b.max_x) / 2.0, (b.min_y + b.max_y) / 2.0),
-                region: Some(Region { bounds: b, origin, r_min_m: near, r_max_m: self.radius_m }),
+                region: Some(Region {
+                    bounds: b,
+                    origin,
+                    r_min_m: near,
+                    r_max_m: wkey.radius_m as f64,
+                    exclude: chunk.exclude,
+                }),
                 ..base.clone()
             };
             let n = plan.chunks.len().max(1) as f32;
@@ -265,7 +290,12 @@ impl Run<'_> {
         cands.sort_by(|a, b| b.score.total_cmp(&a.score));
         cands.truncate(CHUNK_CANDIDATES);
         let res = Arc::new(ChunkResult { cands, present, missing });
-        let release: Vec<TileId> = chunk.tiles.iter().filter(|t| plan.last_use.get(t) == Some(&ci)).copied().collect();
+        let release: Vec<TileId> = chunk
+            .tiles
+            .iter()
+            .filter(|t| plan.last_use.get(t) == Some(&ci) && !self.pinned.contains(t) && !self.kept.contains(t))
+            .copied()
+            .collect();
         {
             let mut store = lock(&self.s.dem);
             for t in &release {
@@ -287,10 +317,34 @@ impl Run<'_> {
             search_radius_m: RECHECK_RADIUS_M,
             scale_min: c.scale_m_per_px / RECHECK_SCALE_TOL,
             scale_max: c.scale_m_per_px * RECHECK_SCALE_TOL,
-            rotations_deg: vec![0.0],
+            rotations_deg: vec![c.rotation_deg],
             top_k: 1,
             region: None,
         }
+    }
+
+    /// The zoom-11 re-check of one candidate (cached): its best peak 4 km
+    /// around at ±10 % scale, with the local peak ratio. A hint or near
+    /// area's match that only the fit gap among its few refined candidates
+    /// made confident must stand out locally like a wide match (`area_search`).
+    pub(super) fn recheck_one(&mut self, prod: &ContourProducts, c: &Candidate) -> Step<Option<Candidate>> {
+        let rk = self.recheck_key(c);
+        if let Some(r) = lock(&self.s.rechecks).get(&rk).cloned() {
+            return Ok(r);
+        }
+        let (w, h) = self.size();
+        let p = self.recheck_params(c);
+        let b = required_dem_box(&p, w, h);
+        let z = near_zoom(merc_to_latlon(p.center_merc.0, p.center_merc.1).0);
+        self.need(&tiles_covering(z, &b), "recheck", self.contour_key())?;
+        let t = Instant::now();
+        let dem = lock(&self.s.dem).mosaic(z, &b);
+        let s = self.s;
+        let r = coarse_search(&prod.field, &dem, w, h, &p, &|| s.cancelled(), &|_| {}).into_iter().next();
+        self.time("recheck", t);
+        self.check_cancel()?;
+        lock(&self.s.rechecks).insert(rk, r.clone());
+        Ok(r)
     }
 
     fn recheck_key(&self, c: &Candidate) -> RecheckKey {
@@ -333,22 +387,23 @@ impl Run<'_> {
         let (w, h) = self.size();
         let key = self.contour_key();
         let zoom = wkey.zoom;
-        // 1. Zoom-11 re-checks.
-        let plans: Vec<(Candidate, SearchParams, MercBox)> = res
+        // 1. Zoom-11 re-checks (coarser far north or south: `near_zoom`).
+        let plans: Vec<(Candidate, SearchParams, MercBox, u8)> = res
             .cands
             .iter()
             .map(|c| {
                 let p = self.recheck_params(c);
                 let b = required_dem_box(&p, w, h);
-                (c.clone(), p, b)
+                let z = near_zoom(merc_to_latlon(p.center_merc.0, p.center_merc.1).0);
+                (c.clone(), p, b, z)
             })
             .collect();
         let todo: Vec<TileId> = {
             let cache = lock(&self.s.rechecks);
             plans
                 .iter()
-                .filter(|(c, _, _)| !cache.contains_key(&self.recheck_key(c)))
-                .flat_map(|(_, _, b)| tiles_covering(NEAR_ZOOM, b))
+                .filter(|(c, ..)| !cache.contains_key(&self.recheck_key(c)))
+                .flat_map(|(_, _, b, z)| tiles_covering(*z, b))
                 .collect()
         };
         if !todo.is_empty() {
@@ -357,7 +412,7 @@ impl Run<'_> {
         }
         let mut used: Vec<TileId> = Vec::new();
         let mut strong: Vec<Candidate> = Vec::new();
-        for (c, p, b) in &plans {
+        for (c, p, b, z) in &plans {
             self.check_cancel()?;
             let rk = self.recheck_key(c);
             let cached = lock(&self.s.rechecks).get(&rk).cloned();
@@ -365,12 +420,12 @@ impl Run<'_> {
                 Some(r) => r,
                 None => {
                     let t = Instant::now();
-                    let dem = lock(&self.s.dem).mosaic(NEAR_ZOOM, b);
+                    let dem = lock(&self.s.dem).mosaic(*z, b);
                     let s = self.s;
                     let r = coarse_search(&prod.field, &dem, w, h, p, &|| s.cancelled(), &|_| {}).into_iter().next();
                     self.time("wide_recheck", t);
                     self.check_cancel()?;
-                    used.extend(tiles_covering(NEAR_ZOOM, b));
+                    used.extend(tiles_covering(*z, b));
                     lock(&self.s.rechecks).insert(rk, r.clone());
                     r
                 }
@@ -382,7 +437,7 @@ impl Run<'_> {
         // Re-check tiles go once used (the near and hint areas' stay).
         if !used.is_empty() {
             let mut store = lock(&self.s.dem);
-            for t in used.iter().filter(|t| !self.pinned.contains(t)) {
+            for t in used.iter().filter(|t| !self.pinned.contains(t) && !self.kept.contains(t)) {
                 store.release(t);
             }
         }
@@ -401,13 +456,32 @@ impl Run<'_> {
                 pool.iter().filter(|p| cand_dist_m(p, &g, w, h) >= DISTINCT_M).map(|p| p.score).fold(0.0f32, f32::max);
             let margin = g.score / other.max(0.05);
             let Some(fp) = fine_plan(&g.transform, w, h) else { continue };
-            self.set_progress(SearchStage::Refine, zoom, 0.0);
-            self.need_more(&fp.tiles, lookahead, "refine", key)?;
-            let Some((r, fzoom)) = self.refine_one(prod, key, &fp, &g.transform, false) else { continue };
+            let rk = self.recheck_key(&g);
+            let cached = lock(&self.s.wide_refined).get(&rk).cloned();
+            let refined = match cached {
+                Some(r) => r,
+                None => {
+                    self.set_progress(SearchStage::Refine, zoom, 0.0);
+                    self.need_more(&fp.tiles, lookahead, "refine", key)?;
+                    let r = self.refine_one(prod, key, &fp, &g.transform, false);
+                    self.check_cancel()?;
+                    lock(&self.s.wide_refined).insert(rk, r.clone());
+                    r
+                }
+            };
+            let Some((r, fzoom)) = refined else { continue };
             let conf = confidence(&g, &r);
             let (mx, my) = g.center_merc(w, h);
             let (lat, lon) = merc_to_latlon(mx, my);
             let accepted = conf >= CONFIDENT && margin >= WIDE_NCC_MARGIN;
+            if !accepted {
+                // A rejected candidate's zoom-13 tiles go (its outcome is
+                // cached); the accepted one keeps them for its answer.
+                let mut store = lock(&self.s.dem);
+                for t in fp.tiles.iter().filter(|t| !self.pinned.contains(t) && !self.kept.contains(t)) {
+                    store.release(t);
+                }
+            }
             let entry = json!({
                 "chunk": ci,
                 "center": [round_dp(lat, 5), round_dp(lon, 5)],

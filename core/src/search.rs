@@ -127,8 +127,9 @@ impl Default for SearchParams {
 
 /// Where the map centre may lie in one chunk of a wide search: inside
 /// `bounds` (half-open in Mercator x and y, so neighbouring chunks never
-/// share a placement) and at a ground distance in `[r_min_m, r_max_m]` from
-/// `origin` (the GPS fix; the near disc is searched separately).
+/// share a placement), outside `exclude` (half-open too; placements another
+/// chunk searched first) and at a ground distance in `[r_min_m, r_max_m]`
+/// from `origin` (the GPS fix; the near disc is searched separately).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Region {
     pub bounds: MercBox,
@@ -136,6 +137,24 @@ pub struct Region {
     pub origin: (f64, f64),
     pub r_min_m: f64,
     pub r_max_m: f64,
+    pub exclude: Option<MercBox>,
+}
+
+/// Is (x, y) in the half-open box?
+fn in_box(b: &MercBox, x: f64, y: f64) -> bool {
+    x >= b.min_x && x < b.max_x && y >= b.min_y && y < b.max_y
+}
+
+/// The point of `b` nearest to `p` in Mercator, across the antimeridian
+/// when that is nearer (x taken modulo the world's width).
+pub fn nearest_in_box(b: &MercBox, p: (f64, f64)) -> (f64, f64) {
+    let world = 2.0 * std::f64::consts::PI * crate::geo::EARTH_RADIUS;
+    let y = p.1.clamp(b.min_y, b.max_y);
+    [p.0 - world, p.0, p.0 + world]
+        .into_iter()
+        .map(|x| (x, x.clamp(b.min_x, b.max_x)))
+        .min_by(|a, c| (a.0 - a.1).abs().total_cmp(&(c.0 - c.1).abs()))
+        .map_or((p.0.clamp(b.min_x, b.max_x), y), |(_, x)| (x, y))
 }
 
 impl Region {
@@ -148,24 +167,29 @@ impl Region {
 
     /// Is a map centre at this Mercator position inside the region?
     pub fn contains(&self, mx: f64, my: f64) -> bool {
-        let b = &self.bounds;
-        if !(mx >= b.min_x && mx < b.max_x && my >= b.min_y && my < b.max_y) {
+        if !in_box(&self.bounds, mx, my) || self.exclude.is_some_and(|e| in_box(&e, mx, my)) {
             return false;
         }
         let d = self.distance_m(mx, my);
         d >= self.r_min_m && d <= self.r_max_m
     }
 
-    /// True when every point of `bounds` lies within the annulus, so only the
-    /// box needs testing. The disc is convex (corners within `r_max_m`); the
-    /// box's point nearest the origin must be at least `r_min_m` away.
+    /// True when every point of `bounds` lies within the annulus and none in
+    /// `exclude`, so only the box needs testing. The disc is convex (corners
+    /// within `r_max_m`); the box's point nearest the origin must be at least
+    /// `r_min_m` away.
     pub fn box_inside_annulus(&self) -> bool {
         let b = &self.bounds;
+        if let Some(e) = &self.exclude {
+            if e.min_x < b.max_x && e.max_x > b.min_x && e.min_y < b.max_y && e.max_y > b.min_y {
+                return false;
+            }
+        }
         let corners = [(b.min_x, b.min_y), (b.max_x, b.min_y), (b.max_x, b.max_y), (b.min_x, b.max_y)];
         if corners.iter().any(|&(x, y)| self.distance_m(x, y) > self.r_max_m) {
             return false;
         }
-        let near = (self.origin.0.clamp(b.min_x, b.max_x), self.origin.1.clamp(b.min_y, b.max_y));
+        let near = nearest_in_box(b, self.origin);
         self.r_min_m <= 0.0 || self.distance_m(near.0, near.1) >= self.r_min_m
     }
 }
@@ -759,12 +783,7 @@ fn build_frame(
                 let (du, dv) = (u as f64 + 0.5 - fc.0, v as f64 + 0.5 - fc.1);
                 let (lx, ly) = (gc.0 + c * du - s * dv, gc.1 + s * du + c * dv);
                 let (mx, my) = (lr.ox + lx * lr.res, lr.oy - ly * lr.res);
-                let b = &lr.region.bounds;
-                *a = if box_only {
-                    mx >= b.min_x && mx < b.max_x && my >= b.min_y && my < b.max_y
-                } else {
-                    lr.region.contains(mx, my)
-                };
+                *a = if box_only { in_box(&lr.region.bounds, mx, my) } else { lr.region.contains(mx, my) };
             }
         });
         m
@@ -1360,7 +1379,7 @@ mod tests {
         // A box 150–250 km (Mercator) east of the origin: 136–227 km of ground at 25°S.
         let o = crate::geo::latlon_to_merc(-25.0, 28.0);
         let b = MercBox::around(o.0 + 200_000.0, o.1, 50_000.0);
-        let r = Region { bounds: b, origin: o, r_min_m: 50_000.0, r_max_m: 400_000.0 };
+        let r = Region { bounds: b, origin: o, r_min_m: 50_000.0, r_max_m: 400_000.0, exclude: None };
         assert!(r.box_inside_annulus());
         assert!(r.contains(o.0 + 200_000.0, o.1));
         // Half-open: the far edges belong to the neighbours.
@@ -1373,6 +1392,24 @@ mod tests {
         let r3 = Region { r_min_m: 200_000.0, ..r };
         assert!(!r3.box_inside_annulus());
         assert!(!r3.contains(o.0 + 155_000.0, o.1) && r3.contains(o.0 + 245_000.0, o.1));
+        // An excluded band (searched by another chunk first) is left out.
+        let band = MercBox { min_x: -1e9, min_y: o.1 - 5_000.0, max_x: 1e9, max_y: o.1 + 5_000.0 };
+        let r4 = Region { exclude: Some(band), ..r };
+        assert!(!r4.box_inside_annulus());
+        assert!(!r4.contains(o.0 + 200_000.0, o.1) && r4.contains(o.0 + 200_000.0, o.1 + 6_000.0));
+    }
+
+    #[test]
+    fn nearest_point_across_the_antimeridian() {
+        let half = std::f64::consts::PI * crate::geo::EARTH_RADIUS;
+        // A box just east of -180° and a point just west of +180°.
+        let b = MercBox { min_x: -half, min_y: 0.0, max_x: -half + 100_000.0, max_y: 100_000.0 };
+        let p = (half - 20_000.0, 50_000.0);
+        let n = nearest_in_box(&b, p);
+        assert!((n.0 - b.min_x).abs() < 1e-6 && (n.1 - 50_000.0).abs() < 1e-6, "{n:?}");
+        // Away from it: a plain clamp.
+        let q = (-half + 300_000.0, 150_000.0);
+        assert_eq!(nearest_in_box(&b, q), (b.max_x, b.max_y));
     }
 
     #[test]

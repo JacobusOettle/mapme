@@ -61,7 +61,7 @@ use crate::refine::{
 use crate::search::{coarse_search, map_field, required_dem_box, rotation_sweep, Candidate, MapField, SearchParams};
 use crate::skeleton::{contour_samples, default_sampling, ContourSamples};
 use crate::warp::{fit_warp, ContourInput, GridLines, Warp, WarpFit, WarpInput};
-use crate::wide::NEAR_ZOOM;
+use crate::wide::near_zoom;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -89,8 +89,9 @@ const DISTINCT_PEAK_RATIO: f32 = 1.6;
 const LABELS_PEAK_RATIO: f32 = 1.6;
 /// Fewer contour segments than this: the map has no usable contours.
 pub const MIN_SEGMENTS: usize = 10;
-/// DEM zoom of the coarse search and preferred zoom of refinement.
-pub const COARSE_ZOOM: u8 = 11;
+/// DEM zoom of the coarse search up to 60° of latitude (coarser beyond:
+/// `wide::near_zoom`).
+pub const COARSE_ZOOM: u8 = crate::wide::NEAR_ZOOM;
 pub const FINE_ZOOM: u8 = 13;
 /// One refinement may need at most this many tiles; coarser zooms are used beyond.
 const MAX_FINE_TILES: u64 = 36;
@@ -100,7 +101,8 @@ pub const DEFAULT_SCALE_RANGE: (f64, f64) = (0.4, 12.0);
 pub const DEFAULT_RADIUS_M: f64 = 50_000.0;
 /// Allowed search radius (ground metres).
 pub const RADIUS_RANGE_M: (f64, f64) = (1_000.0, 2_000_000.0);
-/// The near area: the disc around the fix searched at zoom 11 (the whole
+/// The near area: the disc around the fix searched at zoom 11 (coarser past
+/// 60° of latitude: `wide::near_zoom`; the whole
 /// search up to this radius); beyond it the wide search takes over.
 pub const NEAR_RADIUS_M: f64 = 50_000.0;
 /// The near disc is searched out to this radius first (a third of the
@@ -561,6 +563,9 @@ pub struct Session {
     wide: Mutex<Option<wide_search::WideCache>>,
     /// Zoom-11 re-checks of wide-search candidates.
     rechecks: Mutex<HashMap<wide_search::RecheckKey, Option<Candidate>>>,
+    /// Zoom-13 refinements of re-checked wide candidates (by the re-checked
+    /// transform) with their DEM zoom: rejected ones release their tiles.
+    wide_refined: Mutex<HashMap<wide_search::RecheckKey, Option<(RefineResult, u8)>>>,
     cancel: AtomicBool,
     /// f32 bits of the progress of the running call.
     progress: AtomicU32,
@@ -586,6 +591,7 @@ impl Session {
             refinements: Mutex::new(HashMap::new()),
             wide: Mutex::new(None),
             rechecks: Mutex::new(HashMap::new()),
+            wide_refined: Mutex::new(HashMap::new()),
             cancel: AtomicBool::new(false),
             progress: AtomicU32::new(0f32.to_bits()),
         }
@@ -608,6 +614,12 @@ impl Session {
         check_tile(t)?;
         lock(&self.dem).mark_missing(t);
         Ok(())
+    }
+
+    /// DEM tiles the session holds elevations for (256 KB each): the wide
+    /// search releases its tiles as it goes, so this stays bounded.
+    pub fn dem_tiles_held(&self) -> usize {
+        lock(&self.dem).present_count()
     }
 
     /// Progress of the running call, 0..1.
@@ -783,7 +795,7 @@ enum Found {
 type Step<T> = Result<T, Box<GeorefResponse>>;
 
 /// Hint areas searched at most.
-const MAX_HINTS: usize = 8;
+pub(crate) const MAX_HINTS: usize = 8;
 
 /// An area searched at the near resolution.
 #[derive(Clone, Copy)]
@@ -817,6 +829,8 @@ struct Run<'a> {
     hints_tried: usize,
     /// Zoom-11 coarse tiles of the hint areas and the near area (never released).
     pinned: HashSet<TileId>,
+    /// Zoom-13 tiles of the hint and near areas' refinements (never released).
+    kept: HashSet<TileId>,
     /// Present and missing coarse tiles of the areas and chunks searched.
     searched_tiles: HashSet<TileId>,
     missing_tiles: HashSet<TileId>,
@@ -828,6 +842,9 @@ struct Run<'a> {
     areas: Vec<Value>,
     /// Where coordinate labels of one axis put the map centre.
     band: Option<LabelBand>,
+    /// The radius the wide search covers when the map is too small to be
+    /// searched out to `radius_m` (`wide::wide_reach`; 50 km: no wide search).
+    wide_limit: Option<f64>,
 }
 
 impl<'a> Run<'a> {
@@ -861,12 +878,14 @@ impl<'a> Run<'a> {
             hints: Vec::new(),
             hints_tried: 0,
             pinned: HashSet::new(),
+            kept: HashSet::new(),
             searched_tiles: HashSet::new(),
             missing_tiles: HashSet::new(),
             progress_info: None,
             wide_tiles: (0, 0),
             areas: Vec::new(),
             band: None,
+            wide_limit: None,
         }
     }
 
@@ -902,6 +921,9 @@ impl<'a> Run<'a> {
         }
         if !self.areas.is_empty() {
             self.diag.insert("search_areas".into(), Value::Array(std::mem::take(&mut self.areas)));
+        }
+        if resp.search.is_some() {
+            self.diag.insert("dem_tiles_held".into(), json!(self.s.dem_tiles_held()));
         }
         let mut diag = std::mem::take(&mut self.diag);
         if let Value::Object(extra) = std::mem::take(&mut resp.diagnostics) {
@@ -1334,7 +1356,7 @@ impl<'a> Run<'a> {
         prod: &ContourProducts,
         key: ContourKey,
         params: &SearchParams,
-        coarse_box: &MercBox,
+        (zoom, coarse_box): (u8, &MercBox),
         tiles_present: usize,
     ) -> Step<Arc<Vec<Candidate>>> {
         let (w, h) = self.size();
@@ -1352,7 +1374,7 @@ impl<'a> Run<'a> {
             return Ok(c);
         }
         let t = Instant::now();
-        let dem = lock(&self.s.dem).mosaic(COARSE_ZOOM, coarse_box);
+        let dem = lock(&self.s.dem).mosaic(zoom, coarse_box);
         self.time("coarse_dem", t);
         let t = Instant::now();
         let s = self.s;
@@ -1432,6 +1454,9 @@ impl<'a> Run<'a> {
         let mut tiles: Vec<TileId> = plans.iter().flat_map(|(_, p)| p.tiles.iter().copied()).collect();
         tiles.sort();
         tiles.dedup();
+        // Hint and near areas keep their refinement tiles (the wide search
+        // releases its own).
+        self.kept.extend(tiles.iter().copied());
         self.need(&tiles, "refine", key)?;
         let mut out = Vec::new();
         let n = plans.len().max(1) as f32;
@@ -1502,7 +1527,7 @@ impl<'a> Run<'a> {
         // 3. Hint areas, at the near resolution.
         for i in 0..self.hints.len() {
             let hint = self.hints[i].clone();
-            self.set_progress(SearchStage::Hints, NEAR_ZOOM, 0.0);
+            self.set_progress(SearchStage::Hints, near_zoom(hint.lat), 0.0);
             let area = Area::Hint(&hint);
             let r = hint.radius_m.clamp(HINT_RADIUS_RANGE_M.0, HINT_RADIUS_RANGE_M.1);
             let outcome = self.area_search(area, hint.latlon(), r, init, labelled.as_ref())?;
@@ -1519,28 +1544,26 @@ impl<'a> Run<'a> {
         if let Some(gps) = self.gps {
             let near = self.radius_m.min(NEAR_RADIUS_M);
             let wide = self.radius_m > NEAR_RADIUS_M;
-            self.set_progress(SearchStage::Near, NEAR_ZOOM, 0.0);
-            if self.near_outside_band(gps, near) {
-                // The labels put the map elsewhere: nothing to search here.
-                self.areas.push(json!({"area": "near", "outcome": "outside the labels' band"}));
-            } else {
-                // The inner disc first (where the map usually is: as fast as
-                // a 20 km search), then the whole near disc.
-                let steps: Vec<f64> =
-                    if near > NEAR_FIRST_RADIUS_M { vec![NEAR_FIRST_RADIUS_M, near] } else { vec![near] };
-                for r in steps {
-                    match self.area_search(Area::Near, gps, r, init, labelled.as_ref())? {
-                        AreaResult::Located(resp, conf) => keep(&mut fallback, conf, resp),
-                        AreaResult::NoContours => return Ok(Found::NotFound(no_contours.into())),
-                        AreaResult::NotFound => {}
-                    }
-                    if fallback.as_ref().is_some_and(|f| f.0 >= CONFIDENT) {
-                        break;
-                    }
-                    self.set_progress(SearchStage::Near, NEAR_ZOOM, r);
+            let nz = near_zoom(gps.lat);
+            self.set_progress(SearchStage::Near, nz, 0.0);
+            // The near disc is searched even when coordinate labels of one
+            // axis put the map elsewhere (their band): one misread label
+            // must not hide a map lying next to the user. The inner disc
+            // first (where the map usually is: as fast as a 20 km search),
+            // then the whole near disc.
+            let steps: Vec<f64> = if near > NEAR_FIRST_RADIUS_M { vec![NEAR_FIRST_RADIUS_M, near] } else { vec![near] };
+            for r in steps {
+                match self.area_search(Area::Near, gps, r, init, labelled.as_ref())? {
+                    AreaResult::Located(resp, conf) => keep(&mut fallback, conf, resp),
+                    AreaResult::NoContours => return Ok(Found::NotFound(no_contours.into())),
+                    AreaResult::NotFound => {}
                 }
+                if fallback.as_ref().is_some_and(|f| f.0 >= CONFIDENT) {
+                    break;
+                }
+                self.set_progress(SearchStage::Near, nz, r);
             }
-            self.set_progress(SearchStage::Near, NEAR_ZOOM, near);
+            self.set_progress(SearchStage::Near, nz, near);
             if let Some((conf, _)) = &fallback {
                 if *conf >= CONFIDENT || !wide {
                     return Ok(Found::Located(fallback.take().unwrap().1));
@@ -1584,7 +1607,7 @@ impl<'a> Run<'a> {
                 self.diag.insert("label_hints".into(), serde_json::to_value(&labels).unwrap_or(Value::Null));
             }
             hints.extend(labels);
-            // Labels of one axis only: a band the search is cut down to.
+            // Labels of one axis only: a band the wide search tries first.
             if self.gps.is_some() {
                 self.band = label_band(&self.req.ocr, w, h, scale, lat);
                 if let Some(b) = &self.band {
@@ -1596,6 +1619,11 @@ impl<'a> Run<'a> {
         let gps = self.gps;
         let radius = self.radius_m;
         hints.retain(|h| h.is_valid() && gps.is_none_or(|g| ground_distance_m(g, h.latlon()) <= radius));
+        // Searched at most 50 km around: a larger radius must not count as
+        // covering (and hide) the hints after it.
+        for h in &mut hints {
+            h.radius_m = h.radius_m.clamp(HINT_RADIUS_RANGE_M.0, HINT_RADIUS_RANGE_M.1);
+        }
         let mut hints = order_hints(hints);
         let ignored = n_in - hints.len().min(n_in);
         hints.truncate(MAX_HINTS);
@@ -1609,25 +1637,22 @@ impl<'a> Run<'a> {
             .hints
             .iter()
             .map(|h| (h.latlon(), h.radius_m.clamp(HINT_RADIUS_RANGE_M.0, HINT_RADIUS_RANGE_M.1)))
-            .chain(
-                self.gps
-                    .map(|g| (g, self.radius_m.min(NEAR_RADIUS_M)))
-                    .filter(|(g, r)| !self.near_outside_band(*g, *r)),
-            )
+            .chain(self.gps.map(|g| (g, self.radius_m.min(NEAR_RADIUS_M))))
             .collect();
         for (c, r) in areas {
             let p = self.search_params(c, r, init);
-            planned.extend(tiles_covering(COARSE_ZOOM, &required_dem_box(&p, w, h)));
+            planned.extend(tiles_covering(near_zoom(c.lat), &required_dem_box(&p, w, h)));
         }
         self.pinned = planned;
         if let Some(g) = self.gps.filter(|_| self.radius_m > NEAR_RADIUS_M) {
             let scale = self.scale_range(g.lat, init);
             self.plan_wide_progress(g, scale);
         }
+        let first_lat = self.hints.first().map(|h| h.lat).or(self.gps.map(|g| g.lat)).unwrap_or(0.0);
         self.progress_info = Some(SearchProgress {
             radius_m: if self.gps.is_some() { self.radius_m } else { 0.0 },
             searched_radius_m: 0.0,
-            coarse_zoom: NEAR_ZOOM,
+            coarse_zoom: near_zoom(first_lat),
             tiles_planned: self.pinned.len(),
             tiles_fetched: 0,
             hints_tried: 0,
@@ -1651,16 +1676,6 @@ impl<'a> Run<'a> {
             m.max_x = latlon_to_merc(0.0, el).0;
         }
         Some(m)
-    }
-
-    /// Does the labels' band miss the near disc (`near` metres around `gps`)?
-    fn near_outside_band(&self, gps: LatLon, near: f64) -> bool {
-        let Some(b) = &self.band else { return false };
-        let dlat = near / 111_320.0;
-        let dlon = near / (111_320.0 * gps.lat.to_radians().cos().max(0.05));
-        let lat_out = b.lat.is_some_and(|(s, n)| gps.lat + dlat < s || gps.lat - dlat > n);
-        let lon_out = b.lon.is_some_and(|(wl, el)| gps.lon + dlon < wl || gps.lon - dlon > el);
-        lat_out || lon_out
     }
 
     /// Update the progress object: stage, coarse zoom and (when larger) the
@@ -1713,7 +1728,8 @@ impl<'a> Run<'a> {
         };
         let params = self.search_params(centre, radius_m, init);
         let coarse_box = required_dem_box(&params, w, h);
-        let coarse_tiles = tiles_covering(COARSE_ZOOM, &coarse_box);
+        let zoom = near_zoom(centre.lat);
+        let coarse_tiles = tiles_covering(zoom, &coarse_box);
         self.need(&coarse_tiles, stage, key)?;
         let present: Vec<TileId> = {
             let store = lock(&self.s.dem);
@@ -1741,7 +1757,7 @@ impl<'a> Run<'a> {
         if prod.samples.n_segs < MIN_SEGMENTS {
             return Ok(AreaResult::NoContours);
         }
-        let cands = self.search(&prod, key, &params, &coarse_box, present.len())?;
+        let cands = self.search(&prod, key, &params, (zoom, &coarse_box), present.len())?;
         let cdiag: Vec<Value> = cands
             .iter()
             .map(|c| {
@@ -1788,14 +1804,32 @@ impl<'a> Run<'a> {
             results.push(l.clone());
         }
         let pairs: Vec<(Candidate, RefineResult)> = results.iter().map(|(c, r, _, _)| (c.clone(), r.clone())).collect();
-        let Some((best, conf)) = select_refined(&pairs) else {
+        let Some((best, mut conf)) = select_refined(&pairs) else {
             record["outcome"] = json!("nothing refined");
             self.areas.push(record);
             return Ok(AreaResult::NotFound);
         };
+        // The fit gap among the refined candidates counts as search evidence
+        // (a right match in repetitive terrain), but three refinements are
+        // weak evidence: on real terrain 140 km from the sheet the phone photo
+        // fitted wrong places at 0.97 and 0.999 (coarse peak ratios ~1, scale
+        // 4× and 2.4× off, turned 5–10°) and was accepted at 0.82 and 0.999.
+        // A match lifted that way must also stand out locally, like a wide
+        // match: its zoom-11 re-check (4 km, ±10 % scale) peaks at ≥ 2.2 its
+        // runner-up (true matches 2.56–5.39, wrong ones ≤ 1.87; `wide_search`).
+        let own = confidence(&pairs[best].0, &pairs[best].1);
+        let mut recheck = Value::Null;
+        if best < n_search && conf >= ACCEPT && own < CONFIDENT && conf > own {
+            let r = self.recheck_one(&prod, &pairs[best].0)?;
+            let (ratio, ncc) = r.map_or((0.0, 0.0), |c| (c.peak_ratio, c.score));
+            recheck = json!({"ratio": round_dp(ratio as f64, 2), "ncc": round_dp(ncc as f64, 3)});
+            if ratio < wide_search::WIDE_MIN_RATIO || ncc < wide_search::WIDE_MIN_NCC {
+                conf = own;
+            }
+        }
         let fits: Vec<f64> = pairs.iter().map(|(_, r)| round_dp(fit_confidence(r), 3)).collect();
         let sel = json!({"candidate": best, "refined": results.len(), "fit_confidences": fits,
-                         "confidence": round_dp(conf, 3)});
+                         "confidence": round_dp(conf, 3), "recheck": recheck});
         record["selected"] = sel.clone();
         if conf < ACCEPT {
             self.diag.insert("best_confidence".into(), json!(round_dp(conf, 3)));
@@ -1850,16 +1884,25 @@ impl<'a> Run<'a> {
         if user > 0 {
             what.push(format!("tried the area{} you picked", plural(user)));
         }
+        if let Some(b) = self.band.as_ref().filter(|_| self.gps.is_some() && self.radius_m > NEAR_RADIUS_M) {
+            what.push(format!("first along {}, printed on the map", b.name));
+        }
+        // A map too small for the coarse zooms is searched out to its limit.
+        let limit = self.wide_limit.filter(|l| *l < self.radius_m && self.gps.is_some());
+        let km = |m: f64| group_thousands((m / 1000.0).round());
         let head = match self.gps {
-            Some(_) => format!("No match within {} km of you", group_thousands((self.radius_m / 1000.0).round())),
+            Some(_) => format!("No match within {} km of you", km(limit.unwrap_or(self.radius_m))),
             None => "No match in the areas tried".into(),
         };
-        let advice = if self.gps.is_some() && self.radius_m < RADIUS_RANGE_M.1 {
+        let too_small = limit
+            .map(|l| format!(" This map shows too small an area to be searched farther than {} km away.", km(l)))
+            .unwrap_or_default();
+        let advice = if self.gps.is_some() && self.radius_m < RADIUS_RANGE_M.1 && limit.is_none() {
             "Search a wider area, pick the contour colour, or calibrate manually."
         } else {
             "Pick the contour colour, or calibrate manually."
         };
-        format!("{head} ({}). {advice}", what.join("; "))
+        format!("{head} ({}).{too_small} {advice}", what.join("; "))
     }
 
     /// A located contour match; `dem` is the DEM zoom and box of its

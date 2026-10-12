@@ -540,9 +540,15 @@ fn network_loop(
             fetch_s += secs;
             bytes += b;
             let have: std::collections::HashSet<TileId> = got.iter().map(|g| g.0).collect();
+            // `WIDE_TILES_DIR`: keep a copy of every tile served (fixture naming).
+            let keep = std::env::var_os("WIDE_TILES_DIR").map(PathBuf::from);
             for (t, png) in &got {
                 let _ = s.add_dem_tile(*t, png);
                 *by_zoom.entry(t.z).or_insert(0) += 1;
+                if let Some(dir) = &keep {
+                    let _ = std::fs::create_dir_all(dir);
+                    let _ = std::fs::write(dir.join(format!("{}_{}_{}.png", t.z, t.x, t.y)), png);
+                }
             }
             for t in tiles.iter().filter(|t| !have.contains(t)) {
                 let _ = s.mark_dem_tile_missing(*t);
@@ -554,6 +560,25 @@ fn network_loop(
         }
     }
     (rs, core_s, fetch_s, by_zoom, bytes)
+}
+
+/// The confidence of each area searched (hint and near areas' best
+/// refinement, wide candidates refined), for the false-positive margin.
+fn area_confidences(r: &serde_json::Value) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for a in r["diagnostics"]["search_areas"].as_array().into_iter().flatten() {
+        out.push(format!(
+            "{} {} km: {} ({})",
+            a["area"].as_str().unwrap_or("?"),
+            a["radius_km"],
+            a["selected"]["confidence"],
+            a["outcome"].as_str().unwrap_or("?")
+        ));
+    }
+    for v in r["diagnostics"]["wide"]["refined"].as_array().into_iter().flatten() {
+        out.push(format!("wide chunk {}: {} (ratio {})", v["chunk"], v["confidence"], v["recheck_ratio"]));
+    }
+    out.join("; ")
 }
 
 /// Wide searches through the session as the app runs them: the Grootkloof
@@ -613,7 +638,7 @@ fn wide_session() {
         eprintln!(
             "[wide_session] {name} R {:.0} km {}: {} in {} rounds, {:.1} s ({:.1} s core, {:.1} s tiles), tiles {:?} \
              ({:.1} MB), peak RSS {:.0} MB, err {}\n    message: {}\n    search: {}\n    wide: {}\n    timings (last \
-             call): {}\n    estimate: {}",
+             call): {}\n    estimate: {}\n    areas: {}",
             radius / 1000.0,
             if prior { "1:25 000" } else { "no scale" },
             r["status"],
@@ -629,7 +654,8 @@ fn wide_session() {
             r["search"],
             r["diagnostics"]["wide"],
             r["timings_ms"],
-            est
+            est,
+            area_confidences(r)
         );
     }
 }
@@ -638,10 +664,16 @@ fn wide_session() {
 #[test]
 #[ignore]
 fn estimate_table() {
+    // `ESTIMATE_AT=lat,lon` for another place (default Pretoria).
+    let at: Vec<f64> = std::env::var("ESTIMATE_AT")
+        .unwrap_or_else(|_| "-25.75,28.19".into())
+        .split(',')
+        .filter_map(|v| v.trim().parse().ok())
+        .collect();
     for known in [false, true] {
         for r in [20_000.0, 50_000.0, 100_000.0, 250_000.0, 300_000.0, 500_000.0, 1_000_000.0, 2_000_000.0] {
             let v: serde_json::Value = serde_json::from_str(&mapme_core::wide::search_estimate_json(
-                &serde_json::json!({"radius_m": r, "gps": {"lat": -25.75, "lon": 28.19}, "scale_known": known})
+                &serde_json::json!({"radius_m": r, "gps": {"lat": at[0], "lon": at[1]}, "scale_known": known})
                     .to_string(),
             ))
             .unwrap();
@@ -701,6 +733,10 @@ fn wide_session_real_photo() {
         let t = Instant::now();
         let (rs, core_s, fetch_s, by_zoom, bytes) = network_loop(&s, &req);
         let r = rs.last().unwrap();
+        if let Some(dir) = std::env::var_os("WIDE_DUMP") {
+            let p = PathBuf::from(dir).join(format!("photo-{name}-{:.0}.json", radius / 1000.0));
+            std::fs::write(&p, serde_json::to_string_pretty(r).unwrap()).unwrap();
+        }
         // Distance of the map centre from the sheet's centre.
         let off = r["pixel_to_mercator"].as_array().map(|m| {
             let m: Vec<f64> = m.iter().map(|v| v.as_f64().unwrap()).collect();
@@ -711,7 +747,7 @@ fn wide_session_real_photo() {
         eprintln!(
             "[wide_session photo] {name} R {:.0} km: {} conf {} in {} rounds, {:.1} s ({:.1} s core, {:.1} s tiles), \
              tiles {:?} ({:.1} MB), peak RSS {:.0} MB, centre {} from the sheet's\n    message: {}\n    search: {}\n    \
-             wide: {}",
+             wide: {}\n    areas: {}",
             radius / 1000.0,
             r["status"],
             r["confidence"],
@@ -726,6 +762,7 @@ fn wide_session_real_photo() {
             r["message"],
             r["search"],
             r["diagnostics"]["wide"],
+            area_confidences(r),
         );
     }
 }

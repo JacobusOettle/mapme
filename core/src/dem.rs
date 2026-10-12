@@ -185,6 +185,11 @@ impl DemStore {
         self.tiles.len()
     }
 
+    /// Tiles holding elevations (256 KB each).
+    pub fn present_count(&self) -> usize {
+        self.tiles.values().filter(|t| matches!(t, TileState::Present(_))).count()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.tiles.is_empty()
     }
