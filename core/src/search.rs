@@ -25,7 +25,7 @@
 
 use crate::dem::{DemMosaic, MercBox};
 use crate::fft::{next_fast_len, Fft2, C32};
-use crate::geo::{merc_to_latlon, Affine};
+use crate::geo::{haversine_m, merc_to_latlon, Affine, LatLon};
 use crate::image::{GrayF32, Mask};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -105,6 +105,10 @@ pub struct SearchParams {
     pub rotations_deg: Vec<f64>,
     /// Max number of distinct candidates to return.
     pub top_k: usize,
+    /// Restrict the map centre to a box and annulus instead of the disc of
+    /// `search_radius_m` around `center_merc` (a chunk of the wide search).
+    /// `center_merc` should then be the box centre.
+    pub region: Option<Region>,
 }
 
 impl Default for SearchParams {
@@ -116,7 +120,77 @@ impl Default for SearchParams {
             scale_max: 10.0,
             rotations_deg: vec![0.0],
             top_k: 3,
+            region: None,
         }
+    }
+}
+
+/// Where the map centre may lie in one chunk of a wide search: inside
+/// `bounds` (half-open in Mercator x and y, so neighbouring chunks never
+/// share a placement), outside `exclude` (half-open too; placements another
+/// chunk searched first) and at a ground distance in `[r_min_m, r_max_m]`
+/// from `origin` (the GPS fix; the near disc is searched separately).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Region {
+    pub bounds: MercBox,
+    /// Mercator position of the annulus centre.
+    pub origin: (f64, f64),
+    pub r_min_m: f64,
+    pub r_max_m: f64,
+    pub exclude: Option<MercBox>,
+}
+
+/// Is (x, y) in the half-open box?
+fn in_box(b: &MercBox, x: f64, y: f64) -> bool {
+    x >= b.min_x && x < b.max_x && y >= b.min_y && y < b.max_y
+}
+
+/// The point of `b` nearest to `p` in Mercator, across the antimeridian
+/// when that is nearer (x taken modulo the world's width).
+pub fn nearest_in_box(b: &MercBox, p: (f64, f64)) -> (f64, f64) {
+    let world = 2.0 * std::f64::consts::PI * crate::geo::EARTH_RADIUS;
+    let y = p.1.clamp(b.min_y, b.max_y);
+    [p.0 - world, p.0, p.0 + world]
+        .into_iter()
+        .map(|x| (x, x.clamp(b.min_x, b.max_x)))
+        .min_by(|a, c| (a.0 - a.1).abs().total_cmp(&(c.0 - c.1).abs()))
+        .map_or((p.0.clamp(b.min_x, b.max_x), y), |(_, x)| (x, y))
+}
+
+impl Region {
+    /// Ground distance (metres, great circle) from `origin` to a Mercator point.
+    pub fn distance_m(&self, mx: f64, my: f64) -> f64 {
+        let (la, lo) = merc_to_latlon(self.origin.0, self.origin.1);
+        let (lb, lob) = merc_to_latlon(mx, my);
+        haversine_m(LatLon::new(la, lo), LatLon::new(lb, lob))
+    }
+
+    /// Is a map centre at this Mercator position inside the region?
+    pub fn contains(&self, mx: f64, my: f64) -> bool {
+        if !in_box(&self.bounds, mx, my) || self.exclude.is_some_and(|e| in_box(&e, mx, my)) {
+            return false;
+        }
+        let d = self.distance_m(mx, my);
+        d >= self.r_min_m && d <= self.r_max_m
+    }
+
+    /// True when every point of `bounds` lies within the annulus and none in
+    /// `exclude`, so only the box needs testing. The disc is convex (corners
+    /// within `r_max_m`); the box's point nearest the origin must be at least
+    /// `r_min_m` away.
+    pub fn box_inside_annulus(&self) -> bool {
+        let b = &self.bounds;
+        if let Some(e) = &self.exclude {
+            if e.min_x < b.max_x && e.max_x > b.min_x && e.min_y < b.max_y && e.max_y > b.min_y {
+                return false;
+            }
+        }
+        let corners = [(b.min_x, b.min_y), (b.max_x, b.min_y), (b.max_x, b.max_y), (b.min_x, b.max_y)];
+        if corners.iter().any(|&(x, y)| self.distance_m(x, y) > self.r_max_m) {
+            return false;
+        }
+        let near = nearest_in_box(b, self.origin);
+        self.r_min_m <= 0.0 || self.distance_m(near.0, near.1) >= self.r_min_m
     }
 }
 
@@ -222,23 +296,41 @@ fn merc_per_ground(p: &SearchParams) -> f64 {
 ///
 /// GPS ± (search radius + half the map extent at `scale_max`), plus a small
 /// margin for gradients, capped at `MAX_BOX_HALF_M` ground metres per side.
+/// With a `region` (a wide-search chunk): its box plus the map's extent and
+/// the margin, uncapped (the chunk planner keeps chunks small).
 pub fn required_dem_box(params: &SearchParams, img_w: usize, img_h: usize) -> MercBox {
     let k = merc_per_ground(params);
-    let s = params.scale_max.max(params.scale_min) * k;
-    let rots = rotation_list(params);
-    let (hx, hy) = if rots.iter().all(|&r| is_zero_rotation(r)) {
-        (img_w as f64 * s / 2.0, img_h as f64 * s / 2.0)
-    } else {
-        let d = ((img_w * img_w + img_h * img_h) as f64).sqrt() * s / 2.0;
-        (d, d)
-    };
-    let r = params.search_radius_m.max(0.0) * k;
+    let (hx, hy) = map_half_extent(params, img_w, img_h);
     let margin = 500.0 * k;
+    if let Some(region) = &params.region {
+        let b = region.bounds;
+        return MercBox {
+            min_x: b.min_x - hx - margin,
+            min_y: b.min_y - hy - margin,
+            max_x: b.max_x + hx + margin,
+            max_y: b.max_y + hy + margin,
+        };
+    }
+    let r = params.search_radius_m.max(0.0) * k;
     let cap = MAX_BOX_HALF_M * k;
     let (cx, cy) = params.center_merc;
     let half_x = (r + hx + margin).min(cap);
     let half_y = (r + hy + margin).min(cap);
     MercBox { min_x: cx - half_x, min_y: cy - half_y, max_x: cx + half_x, max_y: cy + half_y }
+}
+
+/// Half extents (Mercator metres, x and y) of the map at `scale_max` (the
+/// rotated map's half diagonal when rotations are searched), the margin a
+/// coarse DEM needs around the placements.
+pub fn map_half_extent(params: &SearchParams, img_w: usize, img_h: usize) -> (f64, f64) {
+    let k = merc_per_ground(params);
+    let s = params.scale_max.max(params.scale_min) * k;
+    if rotation_list(params).iter().all(|&r| is_zero_rotation(r)) {
+        (img_w as f64 * s / 2.0, img_h as f64 * s / 2.0)
+    } else {
+        let d = ((img_w * img_w + img_h * img_h) as f64).sqrt() * s / 2.0;
+        (d, d)
+    }
 }
 
 /// Smallest ground scale (m/px) searchable on a DEM of `dem_res` Mercator
@@ -577,6 +669,18 @@ struct Frame {
     v_int: Vec<f64>,
     /// FFT of the field in each tile of the level's layout.
     d_hats: Vec<Vec<C32>>,
+    /// With a search region: may a map centre lie in frame cell (u, v)?
+    allowed: Option<Vec<bool>>,
+}
+
+/// A search region in a pyramid level's coordinates: the region, and the
+/// level's Mercator origin and resolution.
+#[derive(Clone, Copy)]
+struct LevelRegion<'a> {
+    region: &'a Region,
+    ox: f64,
+    oy: f64,
+    res: f64,
 }
 
 impl Frame {
@@ -608,8 +712,17 @@ fn integral(vals: &[f64], w: usize, h: usize) -> Vec<f64> {
 }
 
 /// Resample the grid field into the frame of rotation θ (size fw × fh) and
-/// transform it on the level's tile layout.
-fn build_frame(g: &GridField, gc: (f64, f64), theta: f64, fw: usize, fh: usize, layout: &[Tile]) -> Frame {
+/// transform it on the level's tile layout; with a region, mark the frame
+/// cells a map centre may lie in.
+fn build_frame(
+    g: &GridField,
+    gc: (f64, f64),
+    theta: f64,
+    fw: usize,
+    fh: usize,
+    layout: &[Tile],
+    region: Option<LevelRegion>,
+) -> Frame {
     let zero = is_zero_rotation(theta.to_degrees());
     // North-up frames are an exact integer-offset crop of the grid field.
     let fc = if zero {
@@ -662,7 +775,20 @@ fn build_frame(g: &GridField, gc: (f64, f64), theta: f64, fw: usize, fh: usize, 
             buf
         })
         .collect();
-    Frame { w: fw, h: fh, theta, gc, fc, e_int, v_int, d_hats }
+    let allowed = region.map(|lr| {
+        let box_only = lr.region.box_inside_annulus();
+        let mut m = vec![false; fw * fh];
+        m.par_chunks_mut(fw).enumerate().for_each(|(v, row)| {
+            for (u, a) in row.iter_mut().enumerate() {
+                let (du, dv) = (u as f64 + 0.5 - fc.0, v as f64 + 0.5 - fc.1);
+                let (lx, ly) = (gc.0 + c * du - s * dv, gc.1 + s * du + c * dv);
+                let (mx, my) = (lr.ox + lx * lr.res, lr.oy - ly * lr.res);
+                *a = if box_only { in_box(&lr.region.bounds, mx, my) } else { lr.region.contains(mx, my) };
+            }
+        });
+        m
+    });
+    Frame { w: fw, h: fh, theta, gc, fc, e_int, v_int, d_hats, allowed }
 }
 
 /// A correlation peak (map centre position in Mercator), for diagnostics.
@@ -749,11 +875,26 @@ fn correlate(
                 let iy = tile.y0 + ly;
                 let mut row = Vec::with_capacity(tpw);
                 let dy = iy as f64 + t.cy - f.fc.1;
+                let my = iy as f64 + t.cy;
                 for lx in 0..tpw {
                     let ix = tile.x0 + lx;
-                    let dx = ix as f64 + t.cx - f.fc.0;
-                    if dx * dx + dy * dy > r2 {
-                        continue;
+                    match &f.allowed {
+                        Some(a) => {
+                            // The frame cell holding the map centre.
+                            let (u, v) = ((ix as f64 + t.cx).floor(), my.floor());
+                            if u < 0.0 || v < 0.0 || u >= f.w as f64 || v >= f.h as f64 {
+                                continue;
+                            }
+                            if !a[v as usize * f.w + u as usize] {
+                                continue;
+                            }
+                        }
+                        None => {
+                            let dx = ix as f64 + t.cx - f.fc.0;
+                            if dx * dx + dy * dy > r2 {
+                                continue;
+                            }
+                        }
                     }
                     let cover = f.box_sum(&f.v_int, ix, iy, t.w, t.h);
                     if cover < MIN_COVERAGE * n_cells {
@@ -868,6 +1009,7 @@ pub fn coarse_search(
             scale_max: c.scale_m_per_px * SCALE_STEP.powi(2),
             rotations_deg: (-2..=2).map(|i| c.rotation_deg + i as f64 * step / 4.0).collect(),
             top_k: 1,
+            region: None,
         };
         let sub = |f: f32| progress(0.8 + 0.2 * (k as f32 + f) / n as f32);
         let lp = search_peaks_with(field, dem, img_w, img_h, &local, FULL_PASS, cancel, &sub);
@@ -940,7 +1082,19 @@ fn search_peaks_with(
     // Plan: each scale on its DEM level: the coarsest level keeping
     // ≥ target_side cells, or coarser while the search window would need FFT
     // tiling and the template keeps ≥ TILED_MIN_SIDE cells.
-    let radius_cells0 = params.search_radius_m.max(0.0) * kmg / r0;
+    // Half extents (Mercator metres) of the area holding the map centres:
+    // the search disc, or a chunk's box.
+    let (centre, phx, phy) = match &params.region {
+        Some(r) => {
+            let b = r.bounds;
+            (((b.min_x + b.max_x) / 2.0, (b.min_y + b.max_y) / 2.0), b.width() / 2.0, b.height() / 2.0)
+        }
+        None => {
+            let r = params.search_radius_m.max(0.0) * kmg;
+            (params.center_merc, r, r)
+        }
+    };
+    let radius_cells0 = phx.max(phy) / r0;
     let mut plan: Vec<(usize, f64, usize)> = Vec::new(); // (scale index, s_merc, level)
     for (si, &s) in scale_list(params, pass.scale_step).iter().enumerate() {
         let s_merc = s * kmg;
@@ -1005,10 +1159,12 @@ fn search_peaks_with(
         let max_w = templates.iter().map(|t| t.1.w).max().unwrap();
         let max_h = templates.iter().map(|t| t.1.h).max().unwrap();
         let rc = radius_m / res;
-        // Frame: every placement whose map centre lies in the search disc.
-        let fw = (2.0 * rc).ceil() as usize + max_w + 4;
-        let fh = (2.0 * rc).ceil() as usize + max_h + 4;
-        let gc = ((params.center_merc.0 - ldem.ox) / res, (ldem.oy - params.center_merc.1) / res);
+        // Frame: every placement whose map centre lies in the search disc
+        // (or the chunk's box).
+        let fw = (2.0 * phx / res).ceil() as usize + max_w + 4;
+        let fh = (2.0 * phy / res).ceil() as usize + max_h + 4;
+        let gc = ((centre.0 - ldem.ox) / res, (ldem.oy - centre.1) / res);
+        let lregion = params.region.as_ref().map(|region| LevelRegion { region, ox: ldem.ox, oy: ldem.oy, res });
         // Grid window covering every rotated frame (or just the frame).
         let (hx, hy) = if any_rot {
             let d = ((fw * fw + fh * fh) as f64).sqrt() / 2.0 + 3.0;
@@ -1037,7 +1193,7 @@ fn search_peaks_with(
             if cancel() {
                 return Vec::new();
             }
-            let frame = build_frame(&grid, gc, rot.to_radians(), fw, fh, &layout);
+            let frame = build_frame(&grid, gc, rot.to_radians(), fw, fh, &layout, lregion);
             tick();
             let fpeaks: Vec<Peak> = templates
                 .par_iter()
@@ -1219,13 +1375,51 @@ mod tests {
     }
 
     #[test]
+    fn region_box_and_annulus() {
+        // A box 150–250 km (Mercator) east of the origin: 136–227 km of ground at 25°S.
+        let o = crate::geo::latlon_to_merc(-25.0, 28.0);
+        let b = MercBox::around(o.0 + 200_000.0, o.1, 50_000.0);
+        let r = Region { bounds: b, origin: o, r_min_m: 50_000.0, r_max_m: 400_000.0, exclude: None };
+        assert!(r.box_inside_annulus());
+        assert!(r.contains(o.0 + 200_000.0, o.1));
+        // Half-open: the far edges belong to the neighbours.
+        assert!(r.contains(b.min_x, b.min_y) && !r.contains(b.max_x, o.1) && !r.contains(o.0 + 200_000.0, b.max_y));
+        // An outer radius through the box: only the near part is in.
+        let r2 = Region { r_max_m: 150_000.0, ..r };
+        assert!(!r2.box_inside_annulus());
+        assert!(r2.contains(o.0 + 155_000.0, o.1) && !r2.contains(o.0 + 200_000.0, o.1));
+        // An inner radius through the box: only the far part is in.
+        let r3 = Region { r_min_m: 200_000.0, ..r };
+        assert!(!r3.box_inside_annulus());
+        assert!(!r3.contains(o.0 + 155_000.0, o.1) && r3.contains(o.0 + 245_000.0, o.1));
+        // An excluded band (searched by another chunk first) is left out.
+        let band = MercBox { min_x: -1e9, min_y: o.1 - 5_000.0, max_x: 1e9, max_y: o.1 + 5_000.0 };
+        let r4 = Region { exclude: Some(band), ..r };
+        assert!(!r4.box_inside_annulus());
+        assert!(!r4.contains(o.0 + 200_000.0, o.1) && r4.contains(o.0 + 200_000.0, o.1 + 6_000.0));
+    }
+
+    #[test]
+    fn nearest_point_across_the_antimeridian() {
+        let half = std::f64::consts::PI * crate::geo::EARTH_RADIUS;
+        // A box just east of -180° and a point just west of +180°.
+        let b = MercBox { min_x: -half, min_y: 0.0, max_x: -half + 100_000.0, max_y: 100_000.0 };
+        let p = (half - 20_000.0, 50_000.0);
+        let n = nearest_in_box(&b, p);
+        assert!((n.0 - b.min_x).abs() < 1e-6 && (n.1 - 50_000.0).abs() < 1e-6, "{n:?}");
+        // Away from it: a plain clamp.
+        let q = (-half + 300_000.0, 150_000.0);
+        assert_eq!(nearest_in_box(&b, q), (b.max_x, b.max_y));
+    }
+
+    #[test]
     fn frame_rotation_maps_back() {
         // A frame rotated by θ maps its reference point to the GPS and moves
         // "map right" (+u) along bearing 90° + θ.
         let g = GridField { x0: 0, y0: 0, w: 4, h: 4, d: vec![C32::new(0.0, 0.0); 16], valid: vec![false; 16] };
         let th = 30f64.to_radians();
         let layout = tile_layout(40, 30, (8, 8));
-        let f = build_frame(&g, (100.0, 200.0), th, 40, 30, &layout);
+        let f = build_frame(&g, (100.0, 200.0), th, 40, 30, &layout, None);
         let (x, y) = f.to_level(f.fc.0, f.fc.1);
         assert!((x - 100.0).abs() < 1e-9 && (y - 200.0).abs() < 1e-9);
         let (x, y) = f.to_level(f.fc.0 + 10.0, f.fc.1);
@@ -1314,6 +1508,7 @@ mod tests {
             scale_max: 4.4,
             rotations_deg: rotation_sweep(10.0),
             top_k: 2,
+            region: None,
         };
         let c = coarse_search(&field, &dem, w, h, &params, &|| false, &|_| {});
         let got = c[0].center_merc(w, h);

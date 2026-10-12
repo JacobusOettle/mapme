@@ -117,6 +117,32 @@ fn null_pointers_and_bad_sizes_are_refused() {
     }
 }
 
+/// `mm_search_estimate`: what a search of a radius fetches, never NULL.
+#[test]
+fn search_estimate() {
+    let est = |v: &Value| take_json(unsafe { mm_search_estimate(CString::new(v.to_string()).unwrap().as_ptr()) });
+    let near = est(&json!({"gps": centre_gps()}));
+    assert_eq!(near["status"], "ok", "{near}");
+    assert_eq!(near["radius_m"], 50_000.0);
+    assert_eq!(near["coarse_zoom"], 11);
+    let wide = est(&json!({"radius_m": 1_000_000, "gps": centre_gps()}));
+    assert_eq!(wide["coarse_zoom"], 9);
+    for k in ["tiles", "approx_bytes", "approx_seconds"] {
+        assert!(wide[k].as_f64().unwrap() > near[k].as_f64().unwrap(), "{k}: {wide} vs {near}");
+    }
+    let known = est(&json!({"radius_m": 1_000_000, "gps": centre_gps(), "scale_known": true}));
+    assert!(known["approx_seconds"].as_f64().unwrap() < wide["approx_seconds"].as_f64().unwrap());
+    // Hints alone, without a fix.
+    let hints = est(&json!({"gps": null, "hints": [{"lat": -25.8, "lon": 27.4}]}));
+    assert_eq!(hints["coarse_zoom"], 11);
+    assert!(hints["tiles"].as_u64().unwrap() > 0);
+    // Bad input: failed JSON, never NULL.
+    let v = take_json(unsafe { mm_search_estimate(ptr::null()) });
+    assert_eq!(v["status"], "failed");
+    let v = est(&json!([1, 2]));
+    assert_eq!(v["status"], "failed");
+}
+
 #[test]
 fn invalid_json_fails_softly() {
     let s = Sess::blank(64, 64);
@@ -188,7 +214,17 @@ fn cancel_and_dem_bookkeeping() {
     for t in again {
         assert_eq!(s.mark_missing(t), MM_OK);
     }
-    let v = s.georef(&req);
+    // Offline: the inner 20 km first, then the rest of the 50 km disc.
+    let mut v = s.georef(&req);
+    for _ in 0..4 {
+        if v["status"] != "need_dem" {
+            break;
+        }
+        for t in v["need_tiles"].as_array().unwrap() {
+            assert_eq!(s.mark_missing(t), MM_OK);
+        }
+        v = s.georef(&req);
+    }
     assert_eq!(v["status"], "failed");
     assert!(v["message"].as_str().unwrap().contains("Terrain data"), "{v}");
     assert_eq!(unsafe { mm_session_progress(s.0) }, 1.0);

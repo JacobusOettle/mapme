@@ -294,7 +294,8 @@ const PERTURBATIONS: [f64; 5] = [0.0, 0.005, -0.005, 0.01, -0.01];
 
 /// A point inside the map (the GPS of a user standing on the sheet).
 const ON_MAP: (f64, f64) = (-25.8405, 27.3920);
-/// About 45 km west of the map, outside the default 20 km search radius.
+/// About 45 km west of the map: outside a 20 km search radius (the `Far`
+/// path asks for 20 km), inside the default 50 km.
 const FAR: (f64, f64) = (-25.8405, 26.9420);
 /// Map centre.
 const CENTER: (f64, f64) = (-25.8499, 27.4000);
@@ -318,7 +319,7 @@ impl Path {
         match self {
             Path::Grid => json!({"gps": gps(CENTER), "ocr": f.ocr(), "photo": true}),
             Path::Contours => json!({"methods": ["contours"], "gps": gps(ON_MAP), "photo": true}),
-            Path::Far => json!({"methods": ["contours"], "gps": gps(FAR), "photo": true}),
+            Path::Far => json!({"methods": ["contours"], "gps": gps(FAR), "photo": true, "search_radius_m": 20000}),
         }
     }
 }
@@ -644,8 +645,8 @@ fn realphoto_contours() {
     });
 }
 
-/// A GPS fix 45 km away: the map is outside the search area, so no
-/// confident answer.
+/// A GPS fix 45 km away with a 20 km search radius: the map is outside the
+/// search area, so no confident answer.
 #[test]
 fn realphoto_far_gps_fails_honestly() {
     let out = run_all(Path::Far, &[0.0, -0.01]);
@@ -654,6 +655,50 @@ fn realphoto_far_gps_fails_honestly() {
         _ if o.confidence() < 0.5 => Ok(()),
         s => Err(format!("{s} with confidence {}", o.confidence())),
     });
+}
+
+/// Real terrain that fooled the photo's contour refinement (Terrarium tiles
+/// in `tests/data/dem-<place>`, everything the search asks for there): with
+/// the GPS at Thabazimbi (137 km from the sheet, 20 km radius) and in the
+/// Waterberg (145 km, the default 50 km radius) the phone photo fitted
+/// wrong places at 0.967 and 0.999 (scale 4× and 2.4× off, turned 5° and
+/// 10°, coarse peak ratios ~1) and was reported at confidence 0.82 and
+/// 0.999: the fit gap among three refined candidates counted as search
+/// evidence. Such a match must now stand out locally too (its zoom-11
+/// re-check peaks at 1.27 and 1.37 its runner-up; true matches ≥ 2.56), so
+/// the answer is an honest failure.
+#[test]
+fn realphoto_no_confident_wrong_answer_on_real_terrain() {
+    let _g = serial();
+    let f = flat(0.0);
+    for (place, fix, radius, dir) in [
+        ("Thabazimbi", (-24.59, 27.40), 20_000.0, "dem-thabazimbi"),
+        ("Waterberg", (-24.40, 27.95), 50_000.0, "dem-waterberg"),
+    ] {
+        let tiles = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data").join(dir);
+        let s = Session::new(f.image.clone());
+        let req = json!({"methods": ["contours"], "gps": gps(fix), "photo": true, "search_radius_m": radius});
+        let mut r = Value::Null;
+        for _ in 0..8 {
+            r = serde_json::from_str(&s.georeference_json(&req.to_string())).unwrap();
+            if r["status"] != "need_dem" {
+                break;
+            }
+            for t in r["need_tiles"].as_array().unwrap() {
+                let id = serde_json::from_value(t.clone()).unwrap();
+                let (z, x, y) = (t["z"].as_u64().unwrap(), t["x"].as_u64().unwrap(), t["y"].as_u64().unwrap());
+                match std::fs::read(tiles.join(format!("{z}_{x}_{y}.png"))) {
+                    Ok(png) => s.add_dem_tile(id, &png).unwrap(),
+                    Err(_) => s.mark_dem_tile_missing(id).unwrap(),
+                }
+            }
+        }
+        eprintln!("[real terrain] {place}: {} conf {} — {}", r["status"], r["confidence"], r["message"]);
+        for a in r["diagnostics"]["search_areas"].as_array().into_iter().flatten() {
+            eprintln!("    {} km: {} {}", a["radius_km"], a["outcome"], a["selected"]);
+        }
+        assert_eq!(r["status"], "failed", "{place}: wrong place accepted at {}", r["confidence"]);
+    }
 }
 
 // ---------------------------------------------------------------------------

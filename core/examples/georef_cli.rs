@@ -3,7 +3,7 @@
 //! ```text
 //! cargo run --release --example georef_cli -- <image.jpg|png> [--gps lat,lon] [--ocr ocr.json]
 //!     [--dem-dir dir] [--dpi N] [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b]
-//!     [--rotate] [--verify] [--photo]
+//!     [--rotate] [--verify] [--photo] [--hint lat,lon[,radius_m]]... [--max-tiles N]
 //! ```
 //!
 //! Runs the same request / `need_dem` loop as the app: tiles are read from
@@ -14,6 +14,7 @@
 
 use mapme_core::dem::TileId;
 use mapme_core::georef::{GeorefRequest, GpsFix, Session, Status};
+use mapme_core::hints::{HintSource, SearchHint, DEFAULT_HINT_RADIUS_M};
 use mapme_core::image::Rgb8;
 use mapme_core::labels::OcrObservation;
 use std::path::{Path, PathBuf};
@@ -21,10 +22,11 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 const USAGE: &str = "usage: georef_cli <image.jpg|png> [--gps lat,lon] [--ocr ocr.json] [--dem-dir dir] [--dpi N] \
-                     [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b] [--rotate] [--verify] [--photo]";
+                     [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b] [--rotate] [--verify] [--photo] \
+                     [--hint lat,lon[,radius_m]]... [--max-tiles N]";
 
-/// Most `need_dem` rounds before giving up.
-const MAX_ROUNDS: usize = 8;
+/// Most `need_dem` rounds before giving up (a 2 000 km wide search takes ~100).
+const MAX_ROUNDS: usize = 300;
 
 fn main() -> ExitCode {
     match run() {
@@ -78,6 +80,21 @@ fn run() -> Result<bool, String> {
             "--rotate" => req.allow_rotation = true,
             "--verify" => req.verify = true,
             "--photo" => req.photo = true,
+            "--hint" => {
+                let s = value("--hint")?;
+                let n = s.split(',').count();
+                let v = numbers(&s, n.clamp(2, 3), "--hint")?;
+                req.hints.push(SearchHint {
+                    lat: v[0],
+                    lon: v[1],
+                    radius_m: v.get(2).copied().unwrap_or(DEFAULT_HINT_RADIUS_M),
+                    source: HintSource::User,
+                    name: None,
+                });
+            }
+            "--max-tiles" => {
+                req.max_tiles_per_round = value("--max-tiles")?.parse().map_err(|e| format!("--max-tiles: {e}"))?
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(true);
@@ -104,6 +121,19 @@ fn run() -> Result<bool, String> {
         let ms = t.elapsed().as_secs_f64() * 1e3;
         core_ms += ms;
         eprintln!("round {round}: {:?} in {ms:.0} ms: {}", resp.status, resp.message);
+        if let Some(p) = &resp.search {
+            eprintln!(
+                "  search: {:?} z{}, {:.0} of {:.0} km, {} of {} tiles, {} of {} hints",
+                p.stage,
+                p.coarse_zoom,
+                p.searched_radius_m / 1000.0,
+                p.radius_m / 1000.0,
+                p.tiles_fetched,
+                p.tiles_planned,
+                p.hints_tried,
+                p.hints_planned
+            );
+        }
         if resp.status != Status::NeedDem {
             eprintln!("core time {core_ms:.0} ms over {round} call(s)");
             println!("{}", serde_json::to_string_pretty(&resp).map_err(|e| e.to_string())?);

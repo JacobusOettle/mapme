@@ -153,6 +153,12 @@ impl DemStore {
         self.tiles.entry(t).or_insert(TileState::Missing);
     }
 
+    /// Forget a tile and free its elevations (it counts as unknown again).
+    /// The wide search releases its coarse tiles once no chunk left needs them.
+    pub fn release(&mut self, t: &TileId) {
+        self.tiles.remove(t);
+    }
+
     /// True if the tile was added or marked missing.
     pub fn known(&self, t: &TileId) -> bool {
         self.tiles.contains_key(t)
@@ -177,6 +183,11 @@ impl DemStore {
 
     pub fn len(&self) -> usize {
         self.tiles.len()
+    }
+
+    /// Tiles holding elevations (256 KB each).
+    pub fn present_count(&self) -> usize {
+        self.tiles.values().filter(|t| matches!(t, TileState::Present(_))).count()
     }
 
     pub fn is_empty(&self) -> bool {

@@ -55,6 +55,7 @@ fn params_at(lat: f64, lon: f64) -> SearchParams {
         scale_max: 10.0,
         rotations_deg: vec![0.0],
         top_k: 3,
+        region: None,
     }
 }
 
@@ -577,6 +578,7 @@ fn run_synthetic(cfg: &Synth) {
         scale_max: 8.0,
         rotations_deg: cfg.rotations.clone(),
         top_k: 3,
+        region: None,
     };
     let coarse_box = required_dem_box(&params, w, h);
     let fine_box = refine_dem_box(&tr, w, h);
