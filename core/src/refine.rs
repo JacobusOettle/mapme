@@ -1064,6 +1064,14 @@ fn ramp(x: f64, lo: f64, hi: f64) -> f64 {
 /// * DEM coverage: ≥ 0.8 → 1, ≤ 0.3 → 0;
 /// * enough evidence: ≥ 20 segments and ≥ 30 m relief, else scaled down.
 pub fn fit_confidence(r: &RefineResult) -> f64 {
+    let cov = ramp(r.dem_coverage, 0.3, 0.8);
+    (fit_quality(r) * cov * fit_evidence(r)).clamp(0.0, 1.0)
+}
+
+/// The factors of `fit_confidence` that say how well the contours fit where
+/// they landed on the DEM (explained variance, segment std, interval SNR,
+/// interval), 0..1, whatever the coverage and amount of evidence.
+pub fn fit_quality(r: &RefineResult) -> f64 {
     if r.n_samples == 0 || !r.cost_m.is_finite() {
         return 0.0;
     }
@@ -1071,9 +1079,18 @@ pub fn fit_confidence(r: &RefineResult) -> f64 {
     let sd = 1.0 - ramp(r.median_seg_std_m, 4.0, 12.0);
     let snr = ramp(r.interval_snr, 1.0, 2.0);
     let interval = ramp(r.contour_interval_m, 0.8, 1.6);
-    let cov = ramp(r.dem_coverage, 0.3, 0.8);
-    let evidence = ramp(r.n_segments as f64, 5.0, 20.0) * ramp(r.relief_m, 10.0, 30.0);
-    (ev * sd * snr * interval * cov * evidence).clamp(0.0, 1.0)
+    (ev * sd * snr * interval).clamp(0.0, 1.0)
+}
+
+/// The factors of `fit_confidence` that say how much there was to judge by
+/// (0..1): contour segments that landed on the DEM and the terrain relief
+/// under them. Near 0, a low fit confidence says nothing (a map without
+/// contours, flat ground, no terrain data).
+pub fn fit_evidence(r: &RefineResult) -> f64 {
+    if r.n_samples == 0 || !r.cost_m.is_finite() {
+        return 0.0;
+    }
+    (ramp(r.n_segments as f64, 5.0, 20.0) * ramp(r.relief_m, 10.0, 30.0)).clamp(0.0, 1.0)
 }
 
 /// Overall confidence (0..1) that a contour match is right, combining the

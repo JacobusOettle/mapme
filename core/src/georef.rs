@@ -45,8 +45,8 @@ use crate::grid::{
 use crate::image::Rgb8;
 use crate::labels::{classify_pois, parse_scale, OcrObservation, PoiKind, PoiLabel};
 use crate::refine::{
-    confidence, evaluate_prepared, evaluate_prepared_homography, fit_confidence, refine_dem_box, refine_prepared_with,
-    select_refined, PreparedDem, RefineOptions, RefineResult,
+    confidence, evaluate_prepared, evaluate_prepared_homography, fit_confidence, fit_evidence, fit_quality,
+    refine_dem_box, refine_prepared_with, select_refined, PreparedDem, RefineOptions, RefineResult,
 };
 use crate::search::{coarse_search, map_field, required_dem_box, rotation_sweep, Candidate, MapField, SearchParams};
 use crate::skeleton::{contour_samples, default_sampling, ContourSamples};
@@ -96,6 +96,11 @@ const LABELS_MAX_CONFIDENCE: f64 = 0.45;
 /// Confidence of a grid fit with one axis from a single label that the
 /// terrain could not confirm.
 const LONE_LABEL_MAX_CONFIDENCE: f64 = 0.45;
+/// The terrain rules a one-label grid fit out only with this much to judge
+/// by (`refine::fit_evidence`)…
+const LONE_MIN_EVIDENCE: f64 = 0.5;
+/// …and a fit quality (`refine::fit_quality`) under this.
+const LONE_REJECT_QUALITY: f64 = 0.5;
 /// A spot height further than this (metres) outside the DEM elevations around
 /// its position is a misread.
 const SPOT_HEIGHT_DEM_TOLERANCE_M: f64 = 150.0;
@@ -1070,17 +1075,28 @@ impl<'a> Run<'a> {
     }
 
     /// A grid fit with one axis from a single label (`GridResult::lone_label`),
-    /// checked against the terrain when contours were requested: Some(agrees),
-    /// None without terrain data or contours (`diagnostics.contour_check`).
+    /// checked against the terrain when contours were requested
+    /// (`diagnostics.contour_check`): Some(true) when the contours fit there
+    /// (`ACCEPT`), Some(false) when enough of them landed on the DEM
+    /// (`refine::fit_evidence`) and fit badly (`refine::fit_quality`), else
+    /// None: nothing to judge it by (no contours requested, no terrain data,
+    /// no contours on the map, flat ground) or no clear verdict.
     fn lone_check(&mut self, g: &GridResult) -> Step<Option<bool>> {
         if !self.wants_contours() {
             return Ok(None);
         }
-        Ok(self.contour_check(&g.transform)?.map(|fit| fit >= ACCEPT))
+        let Some(r) = self.contour_check(&g.transform)? else { return Ok(None) };
+        Ok(if fit_confidence(&r) >= ACCEPT {
+            Some(true)
+        } else if fit_evidence(&r) >= LONE_MIN_EVIDENCE && fit_quality(&r) < LONE_REJECT_QUALITY {
+            Some(false)
+        } else {
+            None
+        })
     }
 
-    /// `verify`: the fit confidence of `t` on the terrain, None without terrain data.
-    fn contour_check(&mut self, t: &Homography) -> Step<Option<f64>> {
+    /// `verify`: the fit of `t` on the terrain, None without terrain data.
+    fn contour_check(&mut self, t: &Homography) -> Step<Option<RefineResult>> {
         let (w, h) = self.size();
         let key = self.contour_key();
         let approx = if t.is_affine() { t.to_affine() } else { t.local_affine(w as f64 / 2.0, h as f64 / 2.0) };
@@ -1094,7 +1110,7 @@ impl<'a> Run<'a> {
         } else {
             self.evaluate_homography(&prod, &plan, t)
         };
-        let fit = checked.as_ref().map(|(r, _)| fit_confidence(r));
+        let fit = checked.as_ref().map(|(r, _)| r.clone());
         let check = match checked {
             Some((r, zoom)) => {
                 let fit = fit_confidence(&r);

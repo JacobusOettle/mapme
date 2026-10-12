@@ -963,10 +963,12 @@ fn detect_lines_with(img: &Rgb8, photo: bool) -> Vec<GridLine> {
 /// Coloured fill patterns (the green hatching of vegetation, marsh) are long
 /// parallel coloured lines too: a run of at least `HATCH_MIN_LINES` lines of
 /// one family, each within `HATCH_SPACING_PX` (or `HATCH_SPACING_FRAC` of the
-/// image across them) of the next, is hatching, not a grid.
+/// image across them) of the next, is hatching, not a grid, unless lines of
+/// the other family cross it at about the same spacing (a dense coloured grid
+/// on a small screenshot: hatching runs one way).
 fn drop_hatching(lines: Vec<GridLine>, w: f64, h: f64) -> Vec<GridLine> {
-    let mut hatch = vec![false; lines.len()];
-    for axis in [LineAxis::Horizontal, LineAxis::Vertical] {
+    // Runs per family: (line indices, median spacing).
+    let runs = |axis: LineAxis| -> Vec<(Vec<usize>, f64)> {
         let (along, across) = match axis {
             LineAxis::Horizontal => (w, h),
             LineAxis::Vertical => (h, w),
@@ -975,15 +977,28 @@ fn drop_hatching(lines: Vec<GridLine>, w: f64, h: f64) -> Vec<GridLine> {
         let mut fam: Vec<(f64, usize)> =
             lines.iter().enumerate().filter(|(_, l)| l.axis == axis).map(|(i, l)| (l.pos_at(along / 2.0), i)).collect();
         fam.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut out = Vec::new();
         let mut start = 0;
         for k in 1..=fam.len() {
             if k == fam.len() || fam[k].0 - fam[k - 1].0 > gap {
                 if k - start >= HATCH_MIN_LINES {
-                    for f in &fam[start..k] {
-                        hatch[f.1] = true;
-                    }
+                    let spacing = median(fam[start..k].windows(2).map(|p| p[1].0 - p[0].0).collect()).unwrap_or(0.0);
+                    out.push((fam[start..k].iter().map(|f| f.1).collect(), spacing));
                 }
                 start = k;
+            }
+        }
+        out
+    };
+    let (hr, vr) = (runs(LineAxis::Horizontal), runs(LineAxis::Vertical));
+    let crossed = |s: f64, other: &[(Vec<usize>, f64)]| other.iter().any(|o| (o.1 - s).abs() <= 0.25 * s.max(o.1));
+    let mut hatch = vec![false; lines.len()];
+    for (mine, other) in [(&hr, &vr), (&vr, &hr)] {
+        for (idx, s) in mine.iter() {
+            if !crossed(*s, other) {
+                for &i in idx {
+                    hatch[i] = true;
+                }
             }
         }
     }
@@ -1195,10 +1210,12 @@ const LONE_MIN_LINES: usize = 3;
 /// label cut short reads as another degree ("7°35'" for 27°35').
 const LONE_MAX_GPS_KM: f64 = 250.0;
 
-/// Grid intervals for graticules, in degrees (DMS and decimal).
-const GEO_UNITS: [f64; 27] = [
+/// Grid intervals for graticules, in degrees (DMS and decimal), with the
+/// quadrangle intervals 2°30', 7'30" and 2'30" (USGS sheets and their ticks).
+const GEO_UNITS: [f64; 30] = [
     10.0,
     5.0,
+    2.5,
     2.0,
     1.0,
     0.5,
@@ -1206,9 +1223,11 @@ const GEO_UNITS: [f64; 27] = [
     0.25,
     0.2,
     1.0 / 6.0,
+    0.125,
     0.1,
     1.0 / 12.0,
     0.05,
+    1.0 / 24.0,
     1.0 / 30.0,
     0.025,
     0.02,
@@ -1258,6 +1277,10 @@ struct Cand {
     bh: f64,
     /// Abbreviated grid label: only trusted when it sits on a grid line.
     abbrev: bool,
+    /// A repaired reading of a label that reads as another value as printed
+    /// ("340000E": an easting, or 34°00'00"E with every mark lost): it may
+    /// back up an axis fit but never be all of it.
+    alternative: bool,
 }
 
 impl Cand {
@@ -1385,7 +1408,7 @@ fn label_candidates(obs: &[OcrObservation], ctx: &Ctx) -> (Vec<Cand>, Vec<Cand>)
             continue;
         }
         let (cx, cy) = o.center();
-        let mk = |sys: Sys, ax: Ax, value: f64, abbrev: bool| Cand {
+        let mk = |sys: Sys, ax: Ax, value: f64, abbrev: bool, alternative: bool| Cand {
             obs: i,
             ax,
             value,
@@ -1395,26 +1418,29 @@ fn label_candidates(obs: &[OcrObservation], ctx: &Ctx) -> (Vec<Cand>, Vec<Cand>)
             bw: o.bbox[2].abs(),
             bh: o.bbox[3].abs(),
             abbrev,
+            alternative,
         };
         let hint = grid_axis_hint(&o.text);
         let axes = hint.map_or(vec![Ax::X, Ax::Y], |a| vec![a]);
         // Every reading of a garbled label is a candidate: the fit keeps the one that agrees
         // with the other labels.
         let readings = coordinate_readings(&o.text);
+        let as_printed = readings.first().is_some_and(|r| r.cost == 0);
         for r in &readings {
+            let alt = as_printed && r.cost > 0;
             match r.value {
-                CoordValue::Lat(v) => geo.push(mk(Sys::Geo, Ax::Y, v, false)),
-                CoordValue::Lon(v) => geo.push(mk(Sys::Geo, Ax::X, v, false)),
+                CoordValue::Lat(v) => geo.push(mk(Sys::Geo, Ax::Y, v, false, alt)),
+                CoordValue::Lon(v) => geo.push(mk(Sys::Geo, Ax::X, v, false, alt)),
                 CoordValue::Degrees(v) => {
                     for (ax, v) in degree_readings(v, o, ctx) {
-                        geo.push(mk(Sys::Geo, ax, v, false));
+                        geo.push(mk(Sys::Geo, ax, v, false, alt));
                     }
                 }
                 CoordValue::Grid(v) => {
                     if let Some(u) = &ctx.utm {
                         for &ax in &axes {
                             if plausible_utm(ax, v, u, FULL_GRID_GATE_M) {
-                                utm.push(mk(Sys::Utm, ax, v, false));
+                                utm.push(mk(Sys::Utm, ax, v, false, alt));
                             }
                         }
                     }
@@ -1429,7 +1455,7 @@ fn label_candidates(obs: &[OcrObservation], ctx: &Ctx) -> (Vec<Cand>, Vec<Cand>)
                     let target = if ax == Ax::X { u.easting } else { u.northing };
                     let v = base + ((target - base) / period).round() * period;
                     if plausible_utm(ax, v, u, ABBREV_GRID_GATE_M) {
-                        utm.push(mk(Sys::Utm, ax, v, true));
+                        utm.push(mk(Sys::Utm, ax, v, true, false));
                     }
                 }
             }
@@ -1685,7 +1711,7 @@ impl AxisLines<'_> {
         }
         let mut vals: Vec<f64> = inl.iter().map(|&(ci, _)| self.cands[ci].value).collect();
         sort_dedup(&mut vals);
-        if vals.len() < self.min_values.max(1) {
+        if vals.len() < self.min_values.max(1) || inl.iter().all(|&(ci, _)| self.cands[ci].alternative) {
             return None;
         }
         // (grid value, labelled) per line.
@@ -2058,7 +2084,7 @@ fn solve_axis_labels(cands: &[Cand], ground_per_lin: f64) -> TopFits {
         }
         let mut vals: Vec<f64> = inliers.iter().map(|&i| cands[i].value).collect();
         sort_dedup(&mut vals);
-        if vals.len() < 2 {
+        if vals.len() < 2 || inliers.iter().all(|&i| cands[i].alternative) {
             return None;
         }
         let rms_px = (ss / inliers.len() as f64).sqrt();
@@ -2552,6 +2578,24 @@ mod tests {
     }
 
     #[test]
+    fn dense_coloured_grid_is_no_hatching() {
+        // A blue 1 km grid on a small screenshot, 45 px apart both ways: every line is kept.
+        let (w, h) = (1400, 1400);
+        let mut img = blank(w, h);
+        for k in 0..30 {
+            let p = 20 + 45 * k;
+            for s in 0..w {
+                for (x, y) in [(s, p), (s, p + 1), (p, s), (p + 1, s)] {
+                    put(&mut img, x, y, [20, 90, 230]);
+                }
+            }
+        }
+        let lines = detect_lines(&img);
+        let count = |a: LineAxis| lines.iter().filter(|l| l.axis == a).count();
+        assert_eq!((count(LineAxis::Horizontal), count(LineAxis::Vertical)), (30, 30));
+    }
+
+    #[test]
     fn local_background_flattening_keeps_thin_lines_only() {
         // Dark 2-px lines over a beige tint and over a shaded area (a photo).
         let (w, h) = (200, 120);
@@ -2584,7 +2628,7 @@ mod tests {
     #[test]
     fn grid_units() {
         let m = 1.0 / 60.0;
-        assert_eq!(grid_unit(&[25.0 + 49.0 * m, 25.0 + 51.0 * m], m * 1.0001, Sys::Geo), Some(GEO_UNITS[15]));
+        assert_eq!(grid_unit(&[25.0 + 49.0 * m, 25.0 + 51.0 * m], m * 1.0001, Sys::Geo), Some(1.0 / 60.0));
         assert_eq!(grid_unit(&[540_000.0, 542_000.0], 1000.0, Sys::Utm), Some(1000.0));
         // 25.8167° is 25°49'00.1": still a 30" multiple; 25.8123° is no round value.
         assert_eq!(grid_unit(&[25.8167], 0.01, Sys::Geo), Some(1.0 / 120.0));

@@ -134,7 +134,12 @@ fn request(ocr: Vec<OcrObservation>, at: (f64, f64), methods: &[&str]) -> Georef
 /// The app's DEM loop: tiles from `dem` when there, else marked missing
 /// (offline). `dem: None` is a phone without any terrain data.
 fn run(sheet: &Sheet, req: &GeorefRequest, dem: Option<&Path>) -> GeorefResponse {
-    let session = Session::new(sheet.map());
+    run_map(sheet, sheet.map(), req, dem)
+}
+
+/// `run` on another raster of the sheet.
+fn run_map(sheet: &Sheet, map: Rgb8, req: &GeorefRequest, dem: Option<&Path>) -> GeorefResponse {
+    let session = Session::new(map);
     let (mut added, mut missing) = (Vec::new(), Vec::new());
     for _ in 0..8 {
         let r = session.georeference(req);
@@ -668,6 +673,36 @@ fn lone_latitude_label(sheet: &Sheet, lat: usize, misread: &str) {
     assert_eq!(r.status, Status::Failed, "wrong answer {err:.0} m off: {}", r.message);
 }
 
+/// The sheet without its colours (contours, vegetation, water): black ink on
+/// white, like a road map or a monochrome copy with a graticule.
+fn without_colour(map: &Rgb8) -> Rgb8 {
+    let mut m = map.clone();
+    for px in m.data.chunks_exact_mut(3) {
+        let (hi, lo) = (px.iter().max().unwrap(), px.iter().min().unwrap());
+        if hi - lo > 20 || *lo > 120 {
+            px.copy_from_slice(&[255, 255, 255]);
+        }
+    }
+    m
+}
+
+#[test]
+fn one_latitude_label_on_a_map_without_contours() {
+    // Nothing on the map to hold against the terrain: the check can neither confirm nor rule
+    // out the one-label fit, which is answered flagged for checking, as offline, not rejected
+    // as if the terrain disagreed.
+    let _g = serial();
+    let sheet = &MHLABATINI;
+    let map = without_colour(&sheet.map());
+    let req = request(one_latitude_label(sheet, 2, None), sheet.far, &["grid", "contours"]);
+    let r = run_map(sheet, map, &req, Some(&sheet.path().join("dem")));
+    let err = report("one latitude label, no contours on the map, DEM under it", sheet, &r);
+    println!("    contour_check: {}", r.diagnostics["contour_check"]);
+    assert_eq!((r.status, r.method), (Status::Ok, Some(Method::Grid)), "{}", r.message);
+    assert!(err <= GRID_MAX_ERR_M, "max error {err:.1} m");
+    assert!(r.confidence.unwrap() < 0.5 && r.message.contains("Only one latitude label"), "{}", r.message);
+}
+
 #[test]
 fn castle_gorge_one_latitude_label() {
     // 25°49' on its line; misread as 25°48'.
@@ -678,4 +713,62 @@ fn castle_gorge_one_latitude_label() {
 fn mhlabatini_one_latitude_label() {
     // 25°50' on its line; misread as 25°56'.
     lone_latitude_label(&MHLABATINI, 2, "25°56'00\"S");
+}
+
+// ---------------------------------------------------------------------------
+// Apple Vision's own reads
+// ---------------------------------------------------------------------------
+
+/// `<sheet>/vision-ocr.json`: what Apple Vision (the app's OCRService, iOS 26.2 simulator) read
+/// on the sheet as MapImporter renders it; its boxes are map.jpg pixels.
+fn vision_ocr(dir: &Path) -> Vec<OcrObservation> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("vision-ocr.json")).unwrap()).unwrap();
+    serde_json::from_value(v["observations"].clone()).unwrap()
+}
+
+#[test]
+fn vision_ocr_locates_the_sheets() {
+    // The app's request (grid and contours, dpi 300) with the GPS 60–90 km away in Pretoria
+    // and no terrain data: only the grid can answer. Vision reads three to four labels per
+    // axis on every sheet (and one 25°52' label as 25°50', which the others outvote).
+    let _g = serial();
+    let pretoria = (-25.75, 28.19);
+    for dir in ["grootkloof", "castle-gorge", "mhlabatini"] {
+        let path = sheet_dir(dir);
+        let map = load_jpeg_file(&path.join("map.jpg"));
+        let s = Session::new(map);
+        let r = s.georeference(&request(vision_ocr(&path), pretoria, &["grid", "contours"]));
+        let r = if r.status == Status::NeedDem {
+            for &t in &r.need_tiles {
+                s.mark_dem_tile_missing(t).unwrap();
+            }
+            s.georeference(&request(vision_ocr(&path), pretoria, &["grid", "contours"]))
+        } else {
+            r
+        };
+        let err = r
+            .pixel_to_mercator
+            .map_or(f64::INFINITY, |m| max_graticule_error_m(&Homography { m }, &graticule_truth(&path)));
+        println!(
+            "[{dir} Vision] {:?} {:?} conf {:?}, max error {err:.1} m: {}",
+            r.status, r.method, r.confidence, r.message
+        );
+        assert_eq!((r.status, r.method), (Status::Ok, Some(Method::Grid)), "{dir}: {}", r.message);
+        assert!(err <= GRID_MAX_ERR_M, "{dir}: max error {err:.1} m");
+        assert!(r.confidence.unwrap() >= 0.9, "{dir}: {:?}", r.confidence);
+        assert_eq!(r.diagnostics["grid"]["lone_label"], false, "{dir}");
+        // Spot heights: the sheets' heights all have four digits (Vision drops leading 1s too:
+        // "287", "338", "124" on Mhlabatini).
+        let heights: Vec<f64> =
+            r.pois.iter().filter(|p| p.kind == PoiKind::SpotHeight).filter_map(|p| p.elevation_m).collect();
+        assert!(heights.len() >= 10, "{dir}: {heights:?}");
+        assert!(heights.iter().all(|&h| h >= 1000.0), "{dir}: {heights:?}");
+        // No graticule label, legend entry or title among the POIs.
+        for p in &r.pois {
+            let n = p.name.to_lowercase();
+            for bad in ["°", "00\"", "peren", "trig bea", "mcsa", "magaliesberg sheet", "annual change"] {
+                assert!(!n.contains(bad), "{dir}: {p:?}");
+            }
+        }
+    }
 }

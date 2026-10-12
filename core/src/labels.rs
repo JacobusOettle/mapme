@@ -1285,10 +1285,14 @@ fn merge_identical(obs: &[OcrObservation]) -> Vec<OcrObservation> {
     merged
 }
 
-/// A word of legend text: one of `LEGEND_WORDS`, the start of one cut off by
-/// the OCR ("Non-Peren", "Police Stati", "100m Inter"), several run together
-/// ("PerennialRiver", "DryWaterCourse"), a number, a measure or a single letter.
-fn generic_word(w: &str) -> bool {
+/// A word of legend text (as printed, any case): one of `LEGEND_WORDS`, the
+/// start of one cut off by the OCR ("Non-Peren", "Police Stati", "100m
+/// Inter"), several run together with their capitals ("PerennialRiver",
+/// "DryWaterCourse"; a place name such as "Lakeview" or "PARKVIEW" is one
+/// word), a number, a measure or a single letter.
+fn generic_word(word: &str) -> bool {
+    let lower = word.to_lowercase();
+    let w = lower.as_str();
     if w.chars().count() <= 1 || w.chars().all(|c| c.is_ascii_digit()) || is_measure(w) {
         return true;
     }
@@ -1296,16 +1300,20 @@ fn generic_word(w: &str) -> bool {
     if LEGEND_WORDS.contains(&w) || (w.len() >= 4 && LEGEND_WORDS.iter().chain(META_WORDS).any(cut)) {
         return true;
     }
-    // Legend words run together: every split point reachable from the start.
-    let n = w.len();
+    // Legend words run together: every split point reachable from the start, each one a
+    // capital after a lowercase letter.
+    let orig: Vec<char> = word.chars().collect();
+    let low: Vec<char> = orig.iter().map(|c| c.to_lowercase().next().unwrap_or(*c)).collect();
+    let n = low.len();
     let mut reach = vec![false; n + 1];
     reach[0] = true;
     for i in 0..n {
-        if !reach[i] || !w.is_char_boundary(i) {
+        if !reach[i] || (i > 0 && !(orig[i].is_uppercase() && orig[i - 1].is_lowercase())) {
             continue;
         }
         for l in LEGEND_WORDS.iter().filter(|l| l.len() >= 3) {
-            if w[i..].starts_with(l) {
+            let l: Vec<char> = l.chars().collect();
+            if low[i..].starts_with(&l) {
                 reach[i + l.len()] = true;
             }
         }
@@ -1374,7 +1382,7 @@ fn verdict(o: &OcrObservation, furniture: bool, th: f64) -> Verdict {
     if words.iter().any(|w| META_WORDS.contains(&w.as_str())) {
         return Verdict::Furniture;
     }
-    if words.iter().all(|w| generic_word(w)) {
+    if name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).all(generic_word) {
         return Verdict::Furniture;
     }
     // Letters and digits run together in most words (two or more): an imprint read badly
@@ -1567,11 +1575,13 @@ pub fn classify_pois(obs: &[OcrObservation]) -> Vec<PoiLabel> {
 ///
 /// * on a sheet whose heights nearly all have the same number of digits (at least 4 heights,
 ///   80 % alike), a height with fewer digits and under half the median is not believable;
-/// * on a sheet with at least `MIN_FOUR_DIGIT_HEIGHTS` heights of four digits, a three-digit
-///   height `h` well below all of them (more than `TRUNCATED_HEIGHT_MARGIN_M` under the lowest)
-///   is a misread when 1000 + h or 2000 + h falls among them (their range widened by that
-///   margin): "478" for 1478 on a sheet of 1100–1800 m heights, however many such misreads
-///   there are.
+/// * on a sheet with at least `MIN_FOUR_DIGIT_HEIGHTS` heights of four digits, nearly all in
+///   one thousand (`k`000–`k`999 m, 90 %), a three-digit height `h` well below them (more than
+///   `TRUNCATED_HEIGHT_MARGIN_M` under the lowest) is a misread when `k`000 + h falls among
+///   them (their range widened by that margin): "478" for 1478 on a sheet of 1100–1800 m
+///   heights, however many such misreads there are. Not when other three-digit heights lie
+///   within that margin under the lowest: the terrain runs on down (a fjord, an escarpment),
+///   nor on a sheet whose heights span thousands (an alpine valley under 3000 m peaks).
 ///
 /// Sheets that span lowland and mountain keep their short heights.
 fn drop_truncated_heights(pois: &mut Vec<PoiLabel>) {
@@ -1579,14 +1589,24 @@ fn drop_truncated_heights(pois: &mut Vec<PoiLabel>) {
     let heights = |pois: &[PoiLabel]| -> Vec<f64> {
         pois.iter().filter(|p| p.kind == PoiKind::SpotHeight).filter_map(|p| p.elevation_m).collect()
     };
-    let four: Vec<f64> = heights(pois).into_iter().filter(|&h| h >= 1000.0).collect();
-    if four.len() >= MIN_FOUR_DIGIT_HEIGHTS {
-        let lo = four.iter().copied().fold(f64::INFINITY, f64::min) - TRUNCATED_HEIGHT_MARGIN_M;
-        let hi = four.iter().copied().fold(f64::NEG_INFINITY, f64::max) + TRUNCATED_HEIGHT_MARGIN_M;
-        let truncated = |h: f64| {
-            (100.0..1000.0).contains(&h) && h < lo && [1000.0, 2000.0].iter().any(|k| (lo..=hi).contains(&(k + h)))
-        };
-        pois.retain(|p| p.kind != PoiKind::SpotHeight || !p.elevation_m.is_some_and(truncated));
+    let all = heights(pois);
+    let four: Vec<f64> = all.iter().copied().filter(|&h| (1000.0..10_000.0).contains(&h)).collect();
+    // The thousand most four-digit heights are in.
+    let thousand = (1..=9)
+        .map(|k| (k as f64 * 1000.0, four.iter().filter(|&&h| (h / 1000.0).trunc() as i32 == k).count()))
+        .max_by_key(|x| x.1);
+    if let Some((k, _)) = thousand.filter(|&(_, n)| n >= MIN_FOUR_DIGIT_HEIGHTS && n as f64 >= 0.9 * four.len() as f64)
+    {
+        let ks: Vec<f64> = four.iter().copied().filter(|&h| (k..k + 1000.0).contains(&h)).collect();
+        let lowest = ks.iter().copied().fold(f64::INFINITY, f64::min);
+        let lo = lowest - TRUNCATED_HEIGHT_MARGIN_M;
+        let hi = ks.iter().copied().fold(f64::NEG_INFINITY, f64::max) + TRUNCATED_HEIGHT_MARGIN_M;
+        let short = |h: f64| (100.0..1000.0).contains(&h);
+        let continues = all.iter().any(|&h| short(h) && (lo..lowest).contains(&h));
+        let truncated = |h: f64| short(h) && h < lo && (lo..=hi).contains(&(k + h));
+        if !continues {
+            pois.retain(|p| p.kind != PoiKind::SpotHeight || !p.elevation_m.is_some_and(truncated));
+        }
     }
     let heights = heights(pois);
     if heights.len() < 4 {
@@ -1933,6 +1953,13 @@ mod tests {
         // Low three-digit heights far below them that point nowhere into their range stay too.
         let p = classify_pois(&at(&["1012", "1043", "1121", "623"]));
         assert_eq!(p.len(), 4);
+        // An alpine valley under peaks of two and three thousand metres: the four-digit heights
+        // span thousands, so a three-digit one is no thousand short of them.
+        let alps = ["796", "802", "2970", "1462", "3454", "2108", "1823", "2663"];
+        assert_eq!(classify_pois(&at(&alps)).len(), alps.len());
+        // A fjord: heights from the shore to the plateau, some just under 1000 m.
+        let fjord = ["312", "455", "640", "870", "960", "1012", "1240", "1488", "1530"];
+        assert_eq!(classify_pois(&at(&fjord)).len(), fjord.len());
     }
 
     #[test]
@@ -1985,6 +2012,13 @@ mod tests {
         ];
         let names: Vec<String> = classify_pois(&obs).into_iter().map(|p| p.name).collect();
         assert_eq!(names, vec!["GUN", "Elm Hut", "AASVOELKRANS"]);
+        // Place names that happen to join legend words are names: legend text run together
+        // keeps its capitals ("PerennialRiver"), a name is one word ("Lakeview", "PARKVIEW").
+        let names = ["Lakeview", "RIVERVIEW", "Bridgewater", "PARKVIEW", "Hillview"];
+        let obs: Vec<OcrObservation> =
+            names.iter().enumerate().map(|(k, t)| ob(t, 600.0 * k as f64, 900.0, 160.0, 25.0)).collect();
+        let got: Vec<String> = classify_pois(&obs).into_iter().map(|p| p.name).collect();
+        assert_eq!(got, names);
     }
 
     #[test]
