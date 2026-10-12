@@ -219,6 +219,12 @@ const PHOTO_GAP_COST: f64 = 0.3;
 const PHOTO_INLIER_PX: f64 = 1.75;
 /// Largest deviation of a traced line from its chord (pixels).
 const PHOTO_MAX_BEND_PX: f64 = 40.0;
+/// Coloured lines closer than this (pixels, or fraction of the image across
+/// them) to the next, in runs of at least `HATCH_MIN_LINES`, are a fill
+/// pattern (`drop_hatching`): Mhlabatini's vegetation hatching is ~35 px apart.
+const HATCH_SPACING_PX: f64 = 50.0;
+const HATCH_SPACING_FRAC: f64 = 0.015;
+const HATCH_MIN_LINES: usize = 3;
 /// Largest hole in a line (fraction of the span), e.g. under a legend panel.
 /// Separate boxes that happen to line up (legend and scale-bar frames) leave
 /// a bigger one.
@@ -945,7 +951,38 @@ fn detect_lines_with(img: &Rgb8, photo: bool) -> Vec<GridLine> {
         },
         || detect_class(img, InkClass::Colour, COLOUR_MIN_COVERAGE, photo),
     );
+    let colour = drop_hatching(colour, img.w as f64, img.h as f64);
     merge_lines(lines, colour, img.w as f64, img.h as f64)
+}
+
+/// Coloured fill patterns (the green hatching of vegetation, marsh) are long
+/// parallel coloured lines too: a run of at least `HATCH_MIN_LINES` lines of
+/// one family, each within `HATCH_SPACING_PX` (or `HATCH_SPACING_FRAC` of the
+/// image across them) of the next, is hatching, not a grid.
+fn drop_hatching(lines: Vec<GridLine>, w: f64, h: f64) -> Vec<GridLine> {
+    let mut hatch = vec![false; lines.len()];
+    for axis in [LineAxis::Horizontal, LineAxis::Vertical] {
+        let (along, across) = match axis {
+            LineAxis::Horizontal => (w, h),
+            LineAxis::Vertical => (h, w),
+        };
+        let gap = HATCH_SPACING_PX.max(HATCH_SPACING_FRAC * across);
+        let mut fam: Vec<(f64, usize)> =
+            lines.iter().enumerate().filter(|(_, l)| l.axis == axis).map(|(i, l)| (l.pos_at(along / 2.0), i)).collect();
+        fam.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut start = 0;
+        for k in 1..=fam.len() {
+            if k == fam.len() || fam[k].0 - fam[k - 1].0 > gap {
+                if k - start >= HATCH_MIN_LINES {
+                    for f in &fam[start..k] {
+                        hatch[f.1] = true;
+                    }
+                }
+                start = k;
+            }
+        }
+    }
+    lines.into_iter().zip(hatch).filter(|(_, h)| !h).map(|(l, _)| l).collect()
 }
 
 /// `lines` plus the lines of `more` that are not already there, horizontal
@@ -2291,6 +2328,31 @@ mod tests {
         assert!((hs[0].tilt_deg() - 1.5).abs() < 0.05, "{}", hs[0].tilt_deg());
         assert!((vs[0].pos_at(450.0) - 250.0).abs() < 0.3);
         assert!((vs[1].pos_at(450.0) - 900.5).abs() < 0.3);
+    }
+
+    #[test]
+    fn coloured_hatching_is_no_grid() {
+        // Long green vegetation hatching (Mhlabatini's colour, 4 px lines 35 px apart over 85 %
+        // of the height), a blue grid line and a black one.
+        let (w, h) = (1400, 1800);
+        let mut img = blank(w, h);
+        for y in 100..1630 {
+            for k in 0..22 {
+                for dx in 0..4 {
+                    put(&mut img, 300 + 35 * k + dx, y, [195, 221, 122]);
+                }
+            }
+        }
+        for y in 0..h {
+            put(&mut img, 1200, y, [20, 90, 230]);
+            put(&mut img, 1201, y, [20, 90, 230]);
+            put(&mut img, 150, y, [10, 10, 10]);
+        }
+        let lines = detect_lines(&img);
+        let vs: Vec<f64> =
+            lines.iter().filter(|l| l.axis == LineAxis::Vertical).map(|l| l.pos_at(h as f64 / 2.0)).collect();
+        assert_eq!(vs.len(), 2, "{vs:?}");
+        assert!((vs[0] - 150.0).abs() < 1.0 && (vs[1] - 1200.5).abs() < 1.0, "{vs:?}");
     }
 
     #[test]

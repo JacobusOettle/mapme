@@ -575,3 +575,41 @@ fn pois_on_the_sheets() {
     // heights); what is left is the map's names and heights, read as well as the OCR read them.
     assert!(groot_rapid.len() <= 55 && castle.len() <= 60 && mhl.len() <= 40, "{groot_rapid:?} {castle:?} {mhl:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Vegetation hatching (Mhlabatini)
+// ---------------------------------------------------------------------------
+
+/// Mhlabatini's green vegetation hatching drawn ~4000 px long (the hatched
+/// block at x 2900–3300, y 150–700 repeated down the sheet), longer than the
+/// coloured lines a grid needs: still no grid line, and the grid still fits.
+#[test]
+fn mhlabatini_long_vegetation_hatching_is_no_grid() {
+    let _g = serial();
+    let mut map = MHLABATINI.map();
+    for y in 700..4200 {
+        let src = 150 + (y - 150) % 550;
+        for x in 2900..3300 {
+            let (s, d) = ((src * map.w + x) * 3, (y * map.w + x) * 3);
+            map.data.copy_within(s..s + 3, d);
+        }
+    }
+    let lines = mapme_core::grid::detect_lines(&map);
+    let vs: Vec<f64> = lines
+        .iter()
+        .filter(|l| l.axis == mapme_core::grid::LineAxis::Vertical)
+        .map(|l| l.pos_at(map.h as f64 / 2.0))
+        .collect();
+    println!("vertical lines: {vs:?}");
+    assert!(vs.iter().all(|x| !(2850.0..3350.0).contains(x)), "hatching taken for a line: {vs:?}");
+    let truth = MHLABATINI.truth_json();
+    for l in truth["lon_lines"].as_array().unwrap() {
+        let x = l["x"].as_f64().unwrap();
+        assert!(vs.iter().any(|v| (v - x).abs() < 1.5), "meridian at {x} lost: {vs:?}");
+    }
+    let s = Session::new(map);
+    let r = s.georeference(&request(MHLABATINI.ocr(), MHLABATINI.far, &["grid"]));
+    let err = report("grid, long vegetation hatching", &MHLABATINI, &r);
+    assert_eq!(r.method, Some(Method::Grid), "{}", r.message);
+    assert!(err <= GRID_MAX_ERR_M, "max error {err:.1} m");
+}
