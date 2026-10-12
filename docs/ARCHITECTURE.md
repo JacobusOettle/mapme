@@ -387,38 +387,165 @@ inversion turns a topographic map muddy: yellow roads and pale green fills go da
 photo's shading and paper tint invert into blotches. The core renders it instead
 (`core/src/dark.rs`, C ABI `mm_dark_profile`, `mm_dark_style_new`, `mm_dark_render`):
 
-1. **Profile** (once per map, from an overview of the whole map, long side ≤ 2048 px):
-   * *paper grid*: blocks of `B = max(8, long side / 32)` px; per block and channel the 90th
-     percentile (the paper white there); a 3 × 3 maximum filter (blocks full of ink borrow the
-     paper of their neighbours) then a 3 × 3 box blur, edges replicated; floored at 0.2. Stored
-     as `cols × rows` sRGB triples; sampled bilinearly in normalised map coordinates with cell
-     centres at `((i + 0.5) / cols, (j + 0.5) / rows)`, clamped at the edges.
-   * *flat field*: `x = clamp(rgb / paper(u, v), 0, 1)` per channel (sRGB-encoded values). White
+1. **Profile** (once per map, from an overview of the whole map, long side ≤ 2048 px; a larger
+   one is box-downsampled first):
+   * *paper grid*: `cols = round(w / B)` × `rows = round(h / B)` cells (at least 1 × 1) of
+     `B = max(8, long side / 32)` px, cell `i` covering pixels `[i·w/cols, (i+1)·w/cols)` so its
+     centre is exactly at the sampling centre below; per cell and channel the 90th percentile
+     (the paper white there); a 3 × 3 maximum filter (cells full of ink borrow the paper of
+     their neighbours) then a 3 × 3 box blur, edges replicated; floored at 0.2; rounded to 1e-4.
+     Stored as `cols × rows` sRGB triples; sampled bilinearly in normalised map coordinates with
+     cell centres at `((i + 0.5) / cols, (j + 0.5) / rows)`, clamped at the edges. The grid
+     position is quantised to 1/4096 of a cell, so every tiling of the map computes the same
+     paper for the same map position.
+   * *digital map* (a PDF's render, an exported image): one exact colour, its background, covers
+     at least 5 % of the overview's pixels and shows up in at least a quarter of the grid's cells
+     (the print's white: 29–33 % of its pixels at any overview scale; a photo's noise never
+     repeats a colour that often: the real photo's commonest covers 0.3 %, the synthetic photo's
+     0.04 %; a smooth, noise-free lighting gradient repeats colours, but each along a narrow
+     band). Its paper is flat: one cell, the per-channel maximum of the cells' 90th percentiles.
+     A solid fill wider than a cell or two (a sea, a lake, a forest tint) is then never taken for
+     paper: with the grid it faded into the night paper away from its shore, with a glowing band
+     along it (a pale sea's bare pixels at L′ 0.25 … 0.44, now all 0.41).
+   * *flat field*: `x = min(rgb / paper(u, v), 1)` per channel (sRGB-encoded values). White
      paper becomes exactly white wherever it is, in shadow or not.
-   * on the flat-fielded overview in OKLab: `ink = clamp(P0.7 %(L), 0.12, 0.65)` (the map's
-     darkest ink: ~0.15 for print, ~0.35–0.45 for a photo); paper noise from the pixels above
-     the 55th percentile of L, `dead = clamp(1 − median + 3 · 1.4826 · MAD, 0.015, 0.12)` (paper
-     grain and JPEG noise stay paper); `gain = clamp(0.07 / median C, 1, 1.8)` over coloured ink
-     pixels (`t ≥ 0.5`, `C ≥ 0.025`; 1 when fewer than 200), so a photo's washed-out colours
-     come back.
-2. **Render** each pixel of the flat-fielded tile (OKLab `L, a, b`, `C = |(a, b)|`):
-   * `t = clamp(((1 − L) − dead) / ((1 − ink) − dead), 0, 1)` – how much ink, by lightness;
-   * `gate = smoothstep(0.012, 0.03, C)` – grey stays grey (no amplified colour casts);
+   * *print or photo*: on the flat-fielded overview in OKLab, the paper noise `dead` (below);
+     a digital map, or one with `dead < 0.035`, is a print: `ink` 0.12, `gain` 1, no flare and
+     no edge bands (a PDF's full-bleed content is never cropped). Neither estimate is reliable
+     on a print: its darkest 0.7 % of pixels are not always black ink (a sparse map's are paper:
+     "ink" 0.65, whose flare removal turned an orange track salmon; the Grootkloof print's give
+     0.12 at 1/3 scale but 0.21 at 1/4, the overview the app uses), and its ink chroma depends
+     on the scale and on what the ink is printed over (gain 1.0 at 1/3, 1.16 at 1/4, 1.7 with a
+     sea under it). Here `dead` is 0.015 for the print, 0.059 for the real photo and 0.069 for
+     the synthetic one; the rest of the profile is for photos.
+   * a photo's darkest ink on the flat-fielded overview: `ink = clamp(P0.7 %(L), 0.12, 0.65)`
+     (0.38 for the phone photo of the print).
+   * *flare*: a photo's blacks are lifted by veiling light (lens flare, the camera's tone
+     curve), which also washes out its colours. It is removed in linear light before anything
+     else: `φ = max(ink³ − 0.12³, 0) / (1 − 0.12³)` (0.053 for the real photo),
+     `lin′ = clamp((lin − φ) / (1 − φ), 0, 1)` per channel, after which the photo's darkest ink
+     is at L 0.12 like a print's. (Stretching L between `ink` and paper instead left the
+     photo's contours near white: half of them neutral grey, the hierarchy flat.)
+   * on the flare-free values: paper noise from the pixels above the 55th percentile of L,
+     `dead = clamp(1 − median + 3 · 1.4826 · MAD, 0.015, 0.12)` (paper grain and JPEG noise stay
+     paper: 0.015 print, 0.062 photo); `gain = clamp(0.12 / median C, 1, 1.8)` over coloured
+     ink pixels (`t ≥ 0.5`, `C ≥ 0.025`; 1 when fewer than 200), so a photo's washed-out colours
+     come back. 0.12 is a print's typical ink chroma: the print's coloured ink has a median C of
+     0.135 (gain 1), a synthetic photo of it (lighting, blur, noise) gain 1.11, the real phone
+     photo gain 1.8 (its `t ≥ 0.5` pixels are mostly black text; the grey gate below keeps
+     greys grey at any gain).
+   * *edge bands* (photos only): where the flattened page's corners include a sliver of the
+     table (the real photo: wood along both long edges, 1.2 % of the image, which rendered as a
+     glowing orange frame).
+     On the flat-fielded overview a pixel is paper when `t < 0.2` and `C · gain < 0.05`; per
+     scanline across each edge the band's depth is the distance from the border to the first run
+     of 3 paper pixels, capped at 3 % of the scanline; smoothed along the edge by a running median
+     of 9 then a running maximum of 5 (mirrored at the ends, so corner scanlines do not spread
+     the cap), plus one pixel where it is not 0 (the blurred border between table and paper);
+     binned to at most 256 values per edge (each the largest depth within half a bin, so the
+     linear interpolation between bins never falls below a scanline's own depth), as fractions
+     of the map's width (`left`, `right`) or height (`top`, `bottom`), rounded up to 1e-4.
+     Real photo: up to 3.2 % deep, 1.76 % of the map; synthetic photo 0.02 %; print: none.
+   * JSON: `{"status":"ok","version":1,"ink","dead","gain","paper":{"cols","rows","rgb":[…]}}`
+     plus `"edge":{"left","right","top","bottom"}` when there are edge bands; numbers with 4
+     decimals (110 bytes for the print's flat paper, 23 KB for the photo's 25 × 33 cells); ~200 ms
+     for the print's 1169 × 1653 overview (one pass over the pixels, and a sort of them for the
+     digital test; a photo takes a second pass with the flare removed: ~150 ms for its
+     850 × 1116 overview).
+2. **Render** each pixel of the flat-fielded tile, flare removed (OKLab `L, a, b`,
+   `C = |(a, b)|`):
+   * `t = clamp(((1 − L) − dead) / ((1 − min(ink, 0.12)) − dead), 0, 1)` – how much ink, by
+     lightness;
+   * `gate = smoothstep(0.012, 0.03, C · clamp(L / 0.25, 0, 1))` – grey stays grey (no
+     amplified colour casts); near black, where OKLab chroma is unstable, a colour must be
+     proportionally stronger (JPEG noise around black text, e.g. sRGB (0, 0, 4) with C 0.034,
+     would otherwise come out light blue or pink);
    * `s = clamp((C · gain · gate − 0.07) / 0.08, 0, 1)` – saturated colour is a feature even when
      light (yellow roads, routes, water lines), while pale fills (C < 0.07) stay background;
-   * `f = max(t, 0.8 · s)`; `L′ = Lp + (0.90 − Lp) · f^0.78`, `Lp` = OKLab L of the night paper
+   * `sw = 0.45 + (0.8 − 0.45) · smoothstep(0.52, 0.64, S)`, `S` the HSV saturation
+     `(max − min) / max` of the sRGB of `(L, gain · a, gain · b)` (clipped to the gamut) – a
+     full-strength spot ink (S ≥ 0.62 on the print: yellow and orange roads, the red route, the
+     cyan gate, blue water) is lifted fully, a tint (a light ink screened with white, S 0.47–0.55:
+     the vegetation hatch and dots, the boundary's pink band) only to a mid tone. With one weight
+     for both, the vegetation became acid lime as bright as the roads (8.8:1), and the boundary
+     band the same salmon as the route (ΔE 0.025). A threshold on lightness instead would also
+     dim the cyan gate symbol, which has the hatch's L and C;
+   * `f = max(t, sw · s)`; `L′ = Lp + (0.90 − Lp) · f^0.78`, `Lp` = OKLab L of the night paper
      sRGB (0.13, 0.13, 0.14) (`Theme.uiNightPaper`);
    * `w = clamp(4 f, 0, 1)`; `(a′, b′) = w · 1.1 · gain · gate · (a, b) + (1 − w) · (ap, bp)`
      (the night paper's slight cool tint on paper, the feature's hue on ink);
-   * back to sRGB; out-of-gamut colours lose chroma (same L and hue) rather than being clipped
-     per channel.
+   * back to sRGB; out-of-gamut colours lose chroma (same L and hue, bisection on the chroma
+     scale) rather than being clipped per channel;
+   * pixels in a photo's edge bands (centre `(u, v)` with `u < left(v)`, `1 − u < right(v)`,
+     `v < top(u)` or `1 − v < bottom(u)`) are the night paper.
 
-   Paper becomes the night paper (#212124) exactly, black ink light grey (L 0.90), brown contours
-   tan, blue water blue, red routes red, yellow roads stay readable. The style precomputes the
-   render as a 65³ lookup table over flat-fielded sRGB (trilinear), so a 512 px tile takes a few
-   milliseconds on one core; tiles render on CATiledLayer's threads and are cached as JPEG in
-   `tiles-dark-v2/` (generated on first view, and in the background after import). The library
-   card uses `thumb-dark.jpg`.
+   On the print (contrast on #212124): paper becomes the night paper (#212124) exactly, black
+   ink light grey #DEDEDE (L 0.90, 11.9:1), contours calm tan (#836545, 3.0:1, as on paper),
+   blue water pastel (#98BDFF) and dashed streams mid blue (#488EDB, 4.7:1), the yellow road
+   #C5C500 and the orange road #FFA63A at L′ 0.8 (8.7:1, 8.2:1), the red route salmon #FF9F90
+   (8.1:1) while the boundary's pink band goes deep red #CB4C50 (3.6:1, ΔE 0.21 from the
+   route), the cyan gate #00CCE3 (8.2:1), the vegetation hatch moss #749500 (L′ 0.62, 4.6:1,
+   below the roads and the route), pale green and blue fills dark (L′ < 0.4, ~1.5:1). On the real
+   photo the flare removal brings the ink to the print's tones: inside the page mean L 0.327
+   (0.343 with the L stretch) and 5.6 % of the pixels above L 0.55 (8.5 %); contours tan rather
+   than white, the yellow road and the route stronger, the table's slivers gone.
+
+   The style precomputes the render as a 65³ lookup table over flat-fielded, flare-free sRGB
+   (trilinear; 16-byte nodes, 4.4 MB, built in ~35 ms on 4 threads), plus the corner of the
+   cube where every node is the night paper (x ≥ 63/64 for a print, lower for a photo), which
+   skips the interpolation with the same bytes. A photo's flare removal runs before the table as
+   a per-channel curve (1025 samples, linear in between): inside the table its kink at `φ` bent
+   the interpolated colours (OKLab ΔE up to 0.042). Against the exact formula, on random pixels
+   of the print the table is within 0.62/255 per channel for 99 % of pixels (mean 0.03/255) and
+   within OKLab ΔE 0.0095 everywhere; on the real photo within 1.3/255 for 99 % (mean 0.09/255)
+   and ΔE 0.031 (its chroma gain of 1.8 and the tint weight make the formula steeper there; a
+   512 px tile's bytes are within 4 of the exact render for 99.9 %). The largest per-channel
+   differences (up to ~22/255) are where the gamut mapping pins a channel at 0 (the B of a bright
+   orange), where sRGB encoding is steepest and ΔE is ~0.003. A 512 px tile of the print takes
+   ~6 ms on one 2.1 GHz Xeon core (a photo tile at the page's corner, with the flare curve and
+   the edge bands, ~8 ms); rendering in place, the alpha untouched. Tiles render on
+   CATiledLayer's threads and are cached as JPEG in `tiles-dark-v2/` (generated on first view,
+   and in the background after import). The library card uses `thumb-dark.jpg`.
+
+   Checked in `core/tests/dark.rs`: a 1024 px crop of the print, and the real photo's top-right
+   corner across its edge bands, rendered as one tile, 2 × 2 or 3 × 3 tiles give identical
+   bytes; the half-size crop rendered over the same rectangle is within 0.7/255 (mean) of the
+   half-size render. After rendering, the paper is even: std of L over paper pixels 0.0594 →
+   0.0095 on the real (folded) photo, 0.0869 → 0.0072 on the synthetic photo with its one-sided
+   shadow (night paper L 0.249). `print_inks_keep_their_hierarchy` prints and checks the
+   print's inks above; the real photo has no bright orange left at its edges and stays calm
+   (mean L ≤ 0.335). The print profiled at 1/2, 1/3, 1/4 and 1/6 scale gets the same flat white
+   paper, `ink` 0.12, `gain` 1, no edge bands; a pale or a mid-blue sea printed over 40 % of it
+   renders its bare pixels at one L′ (0.41, 0.51); a sparse print (0.5 % ink) keeps its orange
+   track orange. Degenerate overviews (blank, black, one colour, 8 × 8, 8 × 2048, noise) profile
+   without panics (smaller than 8 px a side: `"status":"failed"`); random valid profiles render
+   random tiles, rectangles far outside the map and strides with padding without panics.
+   `mm_dark_style_free` ignores NULL, a style freed already and any pointer that is not a live
+   style (the core keeps the set of live styles). `dark_dump` (ignored) writes before/after
+   images of the print, the real photo and a synthetic photo.
+
+   Known limits, accepted: pale point symbols (the police station's pale cyan, the place of
+   worship's light grey, the legend's pale vegetation disc) keep their paper contrast (1.4–1.9:1)
+   and read as faint marks; lifting them would lift the pale fills too. On the phone photo the
+   rivers' chroma (~0.014 after the flat field) is at the level of the residual colour cast on
+   greys, so the grey gate keeps most river pixels grey; a laxer gate gave casts on text and no
+   clear gain. In direct sun a dark map is less legible than paper (glare adds the same light to
+   both colours, which hurts the darker contours and text most): the app's Paper appearance
+   stays one setting away. A *photo* of a map with a solid fill wider than a cell or two (a sea)
+   still takes the fill for paper (its shading cannot be told from the fill's tint by the 90th
+   percentile); a photo whose paper is clipped to pure white over a quarter of the page passes
+   the digital test and is not flattened; a photo with paper as clean as a print's
+   (`dead < 0.035`, e.g. a document camera scan) is treated as a print (no flare removal, no
+   chroma gain), which suits a scan whose paper the camera already whitened.
+
+   Tried and not adopted: trading lightness for chroma in the gamut mapping (pure red keeps
+   C 0.21 at L 0.68) turns the map's reds into the app's own trail and position-puck red;
+   `L′` exponent 0.70 (brightens contours that should recede); a per-map exponent from the ink
+   tones (the flare removal already brings the photo to the print's tones); a finer paper grid
+   for photos (`long side / 64`: crease band std of L 0.025 → 0.018, invisible at 1:1, for a
+   3× larger profile, twice the profiling time, and solid tints wider than 3 cells taken for
+   paper); a laxer grey gate on prints (little visible gain, risks colour fringes from JPEG
+   noise around text).
 
 ## Repository layout
 
@@ -438,6 +565,7 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
   src/warp.rs         photo warp: offset lattice for paper that is not flat, fitted to
                       traced grid lines and contours, held-out checks, inverse
   src/page.rs         page (paper sheet) finder for photos: mm_detect_page
+  src/dark.rs         dark map: paper grid + flat field, OKLab tone map, 65³ LUT, tile render
   src/labels.rs       coordinate / scale / POI label parsing
   src/grid.rs         grid-line detection, label↔line association, GCP fit
   src/control_points.rs manual calibration fits
@@ -447,7 +575,8 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
   tests/              integration tests on fixtures/grootkloof (photo.rs: synthetic
                       photos of the sheet, flattened from imperfect corners;
                       realphoto.rs: the real phone photo of the folded sheet;
-                      warp.rs: the warp contract and its accuracy on that photo)
+                      warp.rs: the warp contract and its accuracy on that photo;
+                      dark.rs: dark map rendering)
 fixtures/grootkloof/  the real map (PDF + extracted JPEG), DEM tiles, OCR fixture, truth
 ios/                  XcodeGen project (project.yml), app, unit tests, UI tests
 scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...

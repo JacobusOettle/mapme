@@ -7,6 +7,7 @@
 
 pub mod contour;
 pub mod control_points;
+pub mod dark;
 pub mod dem;
 pub mod ffi;
 pub mod fft;

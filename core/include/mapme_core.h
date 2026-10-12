@@ -98,7 +98,9 @@ char *mm_detect_page(const uint8_t *rgba, uint32_t width, uint32_t height, uint3
  * returns the map's profile as JSON, which the app stores with the map:
  *   {"status":"ok","version":1,"ink":..,"dead":..,"gain":..,
  *    "paper":{"cols":C,"rows":R,"rgb":[r,g,b, ...]}}   (paper white per cell, sRGB 0..1, row-major)
- * or {"status":"failed","message":...}. Never NULL.
+ * plus, for a photo whose page edges show the table, "edge":{"left":[..],"right":[..],"top":[..],
+ * "bottom":[..]} (band depth per edge as a fraction of the map's width or height, sampled along
+ * the edge; rendered as the night paper), or {"status":"failed","message":...}. Never NULL.
  */
 char *mm_dark_profile(const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t bytes_per_row);
 
@@ -106,7 +108,9 @@ char *mm_dark_profile(const uint8_t *rgba, uint32_t width, uint32_t height, uint
  * Thread-safe: any number of threads may render with one style at once. */
 typedef struct MMDarkStyle MMDarkStyle;
 
-/* NULL when the JSON is not a valid profile. Free with mm_dark_style_free. */
+/* NULL when the JSON is not a valid profile. Free with mm_dark_style_free (NULL, a style freed
+ * already and any pointer that is not a live style are ignored; a style must not be freed while a
+ * render on it is running). */
 MMDarkStyle *mm_dark_style_new(const char *profile_json);
 void mm_dark_style_free(MMDarkStyle *style);
 
