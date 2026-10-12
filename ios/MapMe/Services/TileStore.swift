@@ -177,7 +177,7 @@ final class TileStore: @unchecked Sendable {
     /// Profile used when the core cannot profile a map (too small, blank): white paper everywhere,
     /// print-like ink, no chroma gain.
     static let neutralDarkProfile =
-        #"{"status":"ok","version":1,"ink":0.15,"dead":0.03,"gain":1.0,"paper":{"cols":1,"rows":1,"rgb":[1.0,1.0,1.0]}}"#
+        #"{"status":"ok","version":1,"ink":0.12,"dead":0.015,"gain":1.0,"paper":{"cols":1,"rows":1,"rgb":[1.0,1.0,1.0]}}"#
 
     /// Paths are worked out here (from the library's root), so the store can be used from any thread.
     init(map: MapDocument, library: MapLibrary) {
