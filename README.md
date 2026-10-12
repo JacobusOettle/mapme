@@ -11,7 +11,10 @@ ready for Android.
 
 * **Locates maps by itself**: from the coordinate grid printed on the map or,
   when there is none, by matching the map's **contour lines** against real
-  terrain elevation data around you. Manual calibration as a fallback.
+  terrain elevation data within 50 km of you. Map from farther away? **Search
+  wider** looks up to 2 000 km out (with an honest download and time estimate
+  first), checking the places named on the map first. Manual calibration as a
+  fallback.
 * **Apple Maps-style position puck** with a heading beam and accuracy halo;
   follow, follow-with-heading (map turns as you turn) and a compass.
 * **Photos of paper maps**: scan with the document camera or pick a photo; the
@@ -36,7 +39,8 @@ The Grootkloof PDF in the iPhone simulator with a simulated walk, drawn dark
 its heading beam, the dotted trail you walked, Apple Maps-style controls and the
 stats card. The second row ends with a real phone *photo* of the printed sheet,
 folded in four and lying on a wooden table, going through the corner editor and
-photo mode; the last row has the paper appearance and the library. Every push refreshes
+photo mode; the last row has the paper appearance, the library and the "Search
+wider" sheet offered when a map is not found near you. Every push refreshes
 these on the
 [`ci-screenshots`](https://github.com/JacobusOettle/mapme/tree/ci-screenshots)
 branch (with the IPA of that build).
@@ -49,9 +53,9 @@ branch (with the IPA of that build).
 |---|---|---|
 | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshots__04-nearby_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/PhotoImportUITests.testPhotoOfPaperMap__05-photo-corners_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/PhotoImportUITests.testPhotoOfPaperMap__06-photo-map_0.png" width="240"> |
 
-| Paper appearance | Library |
-|---|---|
-| <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshotsPaper__01b-map-paper_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testLibraryAppears__00-library_0.png" width="240"> |
+| Paper appearance | Library | Search wider |
+|---|---|---|
+| <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshotsPaper__01b-map-paper_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testLibraryAppears__00-library_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/SearchWiderUITests.testSearchWiderSheet__07-search-wider_0.png" width="240"> |
 
 ## Install on your iPhone
 

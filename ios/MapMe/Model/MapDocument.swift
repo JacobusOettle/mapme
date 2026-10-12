@@ -87,6 +87,10 @@ struct MapDocument: Codable, Hashable, Identifiable {
     /// Photos of paper maps: the original photo and the page corners (nil for PDFs, images and scans).
     /// Optional, so meta.json files written before photo support still decode.
     var photoSource: PhotoSource? = nil
+    /// The last automatic locate when it did not find the map (nil once located): how far it
+    /// searched, why it failed and the names on the map, for "Search wider". Optional, so older
+    /// meta.json files still decode.
+    var locateAttempt: LocateAttempt? = nil
 
     var pixelSize: CGSize { CGSize(width: pixelWidth, height: pixelHeight) }
     var isGeoreferenced: Bool { georef != nil }

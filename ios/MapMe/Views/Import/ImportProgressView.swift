@@ -8,6 +8,9 @@ struct ImportProgressView: View {
     @State private var lastJob: ImportJob?
     @State private var showCalibration = false
     @State private var calibrationFinished = false
+    @State private var showSearchWider = false
+    /// Picked in the "Search wider" sheet; started once the sheet has closed.
+    @State private var pendingWideSearch: WideSearchChoice?
 
     var body: some View {
         let job = model.importJob ?? lastJob
@@ -47,6 +50,27 @@ struct ImportProgressView: View {
                 .environment(model)
             }
         }
+        .sheet(isPresented: $showSearchWider, onDismiss: { startPendingWideSearch() }) {
+            if let job {
+                SearchWiderSheet(mapName: job.name, previousRadiusKm: job.radiusKm, hintQueries: job.hintQueries,
+                                 position: model.location.location.map { LatLon($0.coordinate) },
+                                 units: model.settings.units,
+                                 onStart: { choice in
+                                     pendingWideSearch = choice
+                                     showSearchWider = false
+                                 },
+                                 onCancel: { showSearchWider = false })
+            }
+        }
+    }
+
+    /// The search runs once the sheet has gone, so the progress shows on this screen.
+    @MainActor
+    private func startPendingWideSearch() {
+        guard let choice = pendingWideSearch else { return }
+        pendingWideSearch = nil
+        guard let mapID = (model.importJob ?? lastJob)?.mapID else { return }
+        model.searchWider(mapID: mapID, choice: choice)
     }
 
     private var backdrop: some View {
@@ -64,7 +88,8 @@ struct ImportProgressView: View {
         VStack(spacing: 0) {
             Spacer(minLength: 12)
             ZStack {
-                ImportScanVisual(phase: job.phase)
+                ImportScanVisual(phase: job.phase,
+                                 searchedFraction: job.isWideSearch && job.phase == .locating ? (job.search?.fraction ?? 0) : nil)
                     .frame(width: 250, height: 250)
                 phaseBadge(job.phase)
                     .offset(x: 88, y: 88)
@@ -114,6 +139,8 @@ struct ImportProgressView: View {
     @ViewBuilder
     private func details(for job: ImportJob) -> some View {
         switch job.phase {
+        case .locating where job.isWideSearch:
+            wideSearchProgress(job)
         case .importing, .locating:
             VStack(spacing: 14) {
                 Text(job.step)
@@ -137,6 +164,33 @@ struct ImportProgressView: View {
                     title: "Couldn't place this map", color: Theme.warn)
         case .failed:
             message(job.message ?? "Something went wrong while importing.", title: "Import failed", color: Theme.bad)
+        }
+    }
+
+    /// "Searched 320 of 1 000 km", what it is doing now, and the share of the plan done.
+    private func wideSearchProgress(_ job: ImportJob) -> some View {
+        let headline = SearchText.progressHeadline(job.search, radiusKm: job.radiusKm ?? WideSearch.maxRadiusKm,
+                                                   units: model.settings.units)
+        return VStack(spacing: 12) {
+            Text(headline)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Theme.textPrimary)
+                .monospacedDigit()
+                .multilineTextAlignment(.center)
+                .contentTransition(.numericText())
+                .animation(.snappy, value: headline)
+                .accessibilityIdentifier("wideSearchHeadline")
+            if !job.step.hasPrefix(headline) {
+                Text(job.step)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .monospacedDigit()
+                    .contentTransition(.opacity)
+                    .animation(.easeInOut(duration: 0.2), value: job.step)
+            }
+            ImportProgressBar(fraction: job.fraction)
+                .frame(maxWidth: 300)
         }
     }
 
@@ -171,33 +225,54 @@ struct ImportProgressView: View {
             .buttonStyle(ImportActionButtonStyle(kind: .primary))
             .accessibilityIdentifier("openMapButton")
         case .needsCalibration:
+            // A terrain miss after the first search leads with "Search wider…".
+            let offered = WideSearch.resultActions(failure: job.failure, radiusKm: job.radiusKm, canCalibrate: job.mapID != nil)
             VStack(spacing: 10) {
-                if job.mapID != nil {
-                    Button {
-                        showCalibration = true
-                    } label: {
-                        Label("Calibrate manually", systemImage: "hand.tap.fill")
-                    }
-                    .buttonStyle(ImportActionButtonStyle(kind: .primary))
-                    .accessibilityIdentifier("calibrateButton")
-                }
-                Button("Open map anyway") { model.finishImport(openMap: true) }
-                    .buttonStyle(ImportActionButtonStyle(kind: .secondary))
-                    .accessibilityIdentifier("openMapButton")
-                if let mapID = job.mapID {
-                    Button {
-                        model.relocate(mapID: mapID)
-                    } label: {
-                        Label("Try again", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(ImportActionButtonStyle(kind: .plain))
-                    .accessibilityIdentifier("retryLocateButton")
+                ForEach(Array(offered.enumerated()), id: \.offset) { index, action in
+                    resultButton(action, job: job, kind: index == 0 ? .primary : index == 1 ? .secondary : .plain)
                 }
             }
         case .failed:
             Button("Close") { model.finishImport(openMap: false) }
                 .buttonStyle(ImportActionButtonStyle(kind: .secondary))
                 .accessibilityIdentifier("closeImportButton")
+        }
+    }
+
+    @MainActor
+    @ViewBuilder
+    private func resultButton(_ action: ImportResultAction, job: ImportJob, kind: ImportActionButtonStyle.Kind) -> some View {
+        switch action {
+        case .searchWider:
+            Button {
+                showSearchWider = true
+            } label: {
+                Label("Search wider\u{2026}", systemImage: "location.magnifyingglass")
+            }
+            .buttonStyle(ImportActionButtonStyle(kind: kind))
+            .accessibilityIdentifier("searchWiderButton")
+        case .calibrate:
+            Button {
+                showCalibration = true
+            } label: {
+                Label("Calibrate manually", systemImage: "hand.tap.fill")
+            }
+            .buttonStyle(ImportActionButtonStyle(kind: kind))
+            .accessibilityIdentifier("calibrateButton")
+        case .openAnyway:
+            Button("Open map anyway") { model.finishImport(openMap: true) }
+                .buttonStyle(ImportActionButtonStyle(kind: kind))
+                .accessibilityIdentifier("openMapButton")
+        case .tryAgain:
+            if let mapID = job.mapID {
+                Button {
+                    model.relocate(mapID: mapID)
+                } label: {
+                    Label("Try again", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(ImportActionButtonStyle(kind: kind))
+                .accessibilityIdentifier("retryLocateButton")
+            }
         }
     }
 }

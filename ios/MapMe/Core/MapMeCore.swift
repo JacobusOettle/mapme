@@ -123,6 +123,36 @@ enum MapMeCore {
         return isOKStatus(json) ? json : nil
     }
 
+    /// What a contour search of `radiusKm` around `gps` (plus the hints) would download and how
+    /// long it takes (`mm_search_estimate`, stateless and quick). Nil when the core cannot say.
+    static func searchEstimate(radiusKm: Double, gps: LatLon?, hints: [SearchHint] = []) -> SearchEstimate? {
+        guard radiusKm.isFinite, radiusKm > 0 else { return nil }
+        let request = SearchEstimateRequest(radiusM: radiusKm * 1000,
+                                            gps: gps.map { GPSFix(lat: $0.lat, lon: $0.lon, accuracyM: nil) },
+                                            hints: hints)
+        guard let json = try? JSONEncoder().encode(request) else { return nil }
+        let str = String(decoding: json, as: UTF8.self)
+        let out: String = str.withCString { cstr in
+            guard let res = mm_search_estimate(cstr) else { return "" }
+            defer { mm_string_free(res) }
+            return String(cString: res)
+        }
+        return decodeSearchEstimate(out)
+    }
+
+    /// Parse `mm_search_estimate`'s answer. Nil for `{"status":"failed",...}` and for anything
+    /// malformed (missing, negative or non-finite numbers).
+    static func decodeSearchEstimate(_ json: String) -> SearchEstimate? {
+        guard let data = json.data(using: .utf8),
+              let wire = try? JSONDecoder().decode(SearchEstimateWire.self, from: data),
+              wire.status == "ok",
+              let tiles = wire.tiles, tiles >= 0,
+              let bytes = wire.approxBytes, bytes >= 0,
+              let seconds = wire.approxSeconds, seconds >= 0
+        else { return nil }
+        return SearchEstimate(coarseZoom: wire.coarseZoom, tiles: tiles, approxBytes: bytes, approxSeconds: seconds)
+    }
+
     /// True for a JSON object whose `"status"` is `"ok"`.
     static func isOKStatus(_ json: String) -> Bool {
         guard let data = json.data(using: .utf8),
@@ -208,6 +238,31 @@ struct PageDetection {
             sum += Double(a.x) * Double(b.y) - Double(b.x) * Double(a.y)
         }
         return abs(sum) / 2
+    }
+}
+
+/// `mm_search_estimate` JSON, read leniently (counts may arrive as 2410.0).
+private struct SearchEstimateWire: Decodable {
+    var status: String
+    var coarseZoom: Int?
+    var tiles: Int?
+    var approxBytes: Double?
+    var approxSeconds: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case status, tiles
+        case coarseZoom = "coarse_zoom"
+        case approxBytes = "approx_bytes"
+        case approxSeconds = "approx_seconds"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = try c.decode(String.self, forKey: .status)
+        coarseZoom = c.lenientInt(.coarseZoom)
+        tiles = c.lenientInt(.tiles)
+        approxBytes = c.lenientDouble(.approxBytes)
+        approxSeconds = c.lenientDouble(.approxSeconds)
     }
 }
 

@@ -1,0 +1,178 @@
+import CoreLocation
+import Foundation
+import MapKit
+
+/// A place a name on the map was found at.
+struct GeocodedPlace: Equatable, Sendable {
+    var name: String
+    var coordinate: LatLon
+}
+
+/// Looks up a name printed on a map ("Castle Gorge"). `MapKitPlaceGeocoder` in the app, a mock in
+/// tests.
+protocol PlaceGeocoding: Sendable {
+    /// Places matching `query`, searched around `center` (within about `radiusM`) when known.
+    /// Throws (or returns nothing) offline.
+    func places(matching query: String, near center: LatLon?, radiusM: Double) async throws -> [GeocodedPlace]
+}
+
+/// Apple Maps search (`MKLocalSearch`): addresses, points of interest and, on iOS 18, physical
+/// features (peaks, gorges, rivers), biased to the search circle.
+struct MapKitPlaceGeocoder: PlaceGeocoding {
+    func places(matching query: String, near center: LatLon?, radiusM: Double) async throws -> [GeocodedPlace] {
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = query
+        var types: MKLocalSearch.ResultType = [.address, .pointOfInterest]
+        if #available(iOS 18.0, *) {
+            types.insert(.physicalFeature)
+        }
+        request.resultTypes = types
+        if let center {
+            let span = min(max(2 * radiusM, 50_000), 4_000_000)
+            request.region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: center.lat, longitude: center.lon),
+                                                latitudinalMeters: span, longitudinalMeters: span)
+        }
+        let search = MKLocalSearch(request: request)
+        let response = try await withTaskCancellationHandler {
+            try await search.start()
+        } onCancel: {
+            search.cancel()
+        }
+        return response.mapItems.compactMap { item -> GeocodedPlace? in
+            let c = item.placemark.coordinate
+            guard CLLocationCoordinate2DIsValid(c), c.latitude != 0 || c.longitude != 0 else { return nil }
+            return GeocodedPlace(name: item.name ?? query, coordinate: LatLon(c))
+        }
+    }
+}
+
+/// Turns the names the core found on a map (`hint_queries`) into search hints: each name is looked
+/// up (a few at a time, each with a timeout), places beyond the search radius of the GPS fix are
+/// dropped, and the rest become 15 km circles the core checks first at full resolution.
+struct HintGeocoder {
+    static let defaultMaxQueries = 8
+
+    var geocoder: PlaceGeocoding
+    /// Names looked up (the core lists the best first).
+    var maxQueries = HintGeocoder.defaultMaxQueries
+    var maxConcurrent = 3
+    /// Per lookup; a slow or hanging one is dropped.
+    var timeoutSeconds = 4.0
+    /// Places kept per name (a name may exist in several places).
+    var maxResultsPerQuery = 2
+    var maxHints = 12
+    var hintRadiusM = SearchHint.defaultRadiusM
+    /// Places closer than this to an earlier hint add nothing (their circles overlap).
+    var mergeDistanceM = 5_000.0
+    /// False skips the lookups (offline).
+    var isOnline: @Sendable () -> Bool = { true }
+
+    /// Hints for `queries` around `fix` (nil: anywhere), best first. Never throws: offline, a
+    /// failed or slow lookup just gives fewer hints.
+    func hints(for queries: [String], near fix: LatLon?, searchRadiusM: Double) async -> [SearchHint] {
+        let names = Array(Self.cleanQueries(queries).prefix(maxQueries))
+        guard !names.isEmpty, isOnline() else { return [] }
+        let geocoder = self.geocoder
+        let timeout = timeoutSeconds
+        let region = searchRadiusM
+        var found = [[GeocodedPlace]](repeating: [], count: names.count)
+        await withTaskGroup(of: (Int, [GeocodedPlace]).self) { group in
+            var next = 0
+            while next < min(max(1, maxConcurrent), names.count) {
+                let index = next
+                let name = names[index]
+                next += 1
+                group.addTask {
+                    let places = await Self.lookUp(name, with: geocoder, near: fix, radiusM: region, timeout: timeout)
+                    return (index, places)
+                }
+            }
+            while let item = await group.next() {
+                found[item.0] = item.1
+                guard !Task.isCancelled, next < names.count else { continue }
+                let index = next
+                let name = names[index]
+                next += 1
+                group.addTask {
+                    let places = await Self.lookUp(name, with: geocoder, near: fix, radiusM: region, timeout: timeout)
+                    return (index, places)
+                }
+            }
+        }
+        let results: [(query: String, places: [GeocodedPlace])] = zip(names, found).map { (query: $0, places: $1) }
+        return Self.hints(from: results, near: fix, searchRadiusM: searchRadiusM,
+                          maxResultsPerQuery: maxResultsPerQuery, maxHints: maxHints, hintRadiusM: hintRadiusM,
+                          mergeDistanceM: mergeDistanceM)
+    }
+
+    /// Hints from looked-up places, best first: each name's nearest place within `searchRadiusM`
+    /// of the fix (any place without a fix), in the names' order, then each name's second, and
+    /// so on; places within `mergeDistanceM` of an earlier hint are skipped.
+    static func hints(from results: [(query: String, places: [GeocodedPlace])], near fix: LatLon?, searchRadiusM: Double,
+                      maxResultsPerQuery: Int = 2, maxHints: Int = 12, hintRadiusM: Double = SearchHint.defaultRadiusM,
+                      mergeDistanceM: Double = 5_000) -> [SearchHint] {
+        let perQuery: [[(name: String, place: GeocodedPlace)]] = results.map { result -> [(name: String, place: GeocodedPlace)] in
+            var places = result.places.filter { $0.coordinate.lat.isFinite && $0.coordinate.lon.isFinite }
+            if let fix {
+                places = places
+                    .map { (place: $0, distance: Geodesy.distance(fix, $0.coordinate)) }
+                    .filter { $0.distance <= searchRadiusM }
+                    .sorted { $0.distance < $1.distance }
+                    .map { $0.place }
+            }
+            return places.prefix(max(0, maxResultsPerQuery)).map { (name: result.query, place: $0) }
+        }
+        var hints: [SearchHint] = []
+        let depth = perQuery.map(\.count).max() ?? 0
+        for rank in 0..<depth {
+            for list in perQuery where rank < list.count {
+                guard hints.count < maxHints else { return hints }
+                let (name, place) = list[rank]
+                if hints.contains(where: { Geodesy.distance($0.center, place.coordinate) < mergeDistanceM }) { continue }
+                hints.append(SearchHint(lat: place.coordinate.lat, lon: place.coordinate.lon, radiusM: hintRadiusM,
+                                        source: .place, name: name))
+            }
+        }
+        return hints
+    }
+
+    /// Names worth looking up: trimmed, at least 3 letters, each once (ignoring case), in title
+    /// case ("CASTLE GORGE" → "Castle Gorge").
+    static func cleanQueries(_ queries: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for raw in queries {
+            let collapsed = raw.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+            guard collapsed.filter(\.isLetter).count >= 3 else { continue }
+            let key = collapsed.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            out.append(collapsed.capitalized)
+        }
+        return out
+    }
+
+    /// One lookup; nothing when it fails or takes longer than `timeout` seconds.
+    private static func lookUp(_ name: String, with geocoder: PlaceGeocoding, near fix: LatLon?, radiusM: Double,
+                               timeout: Double) async -> [GeocodedPlace] {
+        let places = await withTimeout(timeout) {
+            try await geocoder.places(matching: name, near: fix, radiusM: radiusM)
+        }
+        return places ?? []
+    }
+
+    /// `operation`'s result, or nil when it throws or takes longer than `seconds` (it is then
+    /// cancelled).
+    static func withTimeout<T: Sendable>(_ seconds: Double,
+                                         _ operation: @escaping @Sendable () async throws -> T) async -> T? {
+        await withTaskGroup(of: Optional<T>.self) { group in
+            group.addTask { try? await operation() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+}

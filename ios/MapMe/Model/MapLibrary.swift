@@ -55,6 +55,8 @@ final class MapLibrary {
     func legacyDarkTilesDirectory(for map: MapDocument) -> URL {
         directory(for: map.id).appendingPathComponent("tiles-dark", isDirectory: true)
     }
+    /// The text read off the base raster at the last locate (`OCRCache`), reused by "Search wider".
+    func ocrCacheURL(for map: MapDocument) -> URL { directory(for: map.id).appendingPathComponent(OCRCache.fileName) }
 
     /// Insert or update (writes meta.json).
     func save(_ map: MapDocument) {
@@ -98,6 +100,11 @@ final class MapLibrary {
 
     // MARK: - Helpers
 
+    /// The OCR saved for `map`, if it was read off the current base raster. Blocking.
+    func loadOCR(for map: MapDocument) -> [OCRObservation]? {
+        OCRCache.load(from: ocrCacheURL(for: map), width: map.pixelWidth, height: map.pixelHeight)
+    }
+
     static func write(_ map: MapDocument, to folder: URL) throws {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let data = try makeEncoder().encode(map)
@@ -125,5 +132,33 @@ final class MapLibrary {
             if da != db { return da > db }
             return a.id.uuidString < b.id.uuidString
         }
+    }
+}
+
+/// The text Vision read off a map's base raster (ocr.json in the map folder), so a later search
+/// ("Search wider") does not read it again. Tied to the raster's size; removed when a photo is
+/// flattened again.
+struct OCRCache: Codable {
+    static let fileName = "ocr.json"
+    static let currentVersion = 1
+
+    var version = OCRCache.currentVersion
+    var pixelWidth: Int
+    var pixelHeight: Int
+    var observations: [OCRObservation]
+
+    /// The observations stored at `url` for a `width` × `height` raster, or nil (missing,
+    /// unreadable, another version or another raster size). Blocking.
+    static func load(from url: URL, width: Int, height: Int) -> [OCRObservation]? {
+        guard let data = try? Data(contentsOf: url),
+              let cache = try? JSONDecoder().decode(OCRCache.self, from: data),
+              cache.version == currentVersion, cache.pixelWidth == width, cache.pixelHeight == height
+        else { return nil }
+        return cache.observations
+    }
+
+    /// Blocking.
+    func write(to url: URL) throws {
+        try JSONEncoder().encode(self).write(to: url, options: .atomic)
     }
 }

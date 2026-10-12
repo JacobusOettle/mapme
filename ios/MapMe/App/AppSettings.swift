@@ -107,8 +107,18 @@ final class AppSettings {
     var allowMapRotation: Bool = true { didSet { defaults.set(allowMapRotation, forKey: "allowMapRotation") } }
     /// Fetch extra POIs from OpenStreetMap when online.
     var useOpenStreetMap: Bool = true { didSet { defaults.set(useOpenStreetMap, forKey: "useOpenStreetMap") } }
-    /// How far from you a map may be when locating it from contours.
-    var searchRadiusKm: Double = 20 { didSet { defaults.set(searchRadiusKm, forKey: "searchRadiusKm") } }
+    /// How far from you the first contour search looks for a map (a wider search is offered when it
+    /// fails). 50 km by default, 10…100 km in Settings.
+    var searchRadiusKm: Double = AppSettings.defaultSearchRadiusKm {
+        didSet { defaults.set(searchRadiusKm, forKey: "searchRadiusKm") }
+    }
+
+    static let defaultSearchRadiusKm = 50.0
+    static let searchRadiusRangeKm: ClosedRange<Double> = 10...100
+    /// The default before version 2 of the setting; a stored value equal to it was never chosen
+    /// on purpose and becomes the new default.
+    static let legacyDefaultSearchRadiusKm = 20.0
+    static let searchRadiusVersion = 2
 
     /// - Parameter arguments: launch arguments; `-mapAppearance dark|paper` overrides the stored
     ///   appearance for this run without saving it (UI tests and screenshots).
@@ -133,7 +143,23 @@ final class AppSettings {
         if let v = defaults.string(forKey: "locationColor").flatMap(LocationColor.init(rawValue:)) { locationColor = v }
         if let v = defaults.object(forKey: "allowMapRotation") as? Bool { allowMapRotation = v }
         if let v = defaults.object(forKey: "useOpenStreetMap") as? Bool { useOpenStreetMap = v }
-        if let v = defaults.object(forKey: "searchRadiusKm") as? Double { searchRadiusKm = v }
+        if let v = defaults.object(forKey: "searchRadiusKm") as? Double {
+            let migrated = Self.migratedSearchRadius(v, storedVersion: defaults.integer(forKey: "searchRadiusVersion"))
+            searchRadiusKm = migrated
+            if migrated != v { defaults.set(migrated, forKey: "searchRadiusKm") }
+        }
+        defaults.set(Self.searchRadiusVersion, forKey: "searchRadiusVersion")
+    }
+
+    /// A stored search radius brought up to date: the old 20 km default (version < 2) becomes
+    /// 50 km, and anything is kept within the slider's 10…100 km.
+    static func migratedSearchRadius(_ stored: Double, storedVersion: Int) -> Double {
+        guard stored.isFinite else { return defaultSearchRadiusKm }
+        var km = stored
+        if storedVersion < searchRadiusVersion, abs(km - legacyDefaultSearchRadiusKm) < 0.5 {
+            km = defaultSearchRadiusKm
+        }
+        return min(max(km, searchRadiusRangeKm.lowerBound), searchRadiusRangeKm.upperBound)
     }
 
     /// The value after `flag` in launch arguments (`-flag value`), if any.

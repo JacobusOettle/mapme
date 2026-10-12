@@ -201,10 +201,11 @@ private struct SettingsLocatingSection: View {
 
     var body: some View {
         @Bindable var settings = model.settings
+        let range = AppSettings.searchRadiusRangeKm
         Section {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    SettingsLabel("Search radius", symbol: "scope", color: .teal)
+                    SettingsLabel("Terrain search radius", symbol: "scope", color: .teal)
                     Spacer()
                     Text(Self.radiusText(settings.searchRadiusKm, units: settings.units))
                         .font(.body.weight(.semibold))
@@ -213,12 +214,12 @@ private struct SettingsLocatingSection: View {
                         .contentTransition(.numericText())
                         .animation(.snappy, value: settings.searchRadiusKm)
                 }
-                Slider(value: $settings.searchRadiusKm, in: 5...50, step: 1) {
-                    Text("Search radius")
+                Slider(value: $settings.searchRadiusKm, in: range, step: 5) {
+                    Text("Terrain search radius")
                 } minimumValueLabel: {
-                    Text(Self.radiusText(5, units: settings.units)).font(.caption2).foregroundStyle(Theme.textSecondary)
+                    Text(Self.radiusText(range.lowerBound, units: settings.units)).font(.caption2).foregroundStyle(Theme.textSecondary)
                 } maximumValueLabel: {
-                    Text(Self.radiusText(50, units: settings.units)).font(.caption2).foregroundStyle(Theme.textSecondary)
+                    Text(Self.radiusText(range.upperBound, units: settings.units)).font(.caption2).foregroundStyle(Theme.textSecondary)
                 }
                 .accessibilityIdentifier("searchRadiusSlider")
             }
@@ -238,7 +239,7 @@ private struct SettingsLocatingSection: View {
         } header: {
             Text("Locating")
         } footer: {
-            Text("When a map has no coordinates printed on it, MapMe matches its contour lines against real terrain within this distance of you. A smaller radius is faster.")
+            Text("When a map has no coordinates printed on it, MapMe first matches its contour lines against real terrain within this distance of you. If the map isn't found, you can search wider, up to 2\u{00A0}000 km, from the import screen or the map's menu in the library.")
         }
     }
 
@@ -347,6 +348,7 @@ private struct LocatingExplainerView: View {
                         .font(.headline)
                         .foregroundStyle(Theme.warn)
                     Text("\u{2022} Import the map while you are on or near it, so contour matching knows where to look.")
+                    Text("\u{2022} Map from far away? When it isn't found near you, Search wider looks up to 2\u{00A0}000 km away, starting with the places named on the map.")
                     Text("\u{2022} Unusual contour colours? Open Calibrate, pick the contour colour, and locate again.")
                     Text("\u{2022} Photographing a paper map? Lay it flat, fill the frame and include the whole page so its corners can be found.")
                 }
@@ -412,7 +414,7 @@ private struct SettingsStorageSection: View {
         } header: {
             Text("Storage")
         } footer: {
-            Text("Terrain tiles are downloaded when a map is located from its contour lines. They are downloaded again when needed.")
+            Text("Terrain tiles are downloaded when a map is located from its contour lines and kept up to 400\u{00A0}MB (the least recently used go first). They are downloaded again when needed.")
         }
     }
 
@@ -442,10 +444,10 @@ private struct SettingsStorageSection: View {
     @MainActor
     private func clearTerrainCache() {
         clearing = true
-        let demURL = DEMService.shared.cacheDirectory
+        let dem = DEMService.shared
         Task { @MainActor in
             await Task.detached(priority: .userInitiated) {
-                _ = try? FileManager.default.removeItem(at: demURL)
+                dem.clearCache()
             }.value
             clearing = false
             refreshTick += 1
@@ -530,7 +532,7 @@ private struct SettingsAboutSection: View {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "lock.shield.fill")
                     .foregroundStyle(Theme.good)
-                Text("Your maps, tracks and position stay on this device. The only network requests are anonymous downloads of terrain tiles and OpenStreetMap places for the area of a map.")
+                Text("Your maps, tracks and position stay on this device. The only network requests are anonymous downloads of terrain tiles and OpenStreetMap places for the area of a map, and, when you search wider, Apple Maps lookups of the place names printed on the map.")
                     .font(.footnote)
                     .foregroundStyle(Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
