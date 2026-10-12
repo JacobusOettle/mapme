@@ -152,11 +152,12 @@ private struct LayersMenu: View {
     var body: some View {
         @Bindable var settings = model.settings
         Menu {
-            Picker(selection: $settings.nightMap) {
-                Label("Paper", systemImage: "map").tag(false)
-                Label("Night", systemImage: "moon.stars").tag(true)
+            Picker(selection: $settings.mapAppearance) {
+                ForEach(MapAppearance.allCases) { appearance in
+                    Label(appearance.label, systemImage: appearance.symbolName).tag(appearance)
+                }
             } label: {
-                Text("Map Style")
+                Text("Map Appearance")
             }
             .pickerStyle(.inline)
             Section {

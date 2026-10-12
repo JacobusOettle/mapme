@@ -1,7 +1,8 @@
 import XCTest
 
 /// Drives the app on the bundled Grootkloof sample with a mocked GPS walk and attaches screenshots
-/// (kept in the .xcresult; CI exports them as artifacts).
+/// (kept in the .xcresult; CI exports them as artifacts). Maps are dark by default; one screenshot
+/// shows the paper appearance (`-mapAppearance paper`, for that run only).
 final class ScreenshotTests: XCTestCase {
     /// Inside the Grootkloof sheet (Magaliesberg), walking a loop at 7 m/s so a long trail builds up quickly.
     static let mockArguments = ["-mockLocation", "-25.8405,27.3920", "-mockHeading", "35", "-mockWalk",
@@ -29,38 +30,16 @@ final class ScreenshotTests: XCTestCase {
         allowLocationAlerts()
         app.launch()
 
-        // Import + locate the sample (fresh install), or go straight to the map if it was imported before.
-        let openMap = app.buttons["openMapButton"]
-        let trackingButton = app.buttons["trackingButton"]
-        let deadline = Date().addingTimeInterval(180)
-        var reachedMap = false
-        while Date() < deadline {
-            if openMap.exists, openMap.isHittable {
-                openMap.tap()
-                reachedMap = true
-                break
-            }
-            if trackingButton.exists {
-                reachedMap = true
-                break
-            }
-            Thread.sleep(forTimeInterval: 1)
-        }
-        guard reachedMap else {
-            attachScreenshot(app, "00-import-timeout")
-            XCTFail("The sample map was not imported within 180 s")
-            return
-        }
-        guard trackingButton.waitForExistence(timeout: 15) else {
-            attachScreenshot(app, "00-no-map")
-            XCTFail("trackingButton not found")
-            return
-        }
+        guard let trackingButton = openSampleMap(app) else { return }
 
-        // Follow mode (north up), with a long dotted trail walked behind the puck.
+        // Follow mode (north up), with a long dotted trail walked behind the puck, on the dark map.
         setTracking(trackingButton, to: "follow")
         Thread.sleep(forTimeInterval: 15)
-        attachScreenshot(app, "01-map")
+        let map = app.screenshot()
+        attach(map, "01-map")
+        if let brightness = mapBandBrightness(map) {
+            XCTAssertLessThan(brightness, 0.3, "The map should be dark by default (brightness \(brightness))")
+        }
 
         // Follow with heading: the map turns with the walker and the compass appears.
         setTracking(trackingButton, to: "heading")
@@ -94,7 +73,58 @@ final class ScreenshotTests: XCTestCase {
         attachScreenshot(app, "04-nearby")
     }
 
+    /// The same map in the paper appearance. Runs after `testMapScreenshots` (name order), which
+    /// has imported the sample, so it opens straight onto the map.
+    @MainActor
+    func testMapScreenshotsPaper() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-importSample", "-mapAppearance", "paper"] + Self.mockArguments
+        allowLocationAlerts()
+        app.launch()
+        guard let trackingButton = openSampleMap(app) else { return }
+        setTracking(trackingButton, to: "follow")
+        Thread.sleep(forTimeInterval: 10)
+        let map = app.screenshot()
+        attach(map, "01b-map-paper")
+        if let brightness = mapBandBrightness(map) {
+            XCTAssertGreaterThan(brightness, 0.5, "The paper appearance should show the map as printed (brightness \(brightness))")
+        }
+    }
+
     // MARK: - Helpers
+
+    /// Imports and locates the sample (fresh install) or opens it (imported before), then waits for
+    /// the map screen. Returns its tracking button, or nil (with a failure and a screenshot).
+    @MainActor
+    private func openSampleMap(_ app: XCUIApplication) -> XCUIElement? {
+        let openMap = app.buttons["openMapButton"]
+        let trackingButton = app.buttons["trackingButton"]
+        let deadline = Date().addingTimeInterval(180)
+        var reachedMap = false
+        while Date() < deadline {
+            if openMap.exists, openMap.isHittable {
+                openMap.tap()
+                reachedMap = true
+                break
+            }
+            if trackingButton.exists {
+                reachedMap = true
+                break
+            }
+            Thread.sleep(forTimeInterval: 1)
+        }
+        guard reachedMap else {
+            attachScreenshot(app, "00-import-timeout")
+            XCTFail("The sample map was not imported within 180 s")
+            return nil
+        }
+        guard trackingButton.waitForExistence(timeout: 15) else {
+            attachScreenshot(app, "00-no-map")
+            XCTFail("trackingButton not found")
+            return nil
+        }
+        return trackingButton
+    }
 
     /// Taps the tracking button (none → follow → heading → follow) until it reports `value`.
     @MainActor
@@ -124,7 +154,12 @@ final class ScreenshotTests: XCTestCase {
 
     @MainActor
     private func attachScreenshot(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attach(app.screenshot(), name)
+    }
+
+    @MainActor
+    private func attach(_ screenshot: XCUIScreenshot, _ name: String) {
+        let attachment = XCTAttachment(screenshot: screenshot)
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)

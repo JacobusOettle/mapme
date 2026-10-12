@@ -110,17 +110,27 @@ struct LibraryView: View {
         .sensoryFeedback(.impact(weight: .light), trigger: openCount)
     }
 
+    /// Draws a map's dark thumbnail (maps imported before dark maps get one on first view).
+    @MainActor
+    private static func darkThumbnailMaker(_ map: MapDocument, library: MapLibrary) -> () -> Void {
+        let store = TileStore(map: map, library: library)
+        return { _ = store.writeDarkThumbnail() }
+    }
+
     @MainActor
     private func card(for entry: Entry) -> some View {
         let map = entry.map
+        let library = model.library
+        let dark = model.settings.mapAppearance == .dark
         return Button {
             openCount += 1
             model.path.append(map.id)
         } label: {
             MapCardView(map: map,
-                        thumbnailURL: model.library.thumbnailURL(for: map),
+                        thumbnailURL: dark ? library.darkThumbnailURL(for: map) : library.thumbnailURL(for: map),
                         proximity: entry.proximity,
-                        units: model.settings.units)
+                        units: model.settings.units,
+                        makeThumbnail: dark ? Self.darkThumbnailMaker(map, library: library) : nil)
         }
         .buttonStyle(LibraryCardButtonStyle())
         .contextMenu {

@@ -276,9 +276,10 @@ enum OverlayArt {
     /// The bar starts at x = `scaleInset` in the image.
     static let scaleInset: CGFloat = 6
 
-    static func scaleBar(_ spec: ScaleBarSpec, night: Bool) -> UIImage {
-        let ink = night ? UIColor(white: 0.96, alpha: 1) : UIColor(white: 0.08, alpha: 1)
-        let halo = night ? UIColor(white: 0, alpha: 0.85) : UIColor(white: 1, alpha: 0.95)
+    /// `dark`: light ink on a dark halo, for the dark map.
+    static func scaleBar(_ spec: ScaleBarSpec, dark: Bool) -> UIImage {
+        let ink = dark ? UIColor(white: 0.96, alpha: 1) : UIColor(white: 0.08, alpha: 1)
+        let halo = dark ? UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 0.88) : UIColor(white: 1, alpha: 0.95)
         let font = UIFont.systemFont(ofSize: 11, weight: .semibold)
         let labels: [(String, CGFloat)] = [("0", 0), (spec.halfLabel, spec.length / 2), (spec.label, spec.length)]
         let lastWidth = ceil((spec.label as NSString).size(withAttributes: [.font: font]).width)

@@ -32,7 +32,8 @@ struct CanvasMarker: Identifiable, Hashable {
 struct MapCanvasView: UIViewRepresentable {
     let map: MapDocument
     let tileStore: TileStore
-    var nightMode: Bool = false
+    /// Draw the map dark (`MapAppearance.dark`): dark tiles, dark sheet and overlay colours to match.
+    var darkMap: Bool = false
     var orientation: MapOrientationMode = .northUp
     var userLocation: CLLocation? = nil
     /// Compass heading in degrees (true north), if available.
@@ -102,7 +103,7 @@ struct MapCanvasView: UIViewRepresentable {
         uiView.apply(MapCanvasUIView.Inputs(
             map: map,
             tileStore: tileStore,
-            nightMode: nightMode,
+            darkMap: darkMap,
             tracking: mode,
             lockNorthUp: lockNorthUp,
             allowRotation: rotation,

@@ -1,8 +1,9 @@
 import Foundation
 import Observation
 
-/// On-disk store of imported maps: Application Support/Maps/<uuid>/{meta.json, source.*, tiles/, tiles-dark/, thumb.jpg}.
-/// Use from the main thread.
+/// On-disk store of imported maps: Application Support/Maps/<uuid>/{meta.json, source.*, tiles/,
+/// tiles-dark-v2/, thumb.jpg, thumb-dark.jpg, dark-profile.json}. Use from the main thread (the
+/// path helpers only read `rootURL` and are safe anywhere).
 @Observable
 final class MapLibrary {
     /// Most recently opened/created first.
@@ -41,8 +42,18 @@ final class MapLibrary {
     func directory(for id: UUID) -> URL { rootURL.appendingPathComponent(id.uuidString, isDirectory: true) }
     func sourceURL(for map: MapDocument) -> URL { directory(for: map.id).appendingPathComponent(map.sourceFileName) }
     func thumbnailURL(for map: MapDocument) -> URL { directory(for: map.id).appendingPathComponent("thumb.jpg") }
+    /// The thumbnail drawn dark with the map's dark style (made after import, or on first use).
+    func darkThumbnailURL(for map: MapDocument) -> URL { directory(for: map.id).appendingPathComponent("thumb-dark.jpg") }
+    /// The map's dark-map profile (`MapMeCore.darkProfile`), computed once from an overview.
+    func darkProfileURL(for map: MapDocument) -> URL { directory(for: map.id).appendingPathComponent("dark-profile.json") }
+    /// Light tiles, or the core's dark rendering of them (`tiles-dark-v2`, made on first view and
+    /// in the background after import).
     func tilesDirectory(for map: MapDocument, dark: Bool) -> URL {
-        directory(for: map.id).appendingPathComponent(dark ? "tiles-dark" : "tiles", isDirectory: true)
+        directory(for: map.id).appendingPathComponent(dark ? "tiles-dark-v2" : "tiles", isDirectory: true)
+    }
+    /// Night tiles of older versions (a plain inversion); removed when found.
+    func legacyDarkTilesDirectory(for map: MapDocument) -> URL {
+        directory(for: map.id).appendingPathComponent("tiles-dark", isDirectory: true)
     }
 
     /// Insert or update (writes meta.json).
@@ -62,7 +73,10 @@ final class MapLibrary {
     }
 
     func delete(_ map: MapDocument) {
-        try? FileManager.default.removeItem(at: directory(for: map.id))
+        let folder = directory(for: map.id)
+        try? FileManager.default.removeItem(at: folder)
+        // A background dark render of this map stops; whatever it wrote meanwhile goes too.
+        DarkPrerender.cancel(map.id) { try? FileManager.default.removeItem(at: folder) }
         maps.removeAll { $0.id == map.id }
     }
 

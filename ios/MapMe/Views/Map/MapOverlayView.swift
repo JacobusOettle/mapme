@@ -42,7 +42,8 @@ final class MapOverlayView: UIView {
     private var staleTask: Task<Void, Never>?
 
     private var puckColor: UIColor = LocationColor.red.uiColor
-    private var night = false
+    /// Colours for the dark map (`MapAppearance.dark`) instead of paper.
+    private var darkMap = false
 
     private var trackPoints: [TrackPoint] = []
     private var trackPixels: [CGPoint] = []
@@ -101,7 +102,7 @@ final class MapOverlayView: UIView {
     private var balloonID: UUID?
     private var offscreenText = ""
     private var scaleSpec: ScaleBarSpec?
-    private var scaleNight = false
+    private var scaleDark = false
     private var scaleZoom: CGFloat = 0
     private var scaleShown = false
     private var scaleHideAt: CFTimeInterval = 0
@@ -293,8 +294,9 @@ final class MapOverlayView: UIView {
         let base = isStale ? UIColor(white: 0.6, alpha: 1) : puckColor
         puckDisc.colors = [OverlayArt.mix(base, .white, 0.22).cgColor, OverlayArt.mix(base, .black, 0.1).cgColor]
         haloLayer.backgroundColor = base.cgColor
-        accuracyLayer.backgroundColor = base.withAlphaComponent(0.12).cgColor
-        accuracyLayer.borderColor = base.withAlphaComponent(0.22).cgColor
+        // A faint tint vanishes on the dark map: a little more fill and a clearer rim there.
+        accuracyLayer.backgroundColor = base.withAlphaComponent(darkMap ? 0.16 : 0.12).cgColor
+        accuracyLayer.borderColor = base.withAlphaComponent(darkMap ? 0.4 : 0.22).cgColor
         offscreenArrow.fillColor = base.cgColor
         offscreenText = ""
         beamWidth = -1
@@ -303,13 +305,13 @@ final class MapOverlayView: UIView {
 
     // MARK: - Inputs
 
-    func setStyle(locationColor: UIColor, night: Bool) {
-        if !locationColor.isEqual(puckColor) {
-            puckColor = locationColor
-            applyPuckStyle()
-        }
-        if night != self.night {
-            self.night = night
+    func setStyle(locationColor: UIColor, darkMap: Bool) {
+        let colorChanged = !locationColor.isEqual(puckColor)
+        let mapChanged = darkMap != self.darkMap
+        puckColor = locationColor
+        self.darkMap = darkMap
+        if colorChanged || mapChanged { applyPuckStyle() }
+        if mapChanged {
             rebuildPOIs()
             scaleSpec = nil
             renderedGuideText = ""
@@ -600,10 +602,16 @@ final class MapOverlayView: UIView {
         return text
     }
 
-    /// Category-coloured label text, darkened on paper and lightened at night for contrast.
-    private static func labelColor(for kind: POIKind, night: Bool) -> UIColor {
+    /// Category-coloured label text, darkened on paper and lightened on the dark map for contrast.
+    private static func labelColor(for kind: POIKind, darkMap: Bool) -> UIColor {
         let c = POIKindStyle.uiColor(for: kind)
-        return night ? OverlayArt.mix(c, .white, 0.45) : OverlayArt.mix(c, .black, 0.35)
+        return darkMap ? OverlayArt.mix(c, .white, 0.45) : OverlayArt.mix(c, .black, 0.35)
+    }
+
+    /// Halo behind label text: white on paper; on the dark map a near-black a shade below its
+    /// paper, so labels lift off light ink (grid lines, tracks) as on Apple's dark maps.
+    private static func labelHalo(darkMap: Bool) -> UIColor {
+        darkMap ? UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 0.88) : UIColor(white: 1, alpha: 0.95)
     }
 
     private func updateGuideText() {
@@ -782,8 +790,8 @@ final class MapOverlayView: UIView {
 
     private func drawLabel(_ item: POIItem) {
         item.labelReady = true
-        let halo = night ? UIColor(white: 0.05, alpha: 0.85) : UIColor(white: 1, alpha: 0.95)
-        let image = OverlayArt.haloText(item.labelText, color: Self.labelColor(for: item.poi.kind, night: night), halo: halo)
+        let image = OverlayArt.haloText(item.labelText, color: Self.labelColor(for: item.poi.kind, darkMap: darkMap),
+                                        halo: Self.labelHalo(darkMap: darkMap))
         item.label.contents = image.cgImage
         item.label.contentsScale = image.scale
         item.label.bounds = CGRect(origin: .zero, size: image.size)
@@ -857,9 +865,8 @@ final class MapOverlayView: UIView {
         if balloonID != id {
             balloonID = id
             let text = item.labelText
-            let halo = night ? UIColor(white: 0.05, alpha: 0.85) : UIColor(white: 1, alpha: 0.95)
-            let ink = night ? UIColor.white : UIColor(white: 0.08, alpha: 1)
-            let image = OverlayArt.haloText(text, color: ink, halo: halo, fontSize: 13, weight: .bold)
+            let ink = darkMap ? UIColor.white : UIColor(white: 0.08, alpha: 1)
+            let image = OverlayArt.haloText(text, color: ink, halo: Self.labelHalo(darkMap: darkMap), fontSize: 13, weight: .bold)
             balloonLabel.contents = image.cgImage
             balloonLabel.contentsScale = image.scale
             balloonLabel.bounds = CGRect(origin: .zero, size: image.size)
@@ -884,8 +891,9 @@ final class MapOverlayView: UIView {
         guideCasing.isHidden = false
         if guideText != renderedGuideText {
             renderedGuideText = guideText
-            let image = OverlayArt.pill(guideText, fontSize: 13, weight: .bold, textColor: .white,
-                                        background: UIColor(white: 0.12, alpha: 0.92))
+            // On the dark map a raised grey pill (Apple's dark elevated fill) stands off the paper.
+            let pillColor = darkMap ? UIColor(red: 0.23, green: 0.23, blue: 0.24, alpha: 0.95) : UIColor(white: 0.12, alpha: 0.92)
+            let image = OverlayArt.pill(guideText, fontSize: 13, weight: .bold, textColor: .white, background: pillColor)
             guideLabel.contents = image.cgImage
             guideLabel.contentsScale = image.scale
             guideLabel.bounds = CGRect(origin: .zero, size: image.size)
@@ -903,13 +911,13 @@ final class MapOverlayView: UIView {
             scaleLayer.isHidden = true
             return
         }
-        if scaleSpec == nil || scaleNight != night || abs(camera.zoom / max(scaleZoom, 1e-9) - 1) > 0.002 {
+        if scaleSpec == nil || scaleDark != darkMap || abs(camera.zoom / max(scaleZoom, 1e-9) - 1) > 0.002 {
             scaleZoom = camera.zoom
             let mpp = georef.metersPerPixel(atPixel: camera.center)
             let spec = ScaleBarSpec.make(metersPerPoint: mpp / Double(camera.zoom), maxLength: 96, units: units)
-            if let spec, spec != scaleSpec || scaleNight != night {
-                scaleNight = night
-                let image = OverlayArt.scaleBar(spec, night: night)
+            if let spec, spec != scaleSpec || scaleDark != darkMap {
+                scaleDark = darkMap
+                let image = OverlayArt.scaleBar(spec, dark: darkMap)
                 scaleLayer.contents = image.cgImage
                 scaleLayer.contentsScale = image.scale
                 scaleLayer.bounds = CGRect(origin: .zero, size: image.size)

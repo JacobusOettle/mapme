@@ -10,7 +10,8 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
     struct Inputs {
         var map: MapDocument
         var tileStore: TileStore
-        var nightMode: Bool
+        /// Dark tiles, a dark sheet on a near-black surround, overlay colours for a dark map.
+        var darkMap: Bool
         var tracking: CanvasTrackingMode
         /// Keep the map paper-up (calibration); otherwise the rotation stays where the user leaves it.
         var lockNorthUp: Bool
@@ -51,7 +52,7 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
 
     private var map: MapDocument?
     private weak var tileStore: TileStore?
-    private var nightMode = false
+    private var darkMap = false
     private(set) var camera = CanvasCamera(center: .zero, zoom: 1, rotation: 0)
     private var hasInitialCamera = false
 
@@ -155,16 +156,19 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
 
     func apply(_ inputs: Inputs) {
         let mapChanged = map?.id != inputs.map.id
-        if mapChanged || tileStore !== inputs.tileStore || nightMode != inputs.nightMode {
-            tiledView.configure(map: inputs.map, store: inputs.tileStore, dark: inputs.nightMode)
+        if mapChanged || tileStore !== inputs.tileStore || darkMap != inputs.darkMap {
+            tiledView.configure(map: inputs.map, store: inputs.tileStore, dark: inputs.darkMap)
             tileStore = inputs.tileStore
-            nightMode = inputs.nightMode
+            darkMap = inputs.darkMap
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             let size = inputs.map.pixelSize
             sheetLayer.bounds = CGRect(origin: .zero, size: size)
             sheetLayer.shadowPath = UIBezierPath(rect: sheetLayer.bounds).cgPath
-            sheetLayer.backgroundColor = (inputs.nightMode ? Theme.uiNightPaper : Theme.uiPaper).cgColor
+            // The dark sheet is the dark tiles' paper exactly, so tiles fade in without a flash.
+            sheetLayer.backgroundColor = (inputs.darkMap ? Theme.uiNightPaper : Theme.uiPaper).cgColor
+            // Around a dark sheet, near-black keeps the edge of the map visible.
+            backgroundColor = inputs.darkMap ? Theme.uiDarkMapSurround : Theme.uiMapBackground
             sheetLayer.isHidden = size.width <= 0 || size.height <= 0
             CATransaction.commit()
         }
@@ -179,7 +183,7 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         }
 
         overlay.units = inputs.units
-        overlay.setStyle(locationColor: inputs.locationColor, night: inputs.nightMode)
+        overlay.setStyle(locationColor: inputs.locationColor, darkMap: inputs.darkMap)
         overlay.setGeoref(inputs.map.georef)
         let hadTarget = followTarget != nil
         location = inputs.userLocation

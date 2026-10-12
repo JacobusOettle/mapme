@@ -428,6 +428,22 @@ final class PhotoE2ETests: XCTestCase {
         XCTAssertFalse(fm.fileExists(atPath: folder.appendingPathComponent("tiles-staging").path))
         let stored = await MainActor.run { library.map(id: doc.id) }
         XCTAssertEqual(stored?.pixelWidth, moved.pixelWidth)
+        // The dark map is drawn again in the background, from the new page (never the old one).
+        let darkDeadline = Date().addingTimeInterval(120)
+        while DarkPrerender.isRunning(doc.id), Date() < darkDeadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let darkTiles = library.tilesDirectory(for: moved, dark: true)
+        let coarsest = moved.levels - 1
+        let lightTop = try XCTUnwrap(TileStore.loadImage(at: TileStore.tileURL(in: tiles, level: coarsest, col: 0, row: 0)))
+        let darkTop = try XCTUnwrap(TileStore.loadImage(at: TileStore.tileURL(in: darkTiles, level: coarsest, col: 0, row: 0)))
+        XCTAssertEqual(darkTop.width, lightTop.width)
+        XCTAssertEqual(darkTop.height, lightTop.height)
+        let lightThumb = try XCTUnwrap(TileStore.loadImage(at: library.thumbnailURL(for: moved)))
+        let darkThumb = try XCTUnwrap(TileStore.loadImage(at: library.darkThumbnailURL(for: moved)))
+        XCTAssertEqual(darkThumb.width, lightThumb.width)
+        XCTAssertEqual(darkThumb.height, lightThumb.height)
+        XCTAssertTrue(fm.fileExists(atPath: library.darkProfileURL(for: moved).path))
 
         // "Full Image": the photo itself becomes the base raster again.
         let fullCorners = PhotoQuad.full(CGSize(width: adjust.image.width, height: adjust.image.height))

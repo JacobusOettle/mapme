@@ -56,17 +56,46 @@ enum LocationColor: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// How the map raster is drawn.
+enum MapAppearance: String, Codable, CaseIterable, Identifiable {
+    /// Redrawn dark by the core (`DarkStyle`): dark paper, light ink, every feature keeps its colour.
+    case dark
+    /// As printed.
+    case paper
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .dark: return "Dark"
+        case .paper: return "Paper"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .dark: return "moon.fill"
+        case .paper: return "map"
+        }
+    }
+}
+
 /// User preferences, persisted in UserDefaults.
 @Observable
 final class AppSettings {
     private let defaults: UserDefaults
+    /// Off during `init`, and for the whole run when a launch argument overrides the appearance
+    /// (the override lasts for this run only and never replaces the stored choice).
+    @ObservationIgnored private var persistsMapAppearance = false
 
     var units: DistanceUnits = .metric { didSet { defaults.set(units.rawValue, forKey: "units") } }
     var coordinateFormat: CoordinateFormat = .decimal { didSet { defaults.set(coordinateFormat.rawValue, forKey: "coordinateFormat") } }
     /// How a map opens: following you north up, or following with your heading (map turns as you turn).
     var orientationMode: MapOrientationMode = .northUp { didSet { defaults.set(orientationMode.rawValue, forKey: "orientationMode") } }
-    /// Show the map with a dark (night) filter.
-    var nightMap: Bool = false { didSet { defaults.set(nightMap, forKey: "nightMap") } }
+    /// Dark (the default) or as printed. The old "nightMap" switch is ignored: maps are dark now.
+    var mapAppearance: MapAppearance = .dark {
+        didSet { if persistsMapAppearance { defaults.set(mapAppearance.rawValue, forKey: "mapAppearance") } }
+    }
     var keepScreenOn: Bool = true { didSet { defaults.set(keepScreenOn, forKey: "keepScreenOn") } }
     var showTrack: Bool = true { didSet { defaults.set(showTrack, forKey: "showTrack") } }
     var showPOIs: Bool = true { didSet { defaults.set(showPOIs, forKey: "showPOIs") } }
@@ -81,7 +110,9 @@ final class AppSettings {
     /// How far from you a map may be when locating it from contours.
     var searchRadiusKm: Double = 20 { didSet { defaults.set(searchRadiusKm, forKey: "searchRadiusKm") } }
 
-    init(defaults: UserDefaults = .standard) {
+    /// - Parameter arguments: launch arguments; `-mapAppearance dark|paper` overrides the stored
+    ///   appearance for this run without saving it (UI tests and screenshots).
+    init(defaults: UserDefaults = .standard, arguments: [String] = ProcessInfo.processInfo.arguments) {
         self.defaults = defaults
         if let v = defaults.string(forKey: "units").flatMap(DistanceUnits.init(rawValue:)) { units = v }
         if let v = defaults.string(forKey: "coordinateFormat").flatMap(CoordinateFormat.init(rawValue:)) { coordinateFormat = v }
@@ -89,7 +120,12 @@ final class AppSettings {
             // "Free rotate" is now the separate "Allow map rotation" switch (on by default).
             orientationMode = v == .free ? .northUp : v
         }
-        if let v = defaults.object(forKey: "nightMap") as? Bool { nightMap = v }
+        if let v = defaults.string(forKey: "mapAppearance").flatMap(MapAppearance.init(rawValue:)) { mapAppearance = v }
+        if let v = Self.launchValue("-mapAppearance", in: arguments).flatMap(MapAppearance.init(rawValue:)) {
+            mapAppearance = v
+        } else {
+            persistsMapAppearance = true
+        }
         if let v = defaults.object(forKey: "keepScreenOn") as? Bool { keepScreenOn = v }
         if let v = defaults.object(forKey: "showTrack") as? Bool { showTrack = v }
         if let v = defaults.object(forKey: "showPOIs") as? Bool { showPOIs = v }
@@ -98,5 +134,11 @@ final class AppSettings {
         if let v = defaults.object(forKey: "allowMapRotation") as? Bool { allowMapRotation = v }
         if let v = defaults.object(forKey: "useOpenStreetMap") as? Bool { useOpenStreetMap = v }
         if let v = defaults.object(forKey: "searchRadiusKm") as? Double { searchRadiusKm = v }
+    }
+
+    /// The value after `flag` in launch arguments (`-flag value`), if any.
+    static func launchValue(_ flag: String, in arguments: [String]) -> String? {
+        guard let i = arguments.firstIndex(of: flag), i + 1 < arguments.count else { return nil }
+        return arguments[i + 1]
     }
 }

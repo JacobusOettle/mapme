@@ -61,7 +61,8 @@ struct PDFRenderPlan: Equatable {
     var dpi: Double { 72 * Double(scale) }
 }
 
-/// Turns a PDF/image into a stored MapDocument + tile pyramid + thumbnail.
+/// Turns a PDF/image into a stored MapDocument + tile pyramid + thumbnail (then renders the dark
+/// tiles and dark thumbnail in the background: `DarkPrerender`).
 final class MapImporter {
     let library: MapLibrary
 
@@ -209,6 +210,8 @@ final class MapImporter {
             progress(0.95, "Saving…")
             let saved = document
             await MainActor.run { library.save(saved) }
+            // Dark tiles and thumbnail in the background, so the first dark view is instant.
+            DarkPrerender.start(saved, library: library)
             progress(1, "Imported")
             return ImportedMap(document: saved, baseImage: image)
         } catch {
@@ -349,10 +352,14 @@ final class MapImporter {
 
         let tileSize = document.tileSize
         let tilesURL = library.tilesDirectory(for: document, dark: false)
-        let darkURL = library.tilesDirectory(for: document, dark: true)
         let stagingURL = folder.appendingPathComponent("tiles-staging", isDirectory: true)
         let thumbURL = library.thumbnailURL(for: document)
         let flatURL = folder.appendingPathComponent(Self.flattenedFileName)
+        // Everything drawn from the old page: dark tiles (current and legacy), profile, dark thumbnail.
+        let staleDarkFiles = [library.tilesDirectory(for: document, dark: true), library.legacyDarkTilesDirectory(for: document),
+                              library.darkProfileURL(for: document), library.darkThumbnailURL(for: document)]
+        // A dark render of the old page must not write into the new page's folders.
+        await DarkPrerender.cancelAndWait(map.id)
         progress(0.3, "Building tiles…")
         let levels = try await Task.detached(priority: .userInitiated) { () throws -> Int in
             let fm = FileManager.default
@@ -367,7 +374,9 @@ final class MapImporter {
                 try? fm.removeItem(at: flatURL)
             }
             try? fm.removeItem(at: tilesURL)
-            try? fm.removeItem(at: darkURL)
+            for url in staleDarkFiles {
+                try? fm.removeItem(at: url)
+            }
             try fm.moveItem(at: stagingURL, to: tilesURL)
             try MapImporter.writeThumbnail(of: image, to: thumbURL)
             return count
@@ -377,6 +386,7 @@ final class MapImporter {
         progress(0.95, "Saving…")
         let saved = document
         await MainActor.run { library.save(saved) }
+        DarkPrerender.start(saved, library: library)
         progress(1, "Flattened")
         return ImportedMap(document: saved, baseImage: image)
     }

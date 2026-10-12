@@ -32,7 +32,11 @@ enum Theme {
     static let uiMapBackground = UIColor(red: 0.110, green: 0.110, blue: 0.118, alpha: 1)
     /// Paper shown under tiles that are still loading.
     static let uiPaper = UIColor(red: 0.96, green: 0.95, blue: 0.92, alpha: 1)
+    /// Paper of the dark map (#212124): the core's dark tiles turn paper into exactly this colour
+    /// (docs/ARCHITECTURE.md, "Dark map"), so keep the two in step.
     static let uiNightPaper = UIColor(red: 0.13, green: 0.13, blue: 0.14, alpha: 1)
+    /// Around the dark sheet: near-black, so the sheet's edge stays visible.
+    static let uiDarkMapSurround = UIColor(red: 0.035, green: 0.035, blue: 0.04, alpha: 1)
     static let uiPOI = UIColor(red: 1.0, green: 0.85, blue: 0.30, alpha: 1)
 
     static let corner: CGFloat = 16

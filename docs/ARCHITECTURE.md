@@ -459,7 +459,8 @@ scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
 * `App/` has `MapMeApp` (entry, `onOpenURL` import) and `AppModel` (root
   `@Observable` state: library, settings, location, track recorder).
 * `Core/` has `MapMeCore.swift`, a thin Swift wrapper over the C ABI
-  (`GeorefSession`, `fitControlPoints`), plus `CoreTypes.swift` with Codable
+  (`GeorefSession`, `fitControlPoints`, `detectPage`, `darkProfile` and the
+  thread-safe `DarkStyle`), plus `CoreTypes.swift` with Codable
   request/response types.
 * `Geo/` has `Geo.swift`: `LatLon`, `WebMercator`, `Homography` math,
   distance/bearing, coordinate formatting (DD, DMS, UTM).
@@ -491,7 +492,13 @@ scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
 
 Map files live in `Application Support/Maps/<uuid>/` as `meta.json`, the original
 source, `tiles/{level}/{col}_{row}.jpg` (512 px tiles, level 0 = full
-resolution) and `thumb.jpg`.
+resolution) and `thumb.jpg`. The dark map adds `dark-profile.json` (the core's
+profile of the map, from the largest pyramid level ≤ 2048 px stitched into one
+raster), `tiles-dark-v2/` (each light tile drawn by `DarkStyle` with its
+normalised rectangle `u0 = col·512·2^level / width`, `du = tile width·2^level /
+width`, likewise v; made on first view and by `DarkPrerender` at utility
+priority after an import or a new flattening) and `thumb-dark.jpg` for the
+library card.
 
 ## Performance budget
 

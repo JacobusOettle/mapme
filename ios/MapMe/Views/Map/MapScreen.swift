@@ -272,7 +272,7 @@ private struct LiveMapCanvas: View {
         MapCanvasView(
             map: map,
             tileStore: tileStore,
-            nightMode: settings.nightMap,
+            darkMap: settings.mapAppearance == .dark,
             userLocation: location.location,
             heading: location.headingDegrees,
             track: settings.showTrack ? model.tracks.current.points : [],

@@ -161,6 +161,7 @@ final class AppModel {
                 // Tiles and thumbnail changed on disk under the same names.
                 TileStore(map: imported.document, library: self.library).purgeMemory()
                 MapThumbnailCache.shared.invalidate(self.library.thumbnailURL(for: imported.document))
+                MapThumbnailCache.shared.invalidate(self.library.darkThumbnailURL(for: imported.document))
                 guard !Task.isCancelled, self.importJob?.id == jobID else { return }
                 await self.locate(map: imported.document, image: imported.baseImage)
             } catch is CancellationError {

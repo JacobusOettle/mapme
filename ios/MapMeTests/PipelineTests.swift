@@ -219,14 +219,19 @@ final class PipelineTests: XCTestCase {
         }
         XCTAssertNil(store.tile(level: 3, col: 0, row: 0, dark: false))
 
-        // Night tile: generated on first use, cached on disk, paper turns near-black.
+        // Dark tile: drawn by the core on first use and cached in tiles-dark-v2; paper becomes the
+        // night paper (#212124).
         let dark = try XCTUnwrap(store.tile(level: 0, col: 0, row: 0, dark: true))
         XCTAssertEqual(dark.width, 512)
         XCTAssertEqual(dark.height, 512)
         let darkFile = TileStore.tileURL(in: library.tilesDirectory(for: doc, dark: true), level: 0, col: 0, row: 0)
+        XCTAssertTrue(darkFile.path.contains("/tiles-dark-v2/"), darkFile.path)
         XCTAssertTrue(FileManager.default.fileExists(atPath: darkFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: library.darkProfileURL(for: doc).path))
         let px = try XCTUnwrap(RGBAPixels(dark)).rgb(5, 5)
-        XCTAssertLessThan(Int(px.r) + Int(px.g) + Int(px.b), 120, "paper should be dark: \(px)")
+        XCTAssertEqual(Double(px.r), 33, accuracy: 4, "paper should be the night paper: \(px)")
+        XCTAssertEqual(Double(px.g), 33, accuracy: 4, "paper should be the night paper: \(px)")
+        XCTAssertEqual(Double(px.b), 36, accuracy: 4, "paper should be the night paper: \(px)")
         let light = try XCTUnwrap(RGBAPixels(try XCTUnwrap(store.tile(level: 0, col: 0, row: 0, dark: false)))).rgb(5, 5)
         XCTAssertGreaterThan(Int(light.r) + Int(light.g) + Int(light.b), 700)
         store.purgeMemory()

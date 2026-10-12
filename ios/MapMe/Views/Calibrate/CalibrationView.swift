@@ -114,7 +114,10 @@ struct CalibrationView: View {
         ZStack(alignment: .topLeading) {
             Theme.surface
             if let tileStore {
-                MapCanvasView(map: map, tileStore: tileStore, markers: canvasMarkers(map),
+                // Picking the contour colour shows the paper as printed: that colour is what is sampled.
+                MapCanvasView(map: map, tileStore: tileStore,
+                              darkMap: model.settings.mapAppearance == .dark && mode != .pickColour,
+                              markers: canvasMarkers(map),
                               follow: .constant(false),
                               onTap: { pixel in handleMapTap(pixel, map: map) })
             } else {

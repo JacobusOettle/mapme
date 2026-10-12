@@ -64,9 +64,14 @@ final class MapThumbnailCache {
     /// Forget a thumbnail whose file was rewritten (a photo map flattened again).
     func invalidate(_ url: URL) { cache.removeObject(forKey: url as NSURL) }
 
-    func load(_ url: URL) async -> UIImage? {
+    /// Loads the thumbnail at `url`. When the file does not exist yet, `make` (if given) runs first,
+    /// off the main thread, to create it (dark thumbnails of maps imported before dark maps).
+    func load(_ url: URL, make: (() -> Void)? = nil) async -> UIImage? {
         if let hit = cached(url) { return hit }
         let image = await Task.detached(priority: .utility) { () -> UIImage? in
+            if let make, !FileManager.default.fileExists(atPath: url.path) {
+                make()
+            }
             guard let data = try? Data(contentsOf: url), let image = UIImage(data: data) else { return nil }
             return image.preparingForDisplay() ?? image
         }.value
@@ -77,9 +82,13 @@ final class MapThumbnailCache {
 
 struct MapCardView: View {
     let map: MapDocument
+    /// `thumb.jpg`, or `thumb-dark.jpg` when maps are shown dark.
     let thumbnailURL: URL
     let proximity: MapProximity
     let units: DistanceUnits
+    /// Creates the thumbnail file when it is missing (the dark one of an older map). Runs off the
+    /// main thread.
+    var makeThumbnail: (() -> Void)? = nil
 
     @State private var thumbnail: UIImage?
 
@@ -134,7 +143,7 @@ struct MapCardView: View {
         .shadow(color: proximity.isOnMap ? Theme.userRed.opacity(0.3) : Color.clear, radius: 14, y: 4)
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .task(id: thumbnailKey) {
-            thumbnail = await MapThumbnailCache.shared.load(thumbnailURL)
+            thumbnail = await MapThumbnailCache.shared.load(thumbnailURL, make: makeThumbnail)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(map.name), \(MapStatus.text(for: map)), \(proximityText ?? "")")

@@ -70,6 +70,15 @@ private struct SettingsDisplaySection: View {
     var body: some View {
         @Bindable var settings = model.settings
         Section {
+            Picker(selection: $settings.mapAppearance) {
+                ForEach(MapAppearance.allCases) { appearance in
+                    Label(appearance.label, systemImage: appearance.symbolName).tag(appearance)
+                }
+            } label: {
+                SettingsLabel("Map appearance", symbol: "circle.lefthalf.filled", color: .purple)
+            }
+            .accessibilityIdentifier("mapAppearancePicker")
+
             Picker(selection: $settings.units) {
                 ForEach(DistanceUnits.allCases) { u in
                     Text(Self.unitsLabel(u)).tag(u)
@@ -100,9 +109,6 @@ private struct SettingsDisplaySection: View {
 
             LocationColorRow()
 
-            Toggle(isOn: $settings.nightMap) {
-                SettingsLabel("Night map", symbol: "moon.stars.fill", color: .purple)
-            }
             Toggle(isOn: $settings.keepScreenOn) {
                 SettingsLabel("Keep screen awake", symbol: "sun.max.fill", color: .yellow)
             }
@@ -115,7 +121,10 @@ private struct SettingsDisplaySection: View {
         } header: {
             Text("Display")
         } footer: {
-            SettingsCoordinatePreview()
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Dark redraws your map for the screen: dark paper, light ink, every colour kept. Paper shows it as printed.")
+                SettingsCoordinatePreview()
+            }
         }
     }
 
@@ -177,7 +186,7 @@ private struct SettingsCoordinatePreview: View {
             Text("Your position: " + GeoFormat.coordinate(LatLon(fix.coordinate), format: model.settings.coordinateFormat))
                 .monospacedDigit()
         } else {
-            Text("Night map dims the paper for use in the dark. Heading up opens maps following your heading, so the map turns as you turn.")
+            Text("Heading up opens maps following your heading, so the map turns as you turn.")
         }
     }
 }

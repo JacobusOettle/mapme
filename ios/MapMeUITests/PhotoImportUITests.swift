@@ -5,7 +5,7 @@ import XCTest
 /// folded in four, which Debug builds bundle as SamplePhoto.jpg), shows "Adjust Corners" with the
 /// detected sheet (in the simulator Vision often sees only the whole frame; the core's page finder
 /// supplies the outline), flattens and locates it (OCR, then contours against terrain downloaded
-/// over the network near the mocked GPS fix, which is inside the sheet) and opens it.
+/// over the network near the mocked GPS fix, which is inside the sheet) and opens it, drawn dark.
 final class PhotoImportUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = true
@@ -61,7 +61,15 @@ final class PhotoImportUITests: XCTestCase {
         _ = app.buttons["trackingButton"].waitForExistence(timeout: 20)
         // Let the tiles load and the puck glide in.
         Thread.sleep(forTimeInterval: 4)
-        attachScreenshot(app, "06-photo-map")
+        let map = app.screenshot()
+        let attachment = XCTAttachment(screenshot: map)
+        attachment.name = "06-photo-map"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        // The photo is shown dark too (the default): its paper, shadows and table tint flattened.
+        if let brightness = mapBandBrightness(map) {
+            XCTAssertLessThan(brightness, 0.35, "The photo map should be dark (brightness \(brightness))")
+        }
     }
 
     // MARK: - Helpers

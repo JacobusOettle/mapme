@@ -18,6 +18,11 @@ ready for Android.
   sheet is found on the table, flattened from its corners and located in photo
   mode (lighting normalised, full perspective fit, plus a smooth correction for
   folded or curled paper).
+* **Dark map by default**: the paper map itself is redrawn for the screen by
+  the core, not colour-inverted: lighting, shadows and paper tint are
+  flattened, lightness is inverted in OKLab and every feature keeps its colour
+  (tan contours, blue streams, red routes, light grey print on #212124 paper).
+  Settings → Map appearance → Paper shows it as printed.
 * **Dotted trail** of where you walked (GPX export), **nearby points of
   interest** from the map's own labels plus OpenStreetMap, with distance and
   direction.
@@ -26,11 +31,12 @@ ready for Android.
 
 ## Screenshots
 
-The Grootkloof PDF in the iPhone simulator with a simulated walk: located from
-its grid labels (±1 m), your position puck with its heading beam, the dotted
-trail you walked, Apple Maps-style controls and the stats card. The last row is
-a real phone *photo* of the printed sheet, folded in four and lying on a wooden
-table, going through the corner editor and photo mode. Every push refreshes
+The Grootkloof PDF in the iPhone simulator with a simulated walk, drawn dark
+(the default): located from its grid labels (±1 m), your position puck with
+its heading beam, the dotted trail you walked, Apple Maps-style controls and the
+stats card. The second row ends with a real phone *photo* of the printed sheet,
+folded in four and lying on a wooden table, going through the corner editor and
+photo mode; the last row has the paper appearance and the library. Every push refreshes
 these on the
 [`ci-screenshots`](https://github.com/JacobusOettle/mapme/tree/ci-screenshots)
 branch (with the IPA of that build).
@@ -42,6 +48,10 @@ branch (with the IPA of that build).
 | Nearby | Photo: adjust corners | Photo: located |
 |---|---|---|
 | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshots__04-nearby_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/PhotoImportUITests.testPhotoOfPaperMap__05-photo-corners_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/PhotoImportUITests.testPhotoOfPaperMap__06-photo-map_0.png" width="240"> |
+
+| Paper appearance | Library |
+|---|---|
+| <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testMapScreenshotsPaper__01b-map-paper_0.png" width="240"> | <img src="https://github.com/JacobusOettle/mapme/raw/ci-screenshots/ScreenshotTests.testLibraryAppears__00-library_0.png" width="240"> |
 
 ## Install on your iPhone
 

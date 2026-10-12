@@ -106,6 +106,31 @@ enum MapMeCore {
         return decodePageDetection(json, width: width, height: height)
     }
 
+    /// The dark-map profile of a whole map (`mm_dark_profile`): paper white per cell, darkest ink,
+    /// paper noise and chroma gain, as the JSON the app stores in the map folder
+    /// (`dark-profile.json`) and hands to `DarkStyle`. `rgba` is an overview of the WHOLE map
+    /// (long side 256…2048 px), 8-bit RGBA (alpha ignored), rows `bytesPerRow` apart; the core
+    /// copies nothing it keeps. Nil when the core reports `"status":"failed"` or the input is
+    /// invalid. Blocking: call off the main thread.
+    static func darkProfile(rgba: UnsafeRawBufferPointer, width: Int, height: Int, bytesPerRow: Int) -> String? {
+        guard let base = rgba.baseAddress?.assumingMemoryBound(to: UInt8.self),
+              width > 0, height > 0, bytesPerRow >= width * 4, rgba.count >= bytesPerRow * height,
+              width <= Int(UInt32.max), height <= Int(UInt32.max), bytesPerRow <= Int(UInt32.max)
+        else { return nil }
+        guard let res = mm_dark_profile(base, UInt32(width), UInt32(height), UInt32(bytesPerRow)) else { return nil }
+        defer { mm_string_free(res) }
+        let json = String(cString: res)
+        return isOKStatus(json) ? json : nil
+    }
+
+    /// True for a JSON object whose `"status"` is `"ok"`.
+    static func isOKStatus(_ json: String) -> Bool {
+        guard let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return object["status"] as? String == "ok"
+    }
+
     /// Parse `mm_detect_page`'s answer for a `width` × `height` raster. Nil for
     /// `{"status":"failed",...}` and for anything malformed (not four finite corners).
     static func decodePageDetection(_ json: String, width: Int, height: Int) -> PageDetection? {
@@ -125,6 +150,42 @@ enum MapMeCore {
             coverage = imageArea > 0 ? PageDetection.shoelaceArea(quad) / imageArea : 0
         }
         return PageDetection(quad: quad, confidence: confidence, coverage: coverage)
+    }
+}
+
+/// A map's dark style (`mm_dark_style_new`, see docs/ARCHITECTURE.md "Dark map"): paper becomes
+/// the night paper (`Theme.uiNightPaper`), ink light, and every feature keeps its hue.
+///
+/// `@unchecked Sendable`: the Rust style is immutable once built (its colour lookup table is
+/// precomputed in `mm_dark_style_new`) and documented thread-safe, so any number of threads
+/// (CATiledLayer's drawing threads, the background pre-renderer) may call `render` at once; the
+/// handle itself never changes and is freed only in `deinit`.
+final class DarkStyle: @unchecked Sendable {
+    private let handle: OpaquePointer
+
+    /// Nil when `profileJSON` is not a valid profile (as made by `MapMeCore.darkProfile`).
+    init?(profileJSON: String) {
+        let made: OpaquePointer? = profileJSON.withCString { mm_dark_style_new($0) }
+        guard let made else { return nil }
+        handle = made
+    }
+
+    deinit { mm_dark_style_free(handle) }
+
+    /// Render a tile of the map dark, in place: `buffer` holds `width` × `height` 8-bit RGBA
+    /// pixels (alpha untouched), rows `bytesPerRow` apart. The tile covers the map's normalised
+    /// rectangle [u0, u0 + du] × [v0, v0 + dv] (fractions of the full map's width and height, so
+    /// the paper flattening lines up across tiles and pyramid levels). False for invalid input.
+    @discardableResult
+    func render(_ buffer: UnsafeMutableRawBufferPointer, width: Int, height: Int, bytesPerRow: Int,
+                u0: Double, v0: Double, du: Double, dv: Double) -> Bool {
+        guard let base = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self),
+              width > 0, height > 0, bytesPerRow >= width * 4, buffer.count >= bytesPerRow * height,
+              width <= Int(UInt32.max), height <= Int(UInt32.max), bytesPerRow <= Int(UInt32.max),
+              u0.isFinite, v0.isFinite, du.isFinite, dv.isFinite, du > 0, dv > 0
+        else { return false }
+        let status = mm_dark_render(handle, base, UInt32(width), UInt32(height), UInt32(bytesPerRow), u0, v0, du, dv)
+        return status == 0
     }
 }
 
