@@ -15,14 +15,16 @@ enum FixtureError: Error, CustomStringConvertible {
     }
 }
 
-/// fixtures/grootkloof, copied into the test bundle as the folder "grootkloof".
+/// fixtures/grootkloof, copied into the test bundle as the folder "grootkloof" (the other sheets
+/// of the series, fixtures/castle-gorge and fixtures/mhlabatini, are copied the same way).
 enum Fixtures {
     /// Grootkloof map centre (from the core tests).
     static let center = LatLon(lat: -25.8499, lon: 27.4000)
 
-    static func directory() throws -> URL {
-        guard let url = Bundle(for: FixtureBundleToken.self).url(forResource: "grootkloof", withExtension: nil) else {
-            throw FixtureError.missing("grootkloof folder in the test bundle")
+    /// The fixture folder `folder` of fixtures/ in the test bundle (ios/project.yml lists them).
+    static func directory(_ folder: String = "grootkloof") throws -> URL {
+        guard let url = Bundle(for: FixtureBundleToken.self).url(forResource: folder, withExtension: nil) else {
+            throw FixtureError.missing("\(folder) folder in the test bundle")
         }
         return url
     }
@@ -72,11 +74,17 @@ enum Fixtures {
     /// layout) and never touches the network: tiles the fixtures lack come back as unavailable, so
     /// the core is told they are missing, as `georeference(_:_:)` does.
     static func offlineDEMService() throws -> DEMService {
+        try offlineDEMService(tilesIn: directory().appendingPathComponent("dem"))
+    }
+
+    /// `offlineDEMService()` with the tiles of `source` (a fixture's dem/ folder of
+    /// {z}_{x}_{y}.png); nil serves none, as on a phone that is offline and has no terrain cached.
+    static func offlineDEMService(tilesIn source: URL?) throws -> DEMService {
         let cache = try makeTemporaryDirectory("dem-fixtures-\(UUID().uuidString)")
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [NotFoundURLProtocol.self]
         let service = DEMService(cacheDirectory: cache, session: URLSession(configuration: config))
-        let source = try directory().appendingPathComponent("dem")
+        guard let source else { return service }
         let fm = FileManager.default
         for name in try fm.contentsOfDirectory(atPath: source.path) where name.hasSuffix(".png") {
             let parts = name.dropLast(4).split(separator: "_")
@@ -103,6 +111,9 @@ enum Fixtures {
         return response
     }
 }
+
+/// The ground truth of any sheet of the series (fixtures/<sheet>/truth.json, Grootkloof's schema).
+typealias SheetTruth = GrootkloofTruth
 
 /// Ground truth of the Grootkloof sheet: least-squares affine through the measured graticule
 /// (map.jpg pixels, 3507×4960 at 300 dpi → Web Mercator).
@@ -135,7 +146,12 @@ struct GrootkloofTruth {
     var frame: [Double]
 
     static func load() throws -> GrootkloofTruth {
-        let file = try JSONDecoder().decode(File.self, from: Data(contentsOf: Fixtures.url("truth.json")))
+        try load(from: Fixtures.url("truth.json"))
+    }
+
+    /// The truth.json at `url` (the same schema for every sheet of the series).
+    static func load(from url: URL) throws -> GrootkloofTruth {
+        let file = try JSONDecoder().decode(File.self, from: Data(contentsOf: url))
         var src: [SIMD2<Double>] = []
         var dst: [SIMD2<Double>] = []
         for la in file.latLines {

@@ -61,3 +61,11 @@ python ../tools/fetch_dem.py dem --box 11 -26.1443 26.9818 -25.5134 28.1894 --bo
 labels (GPS 60 km away, no DEM), contours with the GPS at the centre (-25.8288, 27.3311), 10 km
 off it (-25.8926, 27.2605) and 60 km east (-25.8288, 27.9299). Errors are measured at the
 truth.json graticule intersections.
+
+`ios/MapMeTests/SheetE2ETests.swift` (CI, iOS simulator): the app's own pipeline on the PDF, as a user
+imports it: the importer's 300 dpi render, Apple Vision (`OCRService`), then `GeoreferenceService` with
+the GPS in Pretoria (-25.75, 28.19; 86 km from the centre) and no terrain at all, and with the GPS at the
+centre and these tiles. Vision's observations are attached to the results as
+`mhlabatini-vision-ocr.json` in this folder's `ocr.json` format (render pixels, which are map.jpg pixels), next
+to the responses, the POIs as the Nearby list shows them and `mhlabatini-summary.json` (labels read, outcome,
+errors at the truth.json graticule intersections). Recorded, not asserted, until the app handles the sheet.

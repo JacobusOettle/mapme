@@ -107,6 +107,12 @@ targets:
       - path: ../fixtures/grootkloof
         type: folder
         buildPhase: resources
+      - path: ../fixtures/castle-gorge
+        type: folder
+        buildPhase: resources
+      - path: ../fixtures/mhlabatini
+        type: folder
+        buildPhase: resources
     dependencies:
       - target: MapMe
     settings:
