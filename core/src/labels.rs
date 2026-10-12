@@ -1241,15 +1241,16 @@ impl Vocabulary {
         words_of(text).iter().filter(|w| w.chars().count() >= 2 && self.known(w)).map(|w| w.chars().count()).sum()
     }
 
-    /// The one known word on the sheet that `stem` (lowercase, cut short by the OCR) is the start
-    /// of, one to three letters short: "gul" → "gully" when "WOODY GULLY" is on the sheet. None
-    /// when no such word or several are.
+    /// The one lexicon word on the sheet that `stem` (lowercase, cut short by the OCR) is the
+    /// start of, one to three letters short: "gul" → "gully" when "WOODY GULLY" is on the sheet.
+    /// None when no such word or several are. A name read twice completes nothing: "RAND" (of
+    /// "RAND WATER BOX 1" and "2") is no end of "LIGHTNING RA…" ("LIGHTNING RAVINE").
     fn completion(&self, stem: &str) -> Option<&str> {
         let stem = fold_accents(stem);
         let n = stem.chars().count();
         let mut found = self.counts.keys().filter(|w| {
             let m = w.chars().count();
-            m > n && m <= n + 3 && w.starts_with(&stem) && self.known(w)
+            m > n && m <= n + 3 && w.starts_with(&stem) && lexicon_word(w)
         });
         let first = found.next()?;
         found.next().is_none().then_some(first.as_str())
@@ -1275,16 +1276,18 @@ fn fold_accents(w: &str) -> String {
 }
 
 /// Letters that start words (lowercase): any two with a vowel, or two consonants of this list
-/// (English, Afrikaans, Nguni and other European spellings). A word starting otherwise ("WC",
+/// (English, Afrikaans, Nguni, Sotho-Tswana, Welsh, Norse, Slavic and other European spellings:
+/// "FFOREST FAWR", "MTHATHA", "KGALAGADI", "KJERAG", "ZLÍN"). A word starting otherwise ("WC",
 /// "KD") has a stray glyph in front.
 fn plausible_onset(a: char, b: char) -> bool {
     const ONSETS: &[&str] = &[
-        "bh", "bj", "bl", "br", "ch", "cl", "cr", "cz", "dh", "dj", "dl", "dn", "dr", "dw", "dz", "fj", "fl", "fr",
-        "gb", "gd", "gh", "gl", "gn", "gq", "gr", "gw", "gx", "hl", "hr", "hw", "kh", "kl", "kn", "kp", "kr", "ks",
-        "kw", "lh", "lj", "ll", "mb", "mc", "mf", "mh", "ml", "mn", "mp", "ms", "mv", "mz", "nc", "nd", "ng", "nh",
-        "nj", "nk", "nq", "ns", "nt", "nx", "ny", "nz", "pf", "ph", "pl", "pn", "pr", "ps", "pt", "qh", "rh", "sc",
-        "sh", "sj", "sk", "sl", "sm", "sn", "sp", "sq", "st", "sv", "sw", "sz", "tb", "th", "tj", "tl", "tr", "ts",
-        "tw", "tz", "vl", "vr", "wh", "wr", "xh", "zh", "zv", "zw",
+        "bh", "bj", "bl", "br", "ch", "cl", "cr", "cz", "dh", "dj", "dl", "dn", "dr", "dv", "dw", "dz", "ff", "fj",
+        "fl", "fr", "gb", "gc", "gd", "gh", "gj", "gl", "gn", "gq", "gr", "gs", "gw", "gx", "hj", "hl", "hr", "hv",
+        "hw", "kg", "kh", "kj", "kl", "kn", "kp", "kr", "ks", "kv", "kw", "lh", "lj", "ll", "mb", "mc", "mf", "mg",
+        "mh", "mk", "ml", "mm", "mn", "mp", "mq", "ms", "mt", "mv", "mz", "nc", "nd", "ng", "nh", "nj", "nk", "nq",
+        "ns", "nt", "nx", "ny", "nz", "pf", "ph", "pl", "pn", "pr", "ps", "pt", "qh", "rh", "sc", "sh", "sj", "sk",
+        "sl", "sm", "sn", "sp", "sq", "st", "sv", "sw", "sz", "tb", "th", "tj", "tl", "tr", "ts", "tv", "tw", "tx",
+        "tz", "vl", "vr", "vs", "wh", "wr", "xh", "zb", "zd", "zh", "zl", "zn", "zv", "zw",
     ];
     let vowel = |c: char| "aeiouyàáâäèéêëìíîïòóôöùúûü".contains(c);
     vowel(a) || vowel(b) || !a.is_alphabetic() || !b.is_alphabetic() || ONSETS.iter().any(|o| *o == format!("{a}{b}"))
@@ -1624,13 +1627,14 @@ fn verdict(o: &OcrObservation, furniture: bool, th: f64) -> Verdict {
         return Verdict::Furniture;
     }
     let (x, y) = o.center();
-    // A height, or one with its triangle read as a letter beside it ("1501 A").
+    // A height, or one with its triangle read beside it ("1501 A", "▲ 1720"); an "A" in front is
+    // a road's ("A 470").
     let height = parse_height(text).map(|h| (h, text.to_string())).or_else(|| {
         let t: Vec<&str> = text.split_whitespace().collect();
-        let symbol = |s: &str| matches!(s, "A" | "^" | "Λ" | "Δ" | "△" | "▲");
+        let symbol = |s: &str| matches!(s, "^" | "Λ" | "Δ" | "△" | "▲");
         match t.as_slice() {
             [a, b] if symbol(a) => parse_height(b).map(|h| (h, b.to_string())),
-            [a, b] if symbol(b) => parse_height(a).map(|h| (h, a.to_string())),
+            [a, b] if symbol(b) || *b == "A" => parse_height(a).map(|h| (h, a.to_string())),
             _ => None,
         }
     });
@@ -1690,7 +1694,11 @@ fn verdict(o: &OcrObservation, furniture: bool, th: f64) -> Verdict {
     if words.iter().any(|w| META_WORDS.contains(&w.as_str())) {
         return Verdict::Furniture;
     }
-    if name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).all(generic_word) {
+    // A feature with its number is a place ("CAMP 2", "HUT 4"), not legend text ("Camp", "2 km").
+    let numbered =
+        name.split_whitespace().last().is_some_and(|t| t.len() <= 2 && t.chars().all(|c| c.is_ascii_digit()))
+            && words.iter().any(|w| w.chars().count() >= 3 && w.chars().all(char::is_alphabetic) && !is_measure(w));
+    if !numbered && name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).all(generic_word) {
         return Verdict::Furniture;
     }
     // Letters and digits run together in most words (two or more): an imprint read badly
@@ -1704,19 +1712,15 @@ fn verdict(o: &OcrObservation, furniture: bool, th: f64) -> Verdict {
     }
     let upright = o.bbox[3] >= 1.5 * o.bbox[2];
     if letters <= 3 {
-        // A short read with no vowel or no consonant is no word ("HHL", "Pws", "AAI"); three
-        // letters read up or down the map are a piece of a longer label printed along a
-        // stream or slope ("ERN", "ADE", "KLO").
+        // A short read with no vowel or no consonant is no word ("HHL", "Pws", "AAI"; "EYE" is,
+        // its Y a consonant); three letters read up or down the map are a piece of a longer label
+        // printed along a stream or slope ("ERN", "ADE", "KLO"). Four are a name as often ("ISAR",
+        // "TEES" along their rivers): `drop_garbled_turned` tells pieces ("ANTZ") by their neighbours.
         let vowel = |c: char| "aeiouyAEIOUY".contains(c);
         let alpha: Vec<char> = name.chars().filter(|c| c.is_alphabetic()).collect();
-        if !alpha.iter().any(|&c| vowel(c)) || alpha.iter().all(|&c| vowel(c)) || upright {
+        if !alpha.iter().any(|&c| vowel(c)) || alpha.iter().all(|&c| "aeiouAEIOU".contains(c)) || upright {
             return Verdict::Junk;
         }
-    }
-    // Four letters read up or down the map are a piece too ("ANTZ" of "ROOIKRANTZ GULLY"),
-    // unless they are a word ("CAVE", "POOL").
-    if letters == 4 && upright && words.len() == 1 && !lexicon_word(&words[0]) {
-        return Verdict::Junk;
     }
     // A lone abbreviation is no name ("KUMB." of a name the frame cuts).
     if words.len() == 1 && letters <= 4 && name.ends_with('.') && !lexicon_word(&words[0]) {
@@ -1796,19 +1800,33 @@ fn text_reads_across(o: &OcrObservation, text: &str) -> bool {
     o.bbox[2] >= o.bbox[3] * (0.3 * n).clamp(1.5, 4.0)
 }
 
+/// Words that take the name after them ("RIVER CAM", "RÍO PAS", "LOCH EIL", "ST LO"): a short
+/// word behind one is the name, not a word cut short.
+const NAME_AFTER: &[&str] = &[
+    "river", "rio", "lake", "loch", "lough", "llyn", "mount", "mt", "ben", "glen", "cape", "port", "fort", "isle",
+    "st", "saint", "san", "santa", "lac", "lago", "monte", "mont", "pic", "pico", "piz", "col", "punta", "cerro",
+    "sierra", "baie", "ile", "laguna", "riviere", "rivier", "kaap",
+];
+
+/// Lexicon words whose accented spelling is the right one, in French: kept as read.
+const ACCENTED_SPELLINGS: &[&str] = &["hôtel", "hôtels", "réserve", "réserves"];
+
 /// Mend a name Apple Vision read with a symbol or cut short, using the sheet's words
 /// (`Vocabulary`) as the dictionary:
 ///
-/// * a lexicon word read with an accent loses it ("GÁTE", "AČCOMMODATION");
-/// * a stray glyph glued in front goes: a digit before a word ("1KWAMI LODGE"), a lone letter
-///   before the words ("D LONG POOL": the pool's symbol), or a letter in front of a known word
-///   that cannot start a word ("WCASTLE GORGE WATERFALL": the waterfall's W; `plausible_onset`)
-///   or that another read of the label at the same place (`echoes`, their `fragment_key`s) is
-///   without ("PLONG POOL" over "LONG POOL");
-///   a letter glued behind a known word likewise ("FERN KLOOFI"; not an "s");
-/// * a last word cut short is completed when exactly one known word on the sheet starts with it,
-///   one to three letters longer ("EASY GUL" → "EASY GULLY" beside "WOODY GULLY", "CASCADE KL"
-///   → "CASCADE KLOOF").
+/// * a lexicon word read with an accent loses it ("GÁTE", "AČCOMMODATION"; not "HÔTEL",
+///   `ACCENTED_SPELLINGS`);
+/// * a stray glyph glued in front goes: a digit before a word ("1KWAMI LODGE"), a lone consonant
+///   before the words ("D LONG POOL": the pool's symbol; a vowel or a Y before a known word too,
+///   "O LONG POOL", else it is an article: "A CORUÑA", "Y GARN"), or a letter in front of a known
+///   word that cannot start a word ("WCASTLE GORGE WATERFALL": the waterfall's W;
+///   `plausible_onset`) or that another read of the label at the same place (`echoes`, their
+///   `fragment_key`s) is without ("PLONG POOL" over "LONG POOL"); a stroke glued behind a known
+///   word likewise ("FERN KLOOFI"; another letter makes another word: "RIVIERA", "MAINE",
+///   "HOOGE");
+/// * a last word cut short is completed when exactly one lexicon word on the sheet starts with
+///   it, one to three letters longer ("EASY GUL" → "EASY GULLY" beside "WOODY GULLY", "CASCADE
+///   KL" → "CASCADE KLOOF"), unless the word before it takes a name (`NAME_AFTER`: "RIVER CAM").
 pub(crate) fn mend_name(name: &str, vocab: &Vocabulary, echoes: &[Vec<char>]) -> String {
     // A lexicon word never has accents: one read with an accent is a speck on the paper
     // ("GÁTE", "AČCOMMODATION").
@@ -1817,7 +1835,11 @@ pub(crate) fn mend_name(name: &str, vocab: &Vocabulary, echoes: &[Vec<char>]) ->
         .map(|t| {
             let lower = t.to_lowercase();
             let plain = fold_accents(&lower);
-            if plain != lower && lexicon_word(&plain) && t.chars().all(char::is_alphabetic) {
+            if plain != lower
+                && lexicon_word(&plain)
+                && !ACCENTED_SPELLINGS.contains(&lower.as_str())
+                && t.chars().all(char::is_alphabetic)
+            {
                 if t.chars().all(|c| !c.is_lowercase()) {
                     plain.to_uppercase()
                 } else {
@@ -1833,6 +1855,7 @@ pub(crate) fn mend_name(name: &str, vocab: &Vocabulary, echoes: &[Vec<char>]) ->
     if toks.len() >= 2
         && toks[0].chars().count() == 1
         && alpha(&toks[0])
+        && (!"aeiouy".contains(fold_accents(&toks[0].to_lowercase()).as_str()) || vocab.known(&toks[1].to_lowercase()))
         && toks[1].chars().count() >= 2
         && toks[1..].iter().map(|t| letters(t)).sum::<usize>() >= 4
     {
@@ -1863,7 +1886,7 @@ pub(crate) fn mend_name(name: &str, vocab: &Vocabulary, echoes: &[Vec<char>]) ->
         let stem: String = c.iter().take(c.len().saturating_sub(1)).collect();
         if c.len() >= 5
             && alpha(&last)
-            && !c[c.len() - 1].eq_ignore_ascii_case(&'s')
+            && matches!(c[c.len() - 1], 'I' | 'l' | 'ı')
             && !vocab.known(&last.to_lowercase())
             && vocab.known(&stem.to_lowercase())
         {
@@ -1873,7 +1896,8 @@ pub(crate) fn mend_name(name: &str, vocab: &Vocabulary, echoes: &[Vec<char>]) ->
     if toks.len() >= 2 {
         let last = toks[toks.len() - 1].clone();
         let lower = last.to_lowercase();
-        if last.chars().count() >= 2 && alpha(&last) && !vocab.known(&lower) {
+        let named = NAME_AFTER.contains(&fold_accents(&toks[toks.len() - 2].to_lowercase()).trim_end_matches('.'));
+        if last.chars().count() >= 2 && alpha(&last) && !vocab.known(&lower) && !named {
             if let Some(w) = vocab.completion(&lower) {
                 let full = if last.chars().all(|c| !c.is_lowercase()) {
                     w.to_uppercase()
@@ -2006,8 +2030,13 @@ fn drop_fragments(merged: &[OcrObservation], verdicts: &mut [Verdict], vocab: &V
             }
             let edits = usize::from(ka.len() >= 5);
             if kb.len() == ka.len() {
-                // Same length: the same read spaced differently, or one letter read differently.
-                ka.iter().zip(kb).filter(|(p, q)| p != q).count() <= edits
+                // Same length: the same read spaced differently, or one letter read differently;
+                // names numbered apart in two places are two places ("RAND WATER BOX 1" over "2").
+                let diff: Vec<(&char, &char)> = ka.iter().zip(kb).filter(|(p, q)| p != q).collect();
+                let numbered = ka.iter().any(|c| c.is_alphabetic())
+                    && !diff.is_empty()
+                    && diff.iter().all(|(p, q)| p.is_ascii_digit() && q.is_ascii_digit());
+                diff.len() <= edits && !numbered
             } else {
                 approx_contains(kb, ka, edits)
             }
@@ -2023,9 +2052,12 @@ fn drop_fragments(merged: &[OcrObservation], verdicts: &mut [Verdict], vocab: &V
 /// A label printed up, down or slanting along a stream or a slope that Apple Vision reads in
 /// pieces that disagree ("ROOIKRI", "ANTZ" and "PHANL GULLI" for "ROOIKRANTZ GULLY"): a name read
 /// that way with no known word, whose box (widened by a quarter of the text height) meets another
-/// such read it shares no text with (no run of three characters), is a garbled piece; so is one
-/// such read of a single word that only says what the feature is ("GULLY" of "UPPER CASTLE
-/// GULLY"). Reads across the map are left alone: Vision reads those well.
+/// such read with no known word either, that it shares no text with (no run of three characters)
+/// and that runs on from it (the two boxes together about as long, corner to corner, as both;
+/// two names printed side by side along a border overlap instead: "KWAZULU-NATAL", "LESOTHO"), is
+/// a garbled piece; so is one such read of a single word that only says what the feature is
+/// ("GULLY" of "UPPER CASTLE GULLY", the "KLOOF" of "HLOBANE" "KLOOF"). Reads across the map are
+/// left alone: Vision reads those well.
 fn drop_garbled_turned(merged: &[OcrObservation], verdicts: &mut [Verdict], vocab: &Vocabulary, th: f64) {
     let keys: Vec<Vec<char>> = merged.iter().map(|o| fragment_key(&o.text)).collect();
     let turned: Vec<bool> = merged.iter().map(|o| !reads_across(o)).collect();
@@ -2048,13 +2080,18 @@ fn drop_garbled_turned(merged: &[OcrObservation], verdicts: &mut [Verdict], voca
             }
             let [x, y, w, h] = oa.bbox;
             let wide = [x - pad, y - pad, w + 2.0 * pad, h + 2.0 * pad];
+            let diagonal = |b: &[f64; 4]| b[2].hypot(b[3]);
             merged.iter().enumerate().any(|(b, ob)| {
+                let [bx, by, bw, bh] = ob.bbox;
+                let union = [x.min(bx), y.min(by), (x + w).max(bx + bw) - x.min(bx), (y + h).max(by + bh) - y.min(by)];
                 b != a
                     && turned[b]
                     && !matches!(verdicts[b], Verdict::Furniture)
                     && ob.text.chars().filter(|c| c.is_alphabetic()).count() >= 3
+                    && vocab.known_letters(&ob.text) == 0
                     && covered_by(&ob.bbox, &wide) > 0.0
                     && longest_common_run(&keys[a], &keys[b]) < 3
+                    && diagonal(&union) >= 0.8 * (diagonal(&oa.bbox) + diagonal(&ob.bbox))
             })
         })
         .collect();
@@ -2624,6 +2661,9 @@ mod tests {
         assert_eq!(mend_name("BRAND KOP", &vocab, &["randkop".chars().collect()]), "RAND KOP");
         assert_eq!(mend("WRAND KOP"), "WRAND KOP");
         assert_eq!(mend("XRAND KOP"), "RAND KOP");
+        // A vowel alone in front is an article, unless a known word follows (a pool's ring).
+        assert_eq!(mend("O RAND KOP"), "RAND KOP");
+        assert_eq!(mend("A CORUÑA"), "A CORUÑA");
         // Initials are no stray letters; nor is a word that is known itself.
         assert_eq!(mend("J G STRIJDOM DAM"), "J G STRIJDOM DAM");
         assert_eq!(mend("1ST RAND"), "1ST RAND");
@@ -2641,6 +2681,147 @@ mod tests {
         assert!(!distance_token("300m") && !distance_token("1523m") && !distance_token("km") && !distance_token("3"));
         let p = classify_pois(&[ob("WATERVAL HUT 2,3 km", 0.0, 0.0, 260.0, 24.0)]);
         assert_eq!(p[0].name, "WATERVAL HUT");
+    }
+
+    /// A label read across the map at (x, y): 24 px letters, 15 px a character.
+    fn across(text: &str, x: f64, y: f64) -> OcrObservation {
+        ob(text, x, y, 15.0 * text.chars().count() as f64, 24.0)
+    }
+
+    /// The names `classify_pois` finds among `labels` on a sheet of mountain spot heights (left
+    /// out of the answer).
+    fn sheet_names(labels: &[OcrObservation]) -> Vec<String> {
+        let mut obs = labels.to_vec();
+        for (k, h) in ["1416", "1754", "1556", "1471", "1533"].iter().enumerate() {
+            obs.push(ob(h, 3300.0, 300.0 + 300.0 * k as f64, 60.0, 24.0));
+        }
+        classify_pois(&obs).into_iter().filter(|p| p.x < 3200.0).map(|p| p.name).collect()
+    }
+
+    #[test]
+    fn names_of_other_regions_are_not_mended_into_lexicon_words() {
+        // Each label alone on its sheet: read well, nothing to mend.
+        for name in [
+            // Articles of one letter: Galician, Spanish, Welsh.
+            "A CORUÑA",
+            "O CEBREIRO",
+            "Y GARN",
+            "Y LLIWEDD",
+            // A lexicon word and a letter: real words, not a glyph glued behind.
+            "RIVIERA",
+            "MAINE",
+            "HOOGE",
+            "DE GROOTE",
+            "GROSSE POINTE",
+            "BIG ROCKY",
+            // Onsets of Welsh, Nguni, Sotho-Tswana and Norse names.
+            "FFOREST FAWR",
+            // Accents that are the spelling.
+            "HÔTEL DE VILLE",
+            "RÉSERVE NATURELLE",
+            // Names of other regions and languages.
+            "HLOBANE",
+            "TSITSIKAMMA",
+            "NGWENYA",
+            "UITKYK",
+            "YSTERVARK",
+            "ZUGSPITZE",
+            "KRKONOŠE",
+            "LION'S HEAD",
+            "MONT-AUX-SOURCES",
+            "AYR",
+            "ELY",
+            "UIG",
+            "HOY",
+            "ECK",
+            "EYE",
+        ] {
+            assert_eq!(sheet_names(&[across(name, 300.0, 300.0)]), vec![name], "{name}");
+        }
+        for (a, b) in [('f', 'f'), ('m', 't'), ('m', 'k'), ('m', 'g'), ('m', 'q'), ('k', 'g'), ('k', 'j'), ('g', 'j')] {
+            assert!(plausible_onset(a, b), "{a}{b}");
+        }
+        // A name after a word that introduces it is not cut short: no "RIVER CAMP" because a camp
+        // is on the sheet, no "RÍO PASS" (the Río Pas) beside "SANI PASS"; "SANI PAS" is.
+        let names = sheet_names(&[
+            across("RIVER CAM", 300.0, 300.0),
+            across("BARAFU CAMP", 300.0, 900.0),
+            across("RÍO PAS", 300.0, 1500.0),
+            across("SANI PASS", 1200.0, 300.0),
+            across("SANI PAS", 1200.0, 900.0),
+        ]);
+        assert_eq!(names, vec!["RIVER CAM", "BARAFU CAMP", "RÍO PAS", "SANI PASS", "SANI PASS"]);
+        // Only a lexicon word completes a word: "RAND" (of "RAND WATER BOX 1" and "2") is no end of
+        // "LIGHTNING RA…" (the sheet's "LIGHTNING RAVINE").
+        let vocab = Vocabulary::new(&[across("RAND WATER BOX 1", 0.0, 0.0), across("RAND WATER BOX 2", 0.0, 100.0)]);
+        assert_eq!(mend_name("LGHTNING RA", &vocab, &[]), "LGHTNING RA");
+        // A road number is no spot height with its triangle: "A 470" on a lowland sheet ("1501 A"
+        // and "▲ 1720" are).
+        let mut obs: Vec<OcrObservation> = ["245", "312", "188", "521", "377"]
+            .iter()
+            .enumerate()
+            .map(|(k, h)| ob(h, 3300.0, 300.0 + 300.0 * k as f64, 45.0, 24.0))
+            .collect();
+        obs.extend([across("A 470", 300.0, 300.0), across("A 3059", 300.0, 900.0), across("1501 A", 1200.0, 300.0)]);
+        obs.push(across("▲ 1720", 1200.0, 900.0));
+        let heights: Vec<String> = classify_pois(&obs).into_iter().filter(|p| p.x < 3200.0).map(|p| p.name).collect();
+        assert_eq!(heights, vec!["1501", "1720"]);
+    }
+
+    #[test]
+    fn turned_names_of_one_word_are_kept() {
+        // Rivers named along their course, up the map: four letters that are a name.
+        for name in ["ISAR", "LECH", "Elbe", "TEES"] {
+            assert_eq!(sheet_names(&[ob(name, 300.0, 300.0, 26.0, 70.0)]), vec![name], "{name}");
+        }
+        // A turned label Apple Vision reads as two words, the name and what the place is: the name
+        // stays (the feature word alone goes).
+        let names = sheet_names(&[ob("HLOBANE", 1000.0, 1000.0, 30.0, 110.0), ob("KLOOF", 1000.0, 1115.0, 30.0, 80.0)]);
+        assert_eq!(names, vec!["HLOBANE"]);
+        // Two names printed along a border, slanting side by side: their boxes overlap, they are
+        // not pieces of one label.
+        let names = sheet_names(&[
+            ob("KWAZULU-NATAL", 1000.0, 1000.0, 150.0, 150.0),
+            ob("LESOTHO", 1040.0, 1040.0, 88.0, 88.0),
+        ]);
+        assert_eq!(names, vec!["KWAZULU-NATAL", "LESOTHO"]);
+    }
+
+    #[test]
+    fn numbered_places_and_twin_names_are_each_a_poi() {
+        // Numbered camps and huts are places ("CAMP 2"); legend text is not ("Camp", "2 km").
+        let names = sheet_names(&[
+            across("CAMP 2", 300.0, 300.0),
+            across("HUT 4", 300.0, 900.0),
+            across("Camp", 1200.0, 300.0),
+            across("2 km", 1200.0, 900.0),
+            across("ROUTE 66", 1200.0, 1500.0),
+        ]);
+        assert_eq!(names, vec!["CAMP 2", "HUT 4", "ROUTE 66"]);
+        // Two places with names alike, one under the other: both stay.
+        let names = sheet_names(&[
+            across("NORTH PEAK", 300.0, 300.0),
+            across("SOUTH PEAK", 300.0, 335.0),
+            across("UPPER FALLS", 900.0, 300.0),
+            across("LOWER FALLS", 900.0, 335.0),
+            across("RAND WATER BOX 1", 300.0, 900.0),
+            across("RAND WATER BOX 2", 300.0, 935.0),
+            across("CASTLE GORGE WATERFALL (UPPER)", 900.0, 900.0),
+            across("CASTLE GORGE WATERFALL (LOWER)", 900.0, 935.0),
+        ]);
+        assert_eq!(
+            names,
+            vec![
+                "NORTH PEAK",
+                "SOUTH PEAK",
+                "UPPER FALLS",
+                "LOWER FALLS",
+                "RAND WATER BOX 1",
+                "RAND WATER BOX 2",
+                "CASTLE GORGE WATERFALL (UPPER)",
+                "CASTLE GORGE WATERFALL (LOWER)",
+            ]
+        );
     }
 
     #[test]

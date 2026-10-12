@@ -544,10 +544,11 @@ exact lists, checked against the images.
    "sheet", "declination", "contours", …) and labels of legend words only
    (`LEGEND_WORDS`, also cut short or run together with their capitals:
    "Non-Peren", "PerennialRiver"; a one-word name such as "Lakeview" or
-   "PARKVIEW" is a name).
+   "PARKVIEW" is a name). Legend words with a number are a numbered place
+   ("CAMP 2", "HUT 4"; "2 km" is not).
 3. *Spot heights*: three or four digits, not a multiple of 50 (contour
-   labels), −400…8 850 m, also with the triangle read as a letter beside it
-   ("1501 A"). A height with fewer digits than nearly all others and under
+   labels), −400…8 850 m, also with the triangle read beside it ("1501 A",
+   "▲ 1720"; an "A" in front is a road's: "A 470"). A height with fewer digits than nearly all others and under
    half their median is a misread ("112" for a "1412" a grid line cuts); so is
    a three-digit one well under a sheet of four-digit heights in one thousand
    when the thousand added falls among them ("478" for 1478), unless other
@@ -560,27 +561,35 @@ exact lists, checked against the images.
    a trailing route distance goes ("STILE 1.7Km", "2,3 km"), symbols at the
    ends go. Not a name: under three letters or 60 % letters, letters and
    digits run together in most words ("GISV1$eet20x"), three letters or fewer
-   with no vowel or no consonant, or read up or down the map ("ERN", a piece
-   of a turned label), four such letters that are no lexicon word ("ANTZ"), a
-   lone abbreviation of four letters or fewer ("KUMB.", cut by the frame).
+   with no vowel or with vowels only (Y aside: "EYE" is a name), or read up or
+   down the map ("ERN", a piece of a turned label; four letters are a name as
+   often: "ISAR", "TEES" along their rivers), a lone abbreviation of four
+   letters or fewer ("KUMB.", cut by the frame).
 5. *Mending* (`labels::mend_name`), with the sheet's own words as the
    dictionary (`labels::Vocabulary`): a *known* word is one of the lexicon
    (`LEGEND_WORDS`, `NOTE_WORDS`, `PLACE_WORDS`: feature words and their
    qualifiers in English and Afrikaans) or one of four letters or more read
    in two reads or more, accents aside.
    * A lexicon word read with an accent loses it ("GÁTE", "AČCOMMODATION";
-     "AASVOËL" keeps its diaeresis).
+     "AASVOËL" keeps its diaeresis, French "HÔTEL" and "RÉSERVE" their
+     accents).
    * A stray glyph in front goes: a digit glued to a word ("1KWAMI LODGE"), a
-     lone letter before the words ("D LONG POOL", the pool's symbol; not
-     initials), or a letter glued to a known word when the two cannot start
-     a word ("WCASTLE", the waterfall's W; `plausible_onset` knows English,
-     Afrikaans, Nguni and other European onsets) or another read of the label
-     at the same place is without it ("PLONG POOL" beside "LONG POOL"). A
-     letter glued behind a known word likewise ("KLOOFI"; not an s).
-   * A last word cut short is completed when exactly one known word on the
+     lone consonant before the words ("D LONG POOL", the pool's symbol; not
+     initials; a lone vowel or Y only before a known word, else it is an
+     article: "A CORUÑA", "O CEBREIRO", "Y GARN"), or a letter glued to a known
+     word when the two cannot start a word ("WCASTLE", the waterfall's W;
+     `plausible_onset` knows English, Afrikaans, Nguni, Sotho-Tswana, Welsh,
+     Norse, Slavic and other European onsets: "FFOREST", "MTHATHA",
+     "KGALAGADI", "KJERAG") or another read of the label at the same place is
+     without it ("PLONG POOL" beside "LONG POOL"). A stroke (I, l) glued behind
+     a known word likewise ("KLOOFI"; another letter makes another word:
+     "RIVIERA", "MAINE", "HOOGE", "ROCKY").
+   * A last word cut short is completed when exactly one lexicon word on the
      sheet starts with it, one to three letters longer ("EASY GUL" → "EASY
      GULLY" beside "WOODY GULLY", "CASCADE KL" → "CASCADE KLOOF", "PIHRANA
-     POO" → "PIHRANA POOL").
+     POO" → "PIHRANA POOL"; a name read twice completes nothing: no "LIGHTNING
+     RAND"), unless the word before it takes a name ("RIVER CAM", "RÍO PAS",
+     "LOCH EIL", "ST LO").
    * A name the OCR was unsure of (confidence under 0.5; Vision gives 0.3 to
      its guesses) stays only when all its words are known ("PHANL GULLI"
      goes).
@@ -595,14 +604,19 @@ exact lists, checked against the images.
    better read: the clearly more confident one (by 0.25), else the one with
    more letters in known words ("KEEP RIGHT" over "KEED RIGHT", "LONG POOL"
    over "KONG POOL"), more words, more confident, longer. An unreadable read
-   ("21728") absorbs nothing.
+   ("21728") absorbs nothing; names numbered apart are two places ("RAND
+   WATER BOX 1" one line over "RAND WATER BOX 2").
 7. *Garbled turned labels* (`drop_garbled_turned`). Labels printed up, down
    or slanting along a stream are read worst: such a read with no known word
    whose box (widened by a quarter of the text height) meets another such
-   read it shares no three characters with is a garbled piece ("ROOIKRI",
-   "ANTZ", "PHANL GULLI" of ROOIKRANTZ GULLY); so is one such read that is a
-   lone feature word ("GULLY" of UPPER CASTLE GULLY). A turned name on its
-   own stays ("GAUTENG", "CANDELABRA").
+   read with no known word, that it shares no three characters with and that
+   runs on from it (the two boxes together about as long, corner to corner,
+   as both) is a garbled piece ("ROOIKRI", "ANTZ" of ROOIKRANTZ GULLY); so is
+   one such read that is a lone feature word ("GULLY" of UPPER CASTLE GULLY).
+   A turned name on its own stays ("GAUTENG", "CANDELABRA"), so does one read
+   apart from its feature word ("HLOBANE" of HLOBANE KLOOF) and two names
+   printed side by side along a border, whose boxes overlap
+   ("KWAZULU-NATAL", "LESOTHO").
 
 On Vision's reads this leaves 54 POIs on Grootkloof (56 before), 53 on Castle
 Gorge (57) and the same 33 on Mhlabatini; on the RapidOCR stand-ins no name
@@ -623,13 +637,18 @@ and turned labels lettered nearly title size (CAVE KLOOF, FERN KLOOF).
    Those another read on the sheet confirms come first (the title "CASTLE
    GORGE" and "CASTLE GORGE WATERFALL" on the map), larger first; then the
    others, less a misread of a confirmed one (one that shares 60 % of its
-   letters in a run: "DOTKLOOF" beside "GROOTKLOOF").
+   letters in a run and whose other words are not known words: "DOTKLOOF"
+   beside "GROOTKLOOF"; "KLEIN WINTERHOEK" beside "GROOT WINTERHOEK" and
+   "DRAKENSBERG SOUTH" beside "DRAKENSBERG NORTH" are other places).
 2. *Names*: the place, peak and water names of `classify_pois` (so none of
    its pieces, misreads or furniture), names of several words before single
    words, then by font size and confidence (turned labels count 0.6×). Route
    notes ("KEEP LEFT", "TURN RIGHT AT SIGN"), names of lexicon words only
-   ("KRAAL", "LONG POOL", "FARM GATE": they find no place), credits,
-   coordinates and heights are left out.
+   ("KRAAL", "FARM GATE": they find no place), credits, coordinates and
+   heights are left out; lexicon words with a qualifier are a place name as
+   often as a description ("LITTLE ROCK", "GREAT FALLS", "NEW FOREST", "GROOT
+   RIVIER"; "LONG POOL") and come last. An article in front stays ("DE AAR",
+   "LA PAZ"); connectives at the ends go.
 3. The same letters read twice are one query, spaced as some read spaces
    them ("CASTLEGORGE" → "CASTLE GORGE"); a query inside a longer one in text
    at least as large, or inside a word of one ranked as high ("ABATINI" of

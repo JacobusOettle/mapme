@@ -300,6 +300,12 @@ pub fn merc_latlon(m: (f64, f64)) -> LatLon {
 const FURNITURE_WORDS: &[&str] = &["mcsa", "map", "maps", "series", "no", "nr", "page", "of", "club", "mountain"];
 /// Publishers' acronyms: dropped from any label.
 const PUBLISHER_WORDS: &[&str] = &["mcsa", "usgs", "ngi", "ign", "os"];
+/// Lexicon words that qualify a feature: with one, lexicon words are a place name as often as a
+/// description ("LITTLE ROCK", "GREAT FALLS", "NEW FOREST", "GROOT RIVIER"; "LONG POOL").
+const QUALIFIER_WORDS: &[&str] = &[
+    "long", "short", "big", "little", "great", "middle", "high", "old", "new", "groot", "klein", "rooi", "wit",
+    "swart", "blou", "hoog", "nuwe", "saint", "upper", "lower", "north", "south", "east", "west",
+];
 
 /// Runs of letters in a word ("sheet2" → ["sheet"]), lowercase.
 fn letter_runs(w: &str) -> Vec<String> {
@@ -422,12 +428,14 @@ fn clean_name(part: &str) -> Option<String> {
         }
         kept.push(w.to_string());
     }
-    // Leading / trailing connectives and articles go.
-    let connective = |w: &String| matches!(w.to_lowercase().as_str(), "of" | "the" | "and" | "at" | "de" | "la");
-    while kept.first().is_some_and(connective) {
+    // Leading / trailing connectives and articles go; "de" and "la" in front are the name's own
+    // ("DE AAR", "DE HOOP", "LA PAZ").
+    let leading = |w: &String| matches!(w.to_lowercase().as_str(), "of" | "the" | "and" | "at");
+    let trailing = |w: &String| leading(w) || matches!(w.to_lowercase().as_str(), "de" | "la");
+    while kept.first().is_some_and(leading) {
         kept.remove(0);
     }
-    while kept.last().is_some_and(connective) {
+    while kept.last().is_some_and(trailing) {
         kept.pop();
     }
     if kept.is_empty() {
@@ -471,7 +479,9 @@ const TITLE_FONT: f64 = 1.6;
 ///    sheet confirms (the title "CASTLE GORGE" and the "CASTLE GORGE WATERFALL" on the map),
 ///    then the others, less a misread of a confirmed one ("DOTKLOOF" beside "GROOTKLOOF");
 /// 2. the names of `classify_pois` (place, peak and water names, cleaned of legend entries,
-///    pieces and misreads), names of several words first, larger lettering first.
+///    pieces and misreads), names of several words first, larger lettering first;
+/// 3. names of lexicon words with a qualifier ("LITTLE ROCK", "GREAT FALLS", "LONG POOL"): place
+///    names as often as descriptions.
 ///
 /// Route notes, words that only say what a place is ("KRAAL", "TENTED CAMP"), credits,
 /// coordinates and heights are left out; the same name read twice (or a partial read of it in
@@ -498,7 +508,8 @@ pub fn hint_queries(obs: &[OcrObservation]) -> Vec<String> {
     struct Query {
         name: String,
         key: String,
-        /// 0: confirmed title, 1: other title, 2: name of several words, 3: one word.
+        /// 0: confirmed title, 1: other title, 2: name of several words, 3: one word, 4: lexicon
+        /// words with a qualifier.
         group: u8,
         score: f64,
         font: f64,
@@ -537,12 +548,17 @@ pub fn hint_queries(obs: &[OcrObservation]) -> Vec<String> {
         }
     }
     for (t, confirmed) in &titles {
-        // An unconfirmed title that shares most of its letters with a confirmed one is a misread of it.
+        // An unconfirmed title that shares most of its letters with a confirmed one is a misread of
+        // it ("DOTKLOOF" of "GROOTKLOOF"), when what it has besides is no known word ("KLEIN
+        // WINTERHOEK" beside "GROOT WINTERHOEK", "DRAKENSBERG SOUTH" beside "DRAKENSBERG NORTH" are
+        // two places).
         let misread = !confirmed
             && titles.iter().any(|(c, ok)| {
                 *ok && c.key != t.key && {
                     let (a, b): (Vec<char>, Vec<char>) = (t.key.chars().collect(), c.key.chars().collect());
+                    let theirs = words_of(&c.name);
                     longest_common_run(&a, &b) as f64 >= 0.6 * a.len() as f64
+                        && words_of(&t.name).iter().any(|w| !theirs.contains(w) && !vocab.known(w))
                 }
             });
         if !misread {
@@ -558,9 +574,17 @@ pub fn hint_queries(obs: &[OcrObservation]) -> Vec<String> {
         for part in name_parts(&p.name) {
             let Some(name) = clean_name(&part) else { continue };
             let n_words = name.split_whitespace().count();
-            // Words that only say what a place is ("KRAAL", "FARM GATE", "LONG POOL") find no place.
-            if words_of(&name).iter().all(|w| w.chars().count() <= 2 || lexicon_word(w)) {
-                continue;
+            // Words that only say what a place is ("KRAAL", "FARM GATE") find no place; with a
+            // qualifier they may ("LITTLE ROCK"), asked last.
+            let words = words_of(&name);
+            let mut group = if n_words >= 2 { 2 } else { 3 };
+            if words.iter().all(|w| w.chars().count() <= 2 || lexicon_word(w)) {
+                let qualified = words.iter().any(|w| QUALIFIER_WORDS.contains(&w.as_str()))
+                    && words.iter().any(|w| w.chars().count() > 2 && !QUALIFIER_WORDS.contains(&w.as_str()));
+                if !qualified {
+                    continue;
+                }
+                group = 4;
             }
             let mut score = size + 0.3 * o.confidence as f64;
             if !reads_across(&o) {
@@ -568,7 +592,7 @@ pub fn hint_queries(obs: &[OcrObservation]) -> Vec<String> {
                 score *= 0.6;
             }
             let key = letters_key(&name);
-            found.push(Query { name, key, group: if n_words >= 2 { 2 } else { 3 }, score, font: font_px(&o) });
+            found.push(Query { name, key, group, score, font: font_px(&o) });
         }
     }
     // Best first; the same name read twice: keep the best, the spaced reading.
@@ -669,6 +693,11 @@ mod tests {
         assert_eq!(clean_name("★ZIMBABWE VLAKTE").as_deref(), Some("ZIMBABWE VLAKTE"));
         assert_eq!(name_parts("GROOTKLOOF & HAMERKOP"), vec!["GROOTKLOOF", "HAMERKOP"]);
         assert_eq!(name_parts("CASTLE GORGE WATERFALL (UPPER)"), vec!["CASTLE GORGE WATERFALL"]);
+        // An article in front belongs to the name; connectives at the ends go.
+        for n in ["DE AAR", "DE HOOP", "LA PAZ", "DE DOORNS"] {
+            assert_eq!(clean_name(n).as_deref(), Some(n), "{n}");
+        }
+        assert_eq!(clean_name("OF THE GROOTKLOOF DE").as_deref(), Some("GROOTKLOOF"));
     }
 
     #[test]
@@ -775,6 +804,51 @@ mod tests {
         assert_eq!(&q[..3], &["FERN KLOOF", "CASTLE GORGE", "MHLABATINI"], "{q:?}");
         assert!(!q.iter().any(|x| x == "ABATINI" || x == "FERN K"), "{q:?}");
         assert!(inside_a_word("MHLABATINI", "ABATINI") && !inside_a_word("CASTLE GORGE WATERFALL", "CASTLEGORGE"));
+    }
+
+    #[test]
+    fn qualified_names_and_twin_titles_are_queries() {
+        // A qualifier and a feature is a place name as often as a description ("LITTLE ROCK",
+        // "GREAT FALLS", "NEW FOREST", "GROOT RIVIER"): asked after the other names, not left
+        // out. What a place is ("KRAAL", "FARM GATE") and route notes ("KEEP RIGHT") stay out.
+        let mut obs: Vec<OcrObservation> = ["1416", "1754", "1556", "1471", "1533"]
+            .iter()
+            .enumerate()
+            .map(|(k, h)| ob(h, 3300.0, 300.0 + 300.0 * k as f64, 60.0, 24.0))
+            .collect();
+        let across = |t: &str, x: f64, y: f64| ob(t, x, y, 15.0 * t.chars().count() as f64, 24.0);
+        obs.extend([
+            across("LITTLE ROCK", 300.0, 300.0),
+            across("GREAT FALLS", 300.0, 900.0),
+            across("NEW FOREST", 300.0, 1500.0),
+            across("GROOT RIVIER", 300.0, 2100.0),
+            across("KRAAL", 1200.0, 300.0),
+            across("FARM GATE", 1200.0, 900.0),
+            across("KEEP RIGHT", 1200.0, 1500.0),
+            across("HLOBANE", 1200.0, 2100.0),
+        ]);
+        let q = hint_queries(&obs);
+        assert_eq!(q, vec!["HLOBANE", "LITTLE ROCK", "GREAT FALLS", "NEW FOREST", "GROOT RIVIER"]);
+        // Two titles alike: "KLEIN WINTERHOEK" is no misread of "GROOT WINTERHOEK" (the one on the
+        // map), "DRAKENSBERG SOUTH" none of "DRAKENSBERG NORTH" (but "DOTKLOOF" is one of
+        // "GROOTKLOOF": `titles_the_map_confirms_come_first`).
+        let mut obs: Vec<OcrObservation> = ["1416", "1754", "1556", "1471", "1533"]
+            .iter()
+            .enumerate()
+            .map(|(k, h)| ob(h, 3300.0, 300.0 + 300.0 * k as f64, 60.0, 24.0))
+            .collect();
+        obs.extend([
+            ob("GROOT WINTERHOEK & KLEIN WINTERHOEK", 800.0, 4600.0, 1600.0, 70.0),
+            across("GROOT WINTERHOEK", 900.0, 900.0),
+            ob("DRAKENSBERG NORTH & DRAKENSBERG SOUTH", 300.0, 4000.0, 1700.0, 70.0),
+            across("DRAKENSBERG NORTH", 1500.0, 1500.0),
+        ]);
+        let q = hint_queries(&obs);
+        assert_eq!(
+            &q[..4],
+            &["GROOT WINTERHOEK", "DRAKENSBERG NORTH", "KLEIN WINTERHOEK", "DRAKENSBERG SOUTH"],
+            "{q:?}"
+        );
     }
 
     #[test]
