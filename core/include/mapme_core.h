@@ -88,6 +88,38 @@ char *mm_fit_control_points(const char *request_json);
  */
 char *mm_detect_page(const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t bytes_per_row);
 
+/*
+ * Dark map rendering (see docs/ARCHITECTURE.md, "Dark map"). A paper map is shown dark by
+ * flattening its paper (lighting, shadows, paper tint) and inverting lightness in OKLab while
+ * keeping each feature's hue, so ink becomes light and paper becomes the app's night paper.
+ *
+ * mm_dark_profile analyses an overview of the WHOLE map (e.g. the coarsest pyramid level or the
+ * thumbnail, long side 256..2048 px; 8-bit RGBA, alpha ignored, rows bytes_per_row apart) and
+ * returns the map's profile as JSON, which the app stores with the map:
+ *   {"status":"ok","version":1,"ink":..,"dead":..,"gain":..,
+ *    "paper":{"cols":C,"rows":R,"rgb":[r,g,b, ...]}}   (paper white per cell, sRGB 0..1, row-major)
+ * or {"status":"failed","message":...}. Never NULL.
+ */
+char *mm_dark_profile(const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t bytes_per_row);
+
+/* Opaque, immutable dark style built from a profile (its colour lookup table is precomputed).
+ * Thread-safe: any number of threads may render with one style at once. */
+typedef struct MMDarkStyle MMDarkStyle;
+
+/* NULL when the JSON is not a valid profile. Free with mm_dark_style_free. */
+MMDarkStyle *mm_dark_style_new(const char *profile_json);
+void mm_dark_style_free(MMDarkStyle *style);
+
+/*
+ * Render one tile of the map dark, in place (8-bit RGBA, alpha untouched). The tile covers the
+ * map's normalised rectangle [u0, u0 + du] x [v0, v0 + dv] (fractions of the full map's width and
+ * height, so the paper grid lines up across tiles and pyramid levels; pixel centres are at
+ * u0 + (x + 0.5) / width * du). Returns MM_OK, or MM_ERR_ARGUMENT for NULL pointers, empty or
+ * inconsistent sizes and non-finite or non-positive rectangles.
+ */
+int32_t mm_dark_render(const MMDarkStyle *style, uint8_t *rgba, uint32_t width, uint32_t height,
+                       uint32_t bytes_per_row, double u0, double v0, double du, double dv);
+
 /* Library version, e.g. {"version":"0.1.0","build":"release aarch64-ios"}. */
 char *mm_version(void);
 

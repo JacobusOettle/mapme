@@ -247,6 +247,11 @@ float      mm_session_progress(const MMSession *s);   /* 0..1, thread-safe */
 void       mm_session_cancel(MMSession *s);           /* thread-safe */
 char      *mm_fit_control_points(const char *request_json);
 char      *mm_detect_page(const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t bytes_per_row);
+char      *mm_dark_profile(const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t bytes_per_row);
+MMDarkStyle *mm_dark_style_new(const char *profile_json);   /* immutable, thread-safe */
+void       mm_dark_style_free(MMDarkStyle *style);
+int32_t    mm_dark_render(const MMDarkStyle *style, uint8_t *rgba, uint32_t width, uint32_t height,
+                          uint32_t bytes_per_row, double u0, double v0, double du, double dv);
 char      *mm_version(void);
 void       mm_string_free(char *s);
 ```
@@ -374,6 +379,46 @@ image's pixels, like everything else.
 {"points": [{"x": 878, "y": 541, "lat": -25.8167, "lon": 27.3833}], "model": "auto"}
 → {"status": "ok", "pixel_to_mercator": [...9], "rms_m": 2.0, "residuals_m": [1.2, ...], "model": "affine"}
 ```
+
+## Dark map
+
+The app shows maps dark by default (Settings → Map appearance: Dark / Paper). A plain colour
+inversion turns a topographic map muddy: yellow roads and pale green fills go dark brown, and a
+photo's shading and paper tint invert into blotches. The core renders it instead
+(`core/src/dark.rs`, C ABI `mm_dark_profile`, `mm_dark_style_new`, `mm_dark_render`):
+
+1. **Profile** (once per map, from an overview of the whole map, long side ≤ 2048 px):
+   * *paper grid*: blocks of `B = max(8, long side / 32)` px; per block and channel the 90th
+     percentile (the paper white there); a 3 × 3 maximum filter (blocks full of ink borrow the
+     paper of their neighbours) then a 3 × 3 box blur, edges replicated; floored at 0.2. Stored
+     as `cols × rows` sRGB triples; sampled bilinearly in normalised map coordinates with cell
+     centres at `((i + 0.5) / cols, (j + 0.5) / rows)`, clamped at the edges.
+   * *flat field*: `x = clamp(rgb / paper(u, v), 0, 1)` per channel (sRGB-encoded values). White
+     paper becomes exactly white wherever it is, in shadow or not.
+   * on the flat-fielded overview in OKLab: `ink = clamp(P0.7 %(L), 0.12, 0.65)` (the map's
+     darkest ink: ~0.15 for print, ~0.35–0.45 for a photo); paper noise from the pixels above
+     the 55th percentile of L, `dead = clamp(1 − median + 3 · 1.4826 · MAD, 0.015, 0.12)` (paper
+     grain and JPEG noise stay paper); `gain = clamp(0.07 / median C, 1, 1.8)` over coloured ink
+     pixels (`t ≥ 0.5`, `C ≥ 0.025`; 1 when fewer than 200), so a photo's washed-out colours
+     come back.
+2. **Render** each pixel of the flat-fielded tile (OKLab `L, a, b`, `C = |(a, b)|`):
+   * `t = clamp(((1 − L) − dead) / ((1 − ink) − dead), 0, 1)` – how much ink, by lightness;
+   * `gate = smoothstep(0.012, 0.03, C)` – grey stays grey (no amplified colour casts);
+   * `s = clamp((C · gain · gate − 0.07) / 0.08, 0, 1)` – saturated colour is a feature even when
+     light (yellow roads, routes, water lines), while pale fills (C < 0.07) stay background;
+   * `f = max(t, 0.8 · s)`; `L′ = Lp + (0.90 − Lp) · f^0.78`, `Lp` = OKLab L of the night paper
+     sRGB (0.13, 0.13, 0.14) (`Theme.uiNightPaper`);
+   * `w = clamp(4 f, 0, 1)`; `(a′, b′) = w · 1.1 · gain · gate · (a, b) + (1 − w) · (ap, bp)`
+     (the night paper's slight cool tint on paper, the feature's hue on ink);
+   * back to sRGB; out-of-gamut colours lose chroma (same L and hue) rather than being clipped
+     per channel.
+
+   Paper becomes the night paper (#212124) exactly, black ink light grey (L 0.90), brown contours
+   tan, blue water blue, red routes red, yellow roads stay readable. The style precomputes the
+   render as a 65³ lookup table over flat-fielded sRGB (trilinear), so a 512 px tile takes a few
+   milliseconds on one core; tiles render on CATiledLayer's threads and are cached as JPEG in
+   `tiles-dark-v2/` (generated on first view, and in the background after import). The library
+   card uses `thumb-dark.jpg`.
 
 ## Repository layout
 
