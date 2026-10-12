@@ -355,9 +355,11 @@ final class MapImporter {
         let stagingURL = folder.appendingPathComponent("tiles-staging", isDirectory: true)
         let thumbURL = library.thumbnailURL(for: document)
         let flatURL = folder.appendingPathComponent(Self.flattenedFileName)
-        // Everything drawn from the old page: dark tiles (current and legacy), profile, dark thumbnail.
+        // Everything drawn from the old page: dark tiles (current and legacy), profile, dark
+        // thumbnail, and the text read off it (in the old page's pixels).
         let staleDarkFiles = [library.tilesDirectory(for: document, dark: true), library.legacyDarkTilesDirectory(for: document),
-                              library.darkProfileURL(for: document), library.darkThumbnailURL(for: document)]
+                              library.darkProfileURL(for: document), library.darkThumbnailURL(for: document),
+                              library.ocrCacheURL(for: document)]
         // A dark render of the old page must not write into the new page's folders.
         await DarkPrerender.cancelAndWait(map.id)
         progress(0.3, "Building tiles…")

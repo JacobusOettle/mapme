@@ -4,15 +4,19 @@ import SwiftUI
 /// glowing red "you are here" dot when it worked.
 struct ImportScanVisual: View {
     var phase: ImportJob.Phase
+    /// A wide search: the share of its circle searched so far (0…1), drawn as a disc growing out
+    /// from the centre; nil for a normal import.
+    var searchedFraction: Double? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let phase = self.phase
+        let searched = searchedFraction
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion)) { timeline in
             let t = timeline.date.timeIntervalSinceReferenceDate
             Canvas { gc, size in
-                ImportScanArt.draw(in: &gc, size: size, time: t, phase: phase)
+                ImportScanArt.draw(in: &gc, size: size, time: t, phase: phase, searchedFraction: searched)
             }
         }
         .accessibilityHidden(true)
@@ -20,7 +24,8 @@ struct ImportScanVisual: View {
 }
 
 enum ImportScanArt {
-    static func draw(in gc: inout GraphicsContext, size: CGSize, time t: Double, phase: ImportJob.Phase) {
+    static func draw(in gc: inout GraphicsContext, size: CGSize, time t: Double, phase: ImportJob.Phase,
+                     searchedFraction: Double? = nil) {
         let isWorking = phase == .importing || phase == .locating
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
         let radius = min(size.width, size.height) / 2 - 2
@@ -54,6 +59,20 @@ enum ImportScanArt {
         cross.move(to: CGPoint(x: center.x, y: center.y - radius))
         cross.addLine(to: CGPoint(x: center.x, y: center.y + radius))
         gc.stroke(cross, with: .color(tint.opacity(0.12)), lineWidth: 1)
+
+        // Wide search: the area searched so far (its share of the circle's area), with a softly
+        // breathing front where the search is now.
+        if isWorking, let searchedFraction {
+            let r = radius * CGFloat(min(max(searchedFraction, 0), 1).squareRoot())
+            if r > 1 {
+                let searched = CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)
+                gc.fill(Path(ellipseIn: searched),
+                        with: .radialGradient(Gradient(colors: [tint.opacity(0.05), tint.opacity(0.20)]),
+                                              center: center, startRadius: 0, endRadius: r))
+                let breathe = 0.55 + 0.35 * sin(t * 3)
+                gc.stroke(Path(ellipseIn: searched), with: .color(tint.opacity(breathe)), lineWidth: 2)
+            }
+        }
 
         if isWorking {
             let angle = t * 2.4

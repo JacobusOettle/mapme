@@ -20,6 +20,9 @@ struct LibraryView: View {
     @State private var deleteTarget: MapDocument?
     @State private var showDelete = false
     @State private var calibrationTarget: MapDocument?
+    @State private var searchWiderTarget: MapDocument?
+    /// Picked in the "Search wider" sheet; started once the sheet has closed.
+    @State private var pendingWideSearch: (mapID: UUID, choice: WideSearchChoice)?
     @State private var openCount = 0
 
     struct Entry: Identifiable {
@@ -103,6 +106,18 @@ struct LibraryView: View {
             CalibrationView(mapID: map.id, onDone: { calibrationTarget = nil })
                 .environment(model)
         }
+        .sheet(item: $searchWiderTarget, onDismiss: { startPendingWideSearch() }) { map in
+            SearchWiderSheet(mapName: map.name,
+                             previousRadiusKm: map.locateAttempt?.searchedRadiusKm ?? model.settings.searchRadiusKm,
+                             hintQueries: map.locateAttempt?.hintQueries ?? [],
+                             position: model.location.location.map { LatLon($0.coordinate) },
+                             units: model.settings.units,
+                             onStart: { choice in
+                                 pendingWideSearch = (map.id, choice)
+                                 searchWiderTarget = nil
+                             },
+                             onCancel: { searchWiderTarget = nil })
+        }
         .sheet(isPresented: $showSettings) {
             SettingsView()
                 .environment(model)
@@ -145,6 +160,13 @@ struct LibraryView: View {
                 model.relocate(mapID: map.id)
             } label: {
                 Label("Locate again", systemImage: "scope")
+            }
+            if !map.isGeoreferenced, map.locateAttempt?.failure.widerSearchMayHelp ?? true {
+                Button {
+                    searchWiderTarget = map
+                } label: {
+                    Label("Search wider\u{2026}", systemImage: "location.magnifyingglass")
+                }
             }
             Button {
                 calibrationTarget = map
@@ -209,6 +231,14 @@ struct LibraryView: View {
             .accessibilityLabel("Import map")
             .accessibilityIdentifier("importMenu")
         }
+    }
+
+    /// The search runs once the sheet has gone, so the import screen can come up over the library.
+    @MainActor
+    private func startPendingWideSearch() {
+        guard let pending = pendingWideSearch else { return }
+        pendingWideSearch = nil
+        model.searchWider(mapID: pending.mapID, choice: pending.choice)
     }
 
     @MainActor
