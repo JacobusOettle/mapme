@@ -425,3 +425,153 @@ fn utm_grid_with_abbreviated_labels() {
     // Without a GPS fix the UTM zone is unknown.
     assert!(georeference_from_grid(&img, &ls, &obs, None).is_none());
 }
+
+#[test]
+fn one_latitude_label_on_the_longitudes_scale() {
+    // Only 25°51'00"S of the latitude labels (obs 2), all three longitudes.
+    let obs: Vec<OcrObservation> =
+        ocr_fixture().into_iter().enumerate().filter(|(i, _)| ![0usize, 1, 3, 4].contains(i)).map(|(_, o)| o).collect();
+    for g in [None, gps()] {
+        let r = georeference_from_grid(map(), lines(), &obs, g).expect("grid result");
+        let err = report("one latitude label", &r);
+        assert_eq!(r.method, GridMethod::Lines);
+        assert!(r.lone_label);
+        assert_eq!((r.n_lat, r.n_lon), (1, 3));
+        assert_eq!(r.gcps.len(), 15, "every graticule line on its round value");
+        assert!(err < 8.0, "max error {err:.2} m");
+    }
+    // Two latitude labels that disagree: neither can be trusted alone.
+    let mut two = obs.clone();
+    two.push(OcrObservation { text: "25°55'00\"S".into(), bbox: [116.0, 3376.0, 36.0, 185.0], confidence: 0.9 });
+    assert!(georeference_from_grid(map(), lines(), &two, gps()).is_none());
+    // Two labels on each axis never take the one-label path.
+    let r = georeference_from_grid(map(), lines(), &ocr_fixture(), gps()).unwrap();
+    assert!(!r.lone_label);
+}
+
+/// A 5×5 grid of 2 px lines at 200.5 + 500k px (2400×2400).
+fn five_by_five_grid() -> Rgb8 {
+    let (w, h) = (2400usize, 2400usize);
+    let mut data = vec![255u8; w * h * 3];
+    for k in 0..5 {
+        let p = 200 + 500 * k;
+        for s in 0..w {
+            for (x, y) in [(s, p), (s, p + 1), (p, s), (p + 1, s)] {
+                let i = (y * w + x) * 3;
+                data[i..i + 3].copy_from_slice(&[30, 30, 30]);
+            }
+        }
+    }
+    Rgb8::from_rgb(w, h, data).unwrap()
+}
+
+#[test]
+fn utm_labels_are_no_graticule() {
+    // A 1 km UTM grid in northern Kenya (zone 37N), 2 m/px, labelled in full without the "m":
+    // north of the equator and south of 9°N northings have six digits like eastings, and
+    // "340000E" / "023000N" also read as 34°00'00"E / 2°30'00"N with all three marks lost.
+    // Those readings are 18.5 times the scale and some 400 km off, yet as consistent as the
+    // grid values: they must never be the answer.
+    let img = five_by_five_grid();
+    let (e0, n0) = (340_000.0, 23_000.0);
+    let mut obs = Vec::new();
+    for k in 0..4 {
+        let p = 200.5 + 500.0 * k as f64;
+        let ob = |t: String, x: f64, y: f64| OcrObservation {
+            text: t,
+            bbox: [x - 65.0, y - 14.0, 130.0, 28.0],
+            confidence: 0.9,
+        };
+        obs.push(ob(format!("{:.0}E", e0 + 1000.0 * k as f64), p, 2340.0));
+        obs.push(ob(format!("{:06.0}N", n0 - 1000.0 * k as f64), 70.0, p));
+    }
+    let ls = detect_lines(&img);
+    // Without a GPS fix the UTM zone is unknown: no answer.
+    let r = georeference_from_grid(&img, &ls, &obs, None);
+    assert!(r.is_none(), "{:?}", r.map(|r| (r.method, r.n_lat, r.n_lon, r.transform.apply(1200.0, 1200.0))));
+    assert!(georeference_from_grid(&img, &[], &obs, None).is_none());
+    // With one, the grid values.
+    let g = LatLon::new(0.2, 37.5);
+    let zone = latlon_to_utm(g.lat, g.lon);
+    let r = georeference_from_grid(&img, &ls, &obs, Some(g)).expect("utm result");
+    assert_eq!((r.method, r.utm_zone), (GridMethod::Lines, Some((37, true))));
+    let mut worst = 0.0f64;
+    for (x, y) in [(0.0, 0.0), (2399.0, 0.0), (1200.0, 1200.0), (0.0, 2399.0), (2399.0, 2399.0)] {
+        let (e, n) = (e0 + (x - 200.5) * 2.0, n0 - (y - 200.5) * 2.0);
+        let ll = utm_to_latlon(&Utm { zone: zone.zone, north: zone.north, easting: e, northing: n });
+        let want = latlon_to_merc(ll.lat, ll.lon);
+        let got = r.transform.apply(x, y);
+        worst = worst.max((want.0 - got.0).hypot(want.1 - got.1) * ll.lat.to_radians().cos());
+    }
+    assert!(worst < 2.0, "max error {worst:.2} m");
+}
+
+fn dms_label(v: f64, pos: char, neg: char) -> String {
+    let s = (v.abs() * 3600.0).round() as i64;
+    format!("{}°{:02}'{:02}\"{}", s / 3600, (s / 60) % 60, s % 60, if v < 0.0 { neg } else { pos })
+}
+
+#[test]
+fn graticules_at_two_and_a_half_and_seven_and_a_half_minutes() {
+    // USGS quadrangles tick their graticule every 2'30", 1:100 000 sheets draw 7'30"
+    // quadrangle lines: label values then share no standard unit finer than 30" or 1'30".
+    for (step, lat0, lon0, m_per_px) in [(2.5 / 60.0, 37.75, -122.5, 9.0), (7.5 / 60.0, 46.5, 7.5, 30.0)] {
+        let lats: Vec<f64> = (0..4).map(|k| lat0 - step * k as f64).collect();
+        let lons: Vec<f64> = (0..4).map(|k| lon0 + step * k as f64).collect();
+        let pad = 150.0;
+        let (mx0, my0) = (latlon_to_merc(lat0, lon0).0, latlon_to_merc(lat0, lon0).1);
+        let px = |lat: f64, lon: f64| {
+            let (mx, my) = latlon_to_merc(lat, lon);
+            (pad + (mx - mx0) / m_per_px, pad + (my0 - my) / m_per_px)
+        };
+        let (xe, ye) = px(lats[3], lons[3]);
+        let (w, h) = ((xe + pad) as usize, (ye + pad) as usize);
+        let mut data = vec![255u8; w * h * 3];
+        let mut obs = Vec::new();
+        let mut ink = |x: usize, y: usize| {
+            let i = (y * w + x) * 3;
+            data[i..i + 3].copy_from_slice(&[30, 30, 30]);
+        };
+        for &lat in &lats {
+            let y = px(lat, lon0).1.round() as usize;
+            for s in 0..w {
+                ink(s, y);
+            }
+            let text = dms_label(lat, 'N', 'S');
+            obs.push(OcrObservation { text, bbox: [5.0, y as f64 + 0.5 - 85.0, 30.0, 170.0], confidence: 0.9 });
+        }
+        for &lon in &lons {
+            let x = px(lat0, lon).0.round() as usize;
+            for s in 0..h {
+                ink(x, s);
+            }
+            let text = dms_label(lon, 'E', 'W');
+            obs.push(OcrObservation {
+                text,
+                bbox: [x as f64 + 0.5 - 80.0, h as f64 - 40.0, 160.0, 30.0],
+                confidence: 0.9,
+            });
+        }
+        let img = Rgb8::from_rgb(w, h, data).unwrap();
+        let ls = detect_lines(&img);
+        let r = georeference_from_grid(&img, &ls, &obs, Some(LatLon::new(lat0, lon0)))
+            .unwrap_or_else(|| panic!("{:.1}' graticule: no result", step * 60.0));
+        let mut worst = 0.0f64;
+        for (x, y) in [(0.0, 0.0), (w as f64, 0.0), (0.0, h as f64), (w as f64, h as f64)] {
+            let (mx, my) = (mx0 + (x - pad) * m_per_px, my0 - (y - pad) * m_per_px);
+            let got = r.transform.apply(x, y);
+            let lat = merc_to_latlon(mx, my).0;
+            worst = worst.max((got.0 - mx).hypot(got.1 - my) * lat.to_radians().cos());
+        }
+        println!(
+            "{:.1}' graticule: {:?} {} + {} labels, max error {worst:.1} m",
+            step * 60.0,
+            r.method,
+            r.n_lat,
+            r.n_lon
+        );
+        assert_eq!(r.method, GridMethod::Lines, "{:.1}' graticule", step * 60.0);
+        assert_eq!((r.n_lat, r.n_lon), (4, 4));
+        assert!(worst < 2.0 * m_per_px, "{:.1}' graticule: max error {worst:.1} m", step * 60.0);
+    }
+}

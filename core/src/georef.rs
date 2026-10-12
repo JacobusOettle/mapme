@@ -43,10 +43,10 @@ use crate::grid::{
     LineAxis,
 };
 use crate::image::Rgb8;
-use crate::labels::{classify_pois, parse_coordinate, parse_scale, CoordValue, OcrObservation, PoiLabel};
+use crate::labels::{classify_pois, parse_scale, OcrObservation, PoiKind, PoiLabel};
 use crate::refine::{
-    confidence, evaluate_prepared, evaluate_prepared_homography, fit_confidence, refine_dem_box, refine_prepared_with,
-    select_refined, PreparedDem, RefineOptions, RefineResult,
+    confidence, evaluate_prepared, evaluate_prepared_homography, fit_confidence, fit_evidence, fit_quality,
+    refine_dem_box, refine_prepared_with, select_refined, PreparedDem, RefineOptions, RefineResult,
 };
 use crate::search::{coarse_search, map_field, required_dem_box, rotation_sweep, Candidate, MapField, SearchParams};
 use crate::skeleton::{contour_samples, default_sampling, ContourSamples};
@@ -91,6 +91,19 @@ const RADIUS_RANGE_M: (f64, f64) = (1_000.0, 50_000.0);
 const PLAUSIBLE_SCALE: (f64, f64) = (0.02, 500.0);
 /// A mosaic counts as complete when this fraction of it has elevations.
 const COMPLETE_DEM: f64 = 0.98;
+/// Confidence of a labels-only fit (below 0.5: the app asks to check it).
+const LABELS_MAX_CONFIDENCE: f64 = 0.45;
+/// Confidence of a grid fit with one axis from a single label that the
+/// terrain could not confirm.
+const LONE_LABEL_MAX_CONFIDENCE: f64 = 0.45;
+/// The terrain rules a one-label grid fit out only with this much to judge
+/// by (`refine::fit_evidence`)…
+const LONE_MIN_EVIDENCE: f64 = 0.5;
+/// …and a fit quality (`refine::fit_quality`) under this.
+const LONE_REJECT_QUALITY: f64 = 0.5;
+/// A spot height further than this (metres) outside the DEM elevations around
+/// its position is a misread.
+const SPOT_HEIGHT_DEM_TOLERANCE_M: f64 = 150.0;
 
 // ---------------------------------------------------------------------------
 // Request / response
@@ -728,7 +741,60 @@ impl<'a> Run<'a> {
         resp.diagnostics = Value::Object(diag);
         if resp.status != Status::NeedDem && !resp.is_cancelled() {
             resp.pois = self.pois();
+            if let (Status::Ok, Some(m)) = (resp.status, resp.pixel_to_mercator) {
+                let dropped = self.check_heights_against_dem(&mut resp.pois, &Homography { m });
+                if let (Some(n), Value::Object(d)) = (dropped, &mut resp.diagnostics) {
+                    d.insert("spot_heights_off_dem".into(), json!(n));
+                }
+            }
         }
+    }
+
+    /// Spot heights the terrain contradicts are misreads ("478" for 1478,
+    /// "1814" for 1314): where the session holds DEM tiles under the located
+    /// map (the contour stage or a check fetched them), a spot height more
+    /// than `SPOT_HEIGHT_DEM_TOLERANCE_M` outside the elevations around its
+    /// position is dropped, and a peak's height likewise forgotten. Returns
+    /// how many were dropped, None without terrain data.
+    fn check_heights_against_dem(&self, pois: &mut Vec<PoiLabel>, t: &Homography) -> Option<usize> {
+        if !pois.iter().any(|p| p.elevation_m.is_some()) {
+            return None;
+        }
+        let (w, h) = self.size();
+        let plan = fine_plan(&t.local_affine(w as f64 / 2.0, h as f64 / 2.0), w, h)?;
+        let (dem, zoom) = self.s.fine_dem(&plan)?;
+        if zoom < FINE_ZOOM - 1 {
+            // Coarse tiles smooth cliffs and summits by more than the tolerance.
+            return None;
+        }
+        // Elevation range within one DEM pixel of a point (None where unknown).
+        let range = |x: f64, y: f64| -> Option<(f64, f64)> {
+            let (mx, my) = t.apply(x, y);
+            let r = dem.res;
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for (dx, dy) in [(0.0, 0.0), (-r, 0.0), (r, 0.0), (0.0, -r), (0.0, r), (-r, -r), (r, r), (-r, r), (r, -r)] {
+                let v = dem.sample(mx + dx, my + dy) as f64;
+                if !v.is_finite() {
+                    return None;
+                }
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+            Some((lo, hi))
+        };
+        let off = |p: &PoiLabel| match (p.elevation_m, range(p.x, p.y)) {
+            (Some(e), Some((lo, hi))) => e < lo - SPOT_HEIGHT_DEM_TOLERANCE_M || e > hi + SPOT_HEIGHT_DEM_TOLERANCE_M,
+            _ => false,
+        };
+        let before = pois.len();
+        pois.retain(|p| p.kind != PoiKind::SpotHeight || !off(p));
+        for p in pois.iter_mut().filter(|p| p.kind == PoiKind::Peak) {
+            if off(p) {
+                p.elevation_m = None;
+            }
+        }
+        Some(before - pois.len())
     }
 
     /// Map labels (place names, peaks, spot heights), excluding the labels
@@ -762,14 +828,40 @@ impl<'a> Run<'a> {
             return Ok(GeorefResponse::failed("No known method requested: use \"grid\" and/or \"contours\"."));
         }
         let mut weak: Option<GridResult> = None;
+        let mut lone: Option<GridResult> = None;
         let mut reason: Option<String> = None;
         for &m in &methods {
             match m {
                 MethodReq::Grid => {
                     if let Some(g) = self.grid()? {
+                        // A fit no second label backs up (one label on an axis, or label
+                        // centres alone) must have the printed scale when the request tells
+                        // it (dpi and an OCR'd 1:n): a misread label stretches the map.
+                        if (g.lone_label || g.method == GridMethod::LabelsOnly) && !self.scale_agrees(&g) {
+                            if let Some(Value::Object(d)) = self.diag.get_mut("grid") {
+                                d.insert("rejected".into(), json!("scale"));
+                            }
+                            continue;
+                        }
                         let max_rms = if self.req.photo { PHOTO_GRID_MAX_RMS_M } else { GRID_MAX_RMS_M };
                         if g.method == GridMethod::Lines && g.rms_m < max_rms {
-                            return self.grid_ok(&g);
+                            if !g.lone_label {
+                                return self.grid_ok(&g, None);
+                            }
+                            // One axis from a single label, which nothing outvotes: the
+                            // terrain under the map confirms it or rules it out.
+                            match self.lone_check(&g)? {
+                                Some(true) => return self.grid_ok(&g, Some(true)),
+                                Some(false) => {
+                                    let axis = if g.n_lat <= 1 { self.label_axes(&g).0 } else { self.label_axes(&g).1 };
+                                    reason = Some(format!(
+                                        "Only one {axis} label could be read, and the terrain under the map doesn't \
+                                         match it. Try again near the map, or calibrate manually."
+                                    ));
+                                }
+                                None => lone = Some(g),
+                            }
+                            continue;
                         }
                         weak = Some(g);
                     }
@@ -779,6 +871,9 @@ impl<'a> Run<'a> {
                     Found::NotFound(msg) => reason = reason.or(Some(msg)),
                 },
             }
+        }
+        if let Some(g) = &lone {
+            return self.grid_ok(g, Some(false));
         }
         if let Some(g) = &weak {
             return Ok(self.labels_ok(g, methods.contains(&MethodReq::Contours)));
@@ -852,6 +947,7 @@ impl<'a> Run<'a> {
                 "n_gcps": g.gcps.len(),
                 "lines_h": lines_h,
                 "lines_v": lines_v,
+                "lone_label": g.lone_label,
             }),
         };
         if let Some(g) = g.as_ref().filter(|_| self.req.photo) {
@@ -868,19 +964,19 @@ impl<'a> Run<'a> {
 
     /// Grid labels read: ("latitude", "longitude") or ("northing", "easting").
     fn label_axes(&self, g: &GridResult) -> (&'static str, &'static str) {
-        let geographic = g.used_labels.iter().filter_map(|&i| self.req.ocr.get(i)).any(|o| {
-            matches!(parse_coordinate(&o.text), Some(CoordValue::Lat(_) | CoordValue::Lon(_) | CoordValue::Degrees(_)))
-        });
-        if geographic || g.used_labels.is_empty() {
+        if g.utm_zone.is_none() {
             ("latitude", "longitude")
         } else {
             ("northing", "easting")
         }
     }
 
-    fn grid_ok(&mut self, g: &GridResult) -> Step<GeorefResponse> {
+    /// A grid answer. `lone`: one axis was fitted from a single label value
+    /// (`GridResult::lone_label`), and the terrain confirmed it (`Some(true)`)
+    /// or could not be checked (`Some(false)`: flagged for checking).
+    fn grid_ok(&mut self, g: &GridResult, lone: Option<bool>) -> Step<GeorefResponse> {
         let (w, h) = self.size();
-        if self.req.verify {
+        if self.req.verify && lone.is_none() {
             self.verify(&g.transform)?;
         }
         let (scale, _) = scale_and_rotation(&g.transform, w as f64 / 2.0, h as f64 / 2.0);
@@ -908,15 +1004,22 @@ impl<'a> Run<'a> {
         };
         let rms_ramp =
             if self.req.photo { ramp(g.rms_m, 10.0, PHOTO_GRID_MAX_RMS_M) } else { ramp(g.rms_m, 5.0, GRID_MAX_RMS_M) };
-        let conf = 0.97 * label_factor * (1.0 - 0.3 * rms_ramp);
+        let mut conf = 0.97 * label_factor * (1.0 - 0.3 * rms_ramp);
         let (ya, xa) = self.label_axes(g);
-        let msg = format!(
-            "Located from {} {ya} and {} {xa} grid label{} ({}).",
-            g.n_lat,
-            g.n_lon,
-            if g.n_lon == 1 { "" } else { "s" },
-            plus_minus(rms)
-        );
+        let labels = format!("{} {ya} and {} {xa} grid label{}", g.n_lat, g.n_lon, if g.n_lon == 1 { "" } else { "s" });
+        let msg = match lone {
+            None => format!("Located from {labels} ({}).", plus_minus(rms)),
+            Some(true) => format!("Located from {labels}, confirmed by the terrain ({}).", plus_minus(rms)),
+            Some(false) => {
+                conf = conf.min(LONE_LABEL_MAX_CONFIDENCE);
+                let axis = if g.n_lat <= 1 { ya } else { xa };
+                format!(
+                    "Located from {labels} ({}). Only one {axis} label could be read: check the dot against your \
+                     surroundings.",
+                    plus_minus(rms)
+                )
+            }
+        };
         let warp = warp.and_then(|f| f.warp);
         Ok(self.located(Method::Grid, &g.transform, warp, conf, rms, msg))
     }
@@ -951,7 +1054,8 @@ impl<'a> Run<'a> {
         let (w, h) = self.size();
         let (scale, _) = scale_and_rotation(&g.transform, w as f64 / 2.0, h as f64 / 2.0);
         let rms = g.rms_m.max(0.75 * scale);
-        let mut conf = 0.5 * (1.0 - 0.5 * ramp(g.rms_m, 30.0, 150.0));
+        // Label centres alone are a rough fit no line confirms: always flagged for checking.
+        let mut conf = LABELS_MAX_CONFIDENCE * (1.0 - 0.5 * ramp(g.rms_m, 30.0, 150.0));
         let mut msg = format!(
             "Roughly located from {} coordinate label{} ({}).",
             g.n_lat + g.n_lon,
@@ -967,11 +1071,37 @@ impl<'a> Run<'a> {
 
     /// Check a transform against the terrain: `diagnostics.contour_check`.
     fn verify(&mut self, t: &Homography) -> Step<()> {
+        self.contour_check(t).map(|_| ())
+    }
+
+    /// A grid fit with one axis from a single label (`GridResult::lone_label`),
+    /// checked against the terrain when contours were requested
+    /// (`diagnostics.contour_check`): Some(true) when the contours fit there
+    /// (`ACCEPT`), Some(false) when enough of them landed on the DEM
+    /// (`refine::fit_evidence`) and fit badly (`refine::fit_quality`), else
+    /// None: nothing to judge it by (no contours requested, no terrain data,
+    /// no contours on the map, flat ground) or no clear verdict.
+    fn lone_check(&mut self, g: &GridResult) -> Step<Option<bool>> {
+        if !self.wants_contours() {
+            return Ok(None);
+        }
+        let Some(r) = self.contour_check(&g.transform)? else { return Ok(None) };
+        Ok(if fit_confidence(&r) >= ACCEPT {
+            Some(true)
+        } else if fit_evidence(&r) >= LONE_MIN_EVIDENCE && fit_quality(&r) < LONE_REJECT_QUALITY {
+            Some(false)
+        } else {
+            None
+        })
+    }
+
+    /// `verify`: the fit of `t` on the terrain, None without terrain data.
+    fn contour_check(&mut self, t: &Homography) -> Step<Option<RefineResult>> {
         let (w, h) = self.size();
         let key = self.contour_key();
         let approx = if t.is_affine() { t.to_affine() } else { t.local_affine(w as f64 / 2.0, h as f64 / 2.0) };
         let Some(plan) = fine_plan(&approx, w, h) else {
-            return Ok(());
+            return Ok(None);
         };
         self.need(&plan.tiles, "verify", key)?;
         let prod = self.products(key)?;
@@ -980,6 +1110,7 @@ impl<'a> Run<'a> {
         } else {
             self.evaluate_homography(&prod, &plan, t)
         };
+        let fit = checked.as_ref().map(|(r, _)| r.clone());
         let check = match checked {
             Some((r, zoom)) => {
                 let fit = fit_confidence(&r);
@@ -999,7 +1130,7 @@ impl<'a> Run<'a> {
             None => json!({"error": "no terrain data"}),
         };
         self.diag.insert("contour_check".into(), check);
-        Ok(())
+        Ok(fit)
     }
 
     // --- DEM, contour products, search, refinement ----------------------------
@@ -1085,6 +1216,17 @@ impl<'a> Run<'a> {
             _ => Some(c),
         })?;
         Some((denom.0, denom.0 * 0.0254 / dpi))
+    }
+
+    /// A grid fit's ground scale is within the range the contour search would
+    /// try for the printed scale (`scale_prior`); true without one.
+    fn scale_agrees(&self, g: &GridResult) -> bool {
+        let Some((_, prior)) = self.scale_prior() else { return true };
+        let (w, h) = self.size();
+        let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+        let (scale, _) = scale_and_rotation(&g.transform, cx, cy);
+        let lat = merc_to_latlon(0.0, g.transform.apply(cx, cy).1).0;
+        (0.75 * prior * lat.to_radians().cos()..=1.25 * prior).contains(&scale)
     }
 
     fn search_params(&mut self, gps: LatLon, init: Option<&GridResult>) -> SearchParams {
