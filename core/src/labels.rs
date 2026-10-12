@@ -436,6 +436,15 @@ fn parse_tokens(toks: &[Tok]) -> Option<CoordValue> {
 /// heights, abbreviated grid labels) are not coordinates here; `grid.rs`
 /// resolves abbreviated grid labels against detected lines.
 pub fn parse_coordinate(text: &str) -> Option<CoordValue> {
+    parse_strict(text).or_else(|| {
+        // A garbled DMS label (`fuzzy_dms`) when every cheapest reading agrees.
+        let r = fuzzy_dms(&normalize(text));
+        let best = r.first()?;
+        r.iter().take_while(|x| x.cost == best.cost).all(|x| same_value(x.value, best.value)).then_some(best.value)
+    })
+}
+
+fn parse_strict(text: &str) -> Option<CoordValue> {
     let norm = normalize(text);
     if norm.iter().any(|&c| c == 'o' || c == 'O') {
         let zeroed = o_to_zero(&norm);
@@ -444,6 +453,303 @@ pub fn parse_coordinate(text: &str) -> Option<CoordValue> {
             .or_else(|| parse_embedded_dms(&zeroed));
     }
     parse_tokens(&tokenize(&norm)).or_else(|| parse_embedded_dms(&norm))
+}
+
+/// One reading of a coordinate label: its value and how many repairs the
+/// reading needed (0 for a label `parse_coordinate` reads as printed).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CoordReading {
+    pub value: CoordValue,
+    pub cost: u8,
+}
+
+/// Every plausible reading of a coordinate label, cheapest first: the
+/// label as printed (`parse_coordinate`'s strict reading, cost 0) and the
+/// readings of a garbled DMS label (`fuzzy_dms`): marks read as other
+/// symbols ("25°48/00\\S", "25°48'00~s", "27%34'00cE"), as digits or
+/// letters ("2595000\"s", "2548100s", "25950l00s") or lost ("255000s",
+/// "272400E", which reads as an easting too), zeros read as O or Q, a
+/// lowercase hemisphere letter, other text run into it
+/// ("27%3400cEV1Sept2017-ErasGous"). Several readings of one label are
+/// alternatives (the grid fit keeps the one that agrees with the others:
+/// "25-50'00\"S" is 50°00'S as printed, 25°50'00"S with a dash for the
+/// degree mark); a text holding two different coordinates gives none.
+pub fn coordinate_readings(text: &str) -> Vec<CoordReading> {
+    let mut out: Vec<CoordReading> =
+        parse_strict(text).map(|v| CoordReading { value: v, cost: 0 }).into_iter().collect();
+    for r in fuzzy_dms(&normalize(text)) {
+        if !out.iter().any(|o| same_value(o.value, r.value)) {
+            out.push(r);
+        }
+    }
+    out
+}
+
+fn same_value(a: CoordValue, b: CoordValue) -> bool {
+    match (a, b) {
+        (CoordValue::Lat(x), CoordValue::Lat(y))
+        | (CoordValue::Lon(x), CoordValue::Lon(y))
+        | (CoordValue::Degrees(x), CoordValue::Degrees(y))
+        | (CoordValue::Grid(x), CoordValue::Grid(y)) => (x - y).abs() <= 1e-9 * x.abs().max(1.0),
+        _ => false,
+    }
+}
+
+/// Most repairs a garbled DMS reading may need (`fuzzy_dms`).
+const FUZZY_MAX_COST: u8 = 5;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MarkSlot {
+    Deg,
+    Min,
+    Sec,
+}
+
+/// Cost of `ch` standing for the mark after the number in `slot` (None: it
+/// cannot). The printed mark is free; any other symbol costs 1, and so do
+/// letters OCR reads for marks (o for °, l/I for ', c for "); a digit read
+/// for a mark (9 or 0 for °, 1 for ', 1 or 4 for ") costs 2.
+fn mark_cost(ch: char, slot: MarkSlot) -> Option<u8> {
+    let printed = match slot {
+        MarkSlot::Deg => DEG,
+        MarkSlot::Min => MIN,
+        MarkSlot::Sec => SEC,
+    };
+    if ch == printed {
+        return Some(0);
+    }
+    if !ch.is_alphanumeric() && !ch.is_whitespace() && ch != ':' {
+        return Some(1);
+    }
+    match (slot, ch) {
+        (MarkSlot::Deg, 'o' | 'O') => Some(1),
+        (MarkSlot::Deg, '9' | '0') => Some(2),
+        (MarkSlot::Min, 'l' | 'I' | 'i' | 'j' | 'J') => Some(1),
+        (MarkSlot::Min, '1') => Some(2),
+        (MarkSlot::Sec, 'c' | 'C' | 'u' | 'U' | 'l' | 'I' | 'i') => Some(1),
+        (MarkSlot::Sec, '1' | '4') => Some(2),
+        _ => None,
+    }
+}
+
+/// A digit, or a letter OCR reads for one (O/o/Q/D for 0, l/I/| for 1, cost 1).
+fn digit_like(ch: char) -> Option<(u32, u8)> {
+    match ch {
+        '0'..='9' => Some((ch as u32 - '0' as u32, 0)),
+        'O' | 'o' | 'Q' | 'D' => Some((0, 1)),
+        'l' | 'I' | '|' => Some((1, 1)),
+        _ => None,
+    }
+}
+
+/// `len` digit-like characters at `i`, at least one a real digit unless
+/// `letters_ok`: (value, cost).
+fn fuzzy_number(c: &[char], i: usize, len: usize, letters_ok: bool) -> Option<(f64, u8)> {
+    if i + len > c.len() {
+        return None;
+    }
+    let (mut v, mut cost, mut real) = (0u32, 0u8, false);
+    for &ch in &c[i..i + len] {
+        let (d, k) = digit_like(ch)?;
+        v = v * 10 + d;
+        cost += k;
+        real |= k == 0;
+    }
+    (real || letters_ok).then_some((v as f64, cost))
+}
+
+/// One way the mark after a number was read (`fuzzy_marks`).
+#[derive(Clone, Copy)]
+struct MarkRead {
+    /// Index after the mark (and the spaces around it).
+    next: usize,
+    cost: u8,
+    /// Symbols read for it (not the letters or digits read for marks)…
+    symbols: u8,
+    /// …and whether anything was read for it at all.
+    present: u8,
+}
+
+/// Ways the mark after a number may be read at `i`. Spaces around it are
+/// free; the mark may be lost (cost 1) or read as one or two characters.
+fn fuzzy_marks(c: &[char], i: usize, slot: MarkSlot) -> Vec<MarkRead> {
+    let skip = |mut k: usize| {
+        while k < c.len() && c[k] == ' ' {
+            k += 1;
+        }
+        k
+    };
+    let k = skip(i);
+    // Lost, or only a space left of it.
+    let mut out = vec![MarkRead { next: k, cost: 1, symbols: 0, present: u8::from(k > i) }];
+    let Some(first) = c.get(k).and_then(|&ch| mark_cost(ch, slot)) else { return out };
+    let symbol = |ch: char| u8::from(!ch.is_alphanumeric());
+    out.push(MarkRead { next: skip(k + 1), cost: first, symbols: symbol(c[k]), present: 1 });
+    // Two characters for one mark: two symbols, or a double prime read as "11" or as a
+    // symbol and a 1 ("25*51/00\"1s").
+    let digit = |ch: char| ch.is_ascii_digit();
+    if let Some(&second) = c.get(k + 1) {
+        let both_symbols = !digit(c[k]) && !digit(second) && mark_cost(second, slot).is_some();
+        let double_prime = slot == MarkSlot::Sec && (c[k] == '1' || symbol(c[k]) == 1) && second == '1';
+        if both_symbols || double_prime {
+            let cost = first.max(mark_cost(second, slot).unwrap_or(2));
+            let symbols = symbol(c[k]).max(symbol(second));
+            out.push(MarkRead { next: skip(k + 2), cost, symbols, present: 1 });
+        }
+    }
+    out
+}
+
+/// Readings of garbled DMS labels (see `coordinate_readings`): degrees (1–3
+/// digits), a mark, minutes (2 digits), a mark, optionally seconds (2
+/// digits) and a mark, then a hemisphere letter, every mark possibly
+/// misread or lost (`fuzzy_marks`). Without seconds both marks must be
+/// symbols; without a hemisphere letter (a `Degrees` reading) the seconds,
+/// two marks, one of them a symbol, must be there and nothing alphanumeric
+/// after them; a hemisphere letter run into a word ("…cEV1Sept") needs the
+/// seconds and a symbol for a mark. At most `FUZZY_MAX_COST` repairs.
+fn fuzzy_dms(c: &[char]) -> Vec<CoordReading> {
+    let n = c.len();
+    // (start, end, reading) of every reading found.
+    let mut found: Vec<(usize, usize, CoordReading)> = Vec::new();
+    for start in 0..n {
+        if !c[start].is_ascii_digit() || (start > 0 && digit_like(c[start - 1]).is_some()) {
+            continue;
+        }
+        // Degrees never follow a number and a mark ("25°48'00\"S" holds no 48°) or a number and
+        // a space or dash ("2017 5100S").
+        let mut p = start;
+        while p > 0 && matches!(c[p - 1], ' ' | '-') {
+            p -= 1;
+        }
+        if p > 0 && c[p - 1].is_ascii_digit() {
+            continue;
+        }
+        if start >= 2 && mark_cost(c[start - 1], MarkSlot::Deg).is_some() && c[start - 2].is_ascii_digit() {
+            continue;
+        }
+        for dlen in 1..=3 {
+            if start + dlen > n || !c[start..start + dlen].iter().all(char::is_ascii_digit) {
+                break;
+            }
+            let Some((deg, c_deg)) = fuzzy_number(c, start, dlen, false) else { break };
+            for m1 in fuzzy_marks(c, start + dlen, MarkSlot::Deg) {
+                let Some((min, c_min)) = fuzzy_number(c, m1.next, 2, false).filter(|m| m.0 < 60.0) else { continue };
+                for m2 in fuzzy_marks(c, m1.next + 2, MarkSlot::Min) {
+                    let base = c_deg + m1.cost + c_min + m2.cost;
+                    // With seconds.
+                    // Zero seconds may be read as letters only ("25°53'QoS").
+                    if let Some((sec, c_sec)) = fuzzy_number(c, m2.next, 2, true).filter(|s| s.0 < 60.0) {
+                        let mut i5 = m2.next + 2;
+                        let mut sec = sec;
+                        if i5 + 1 < n && c[i5] == '.' && c[i5 + 1].is_ascii_digit() {
+                            let mut f = String::from("0.");
+                            i5 += 1;
+                            while i5 < n && c[i5].is_ascii_digit() {
+                                f.push(c[i5]);
+                                i5 += 1;
+                            }
+                            sec += f.parse::<f64>().unwrap_or(0.0);
+                        }
+                        for m3 in fuzzy_marks(c, i5, MarkSlot::Sec) {
+                            let marks = [m1, m2, m3];
+                            let cost = base + c_sec + m3.cost;
+                            let v = deg + min / 60.0 + sec / 3600.0;
+                            if let Some((end, value, k)) = fuzzy_hemisphere(c, m3.next, v, &marks, true) {
+                                if cost + k <= FUZZY_MAX_COST {
+                                    found.push((start, end, CoordReading { value, cost: cost + k }));
+                                }
+                            }
+                        }
+                    }
+                    // Without seconds: "25°49'S".
+                    if m1.symbols > 0 && m2.symbols > 0 {
+                        let v = deg + min / 60.0;
+                        if let Some((end, value, k)) = fuzzy_hemisphere(c, m2.next, v, &[m1, m2], false) {
+                            if base + k <= FUZZY_MAX_COST {
+                                found.push((start, end, CoordReading { value, cost: base + k }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Readings starting inside an earlier one are parts of it.
+    found.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cost.cmp(&b.2.cost)));
+    let mut kept: Vec<(usize, usize, CoordReading)> = Vec::new();
+    for f in found {
+        if kept.iter().any(|k| k.0 != f.0 && f.0 < k.1) {
+            continue;
+        }
+        kept.push(f);
+    }
+    // A reading without hemisphere is redundant next to one with it.
+    let signed = |v: CoordValue| match v {
+        CoordValue::Lat(x) | CoordValue::Lon(x) => Some(x.abs()),
+        _ => None,
+    };
+    let magnitudes: Vec<f64> = kept.iter().filter_map(|k| signed(k.2.value)).collect();
+    kept.retain(|k| match k.2.value {
+        CoordValue::Degrees(v) => !magnitudes.iter().any(|m| (m - v).abs() <= 1e-9 * v.max(1.0)),
+        _ => true,
+    });
+    let mut out: Vec<CoordReading> = Vec::new();
+    for (s, _, r) in &kept {
+        // Two labels in one text: neither position is known.
+        if kept.iter().any(|(t, _, q)| t != s && !same_value(q.value, r.value)) {
+            return Vec::new();
+        }
+        match out.iter_mut().find(|o| same_value(o.value, r.value)) {
+            Some(o) => o.cost = o.cost.min(r.cost),
+            None => out.push(*r),
+        }
+    }
+    out.sort_by_key(|r| r.cost);
+    out
+}
+
+/// The hemisphere after a garbled DMS label at `k` (`fuzzy_dms`): (end,
+/// value, extra cost), or a `Degrees` value without one.
+fn fuzzy_hemisphere(
+    c: &[char],
+    k: usize,
+    v: f64,
+    marks: &[MarkRead],
+    seconds: bool,
+) -> Option<(usize, CoordValue, u8)> {
+    let n = c.len();
+    let symbols: u8 = marks.iter().map(|m| m.symbols).sum();
+    let present: u8 = marks.iter().map(|m| m.present).sum();
+    let hemi = c.get(k).and_then(|&ch| match ch {
+        'N' | 'n' => Some(('N', 0)),
+        'S' | 's' => Some(('S', 0)),
+        'E' | 'e' => Some(('E', 0)),
+        'W' | 'w' => Some(('W', 0)),
+        '5' if symbols > 0 => Some(('S', 1)),
+        _ => None,
+    });
+    let Some((h, cost)) = hemi else {
+        // No hemisphere letter (a `Degrees` reading): the seconds and a symbol for a mark, and
+        // nothing after them ("273700\"", "25°51/00/"); other words after them only past a
+        // space ("2734,00\" GIS V1…"), with two marks, or right after a degree sign
+        // ("27°3400GIS V1 Sept 2017").
+        let degree_sign = marks[0].cost == 0 && marks[0].present == 1;
+        let end = c[k.min(n)..].iter().all(|ch| !ch.is_alphanumeric());
+        let words_after = (k > 0 && c[k - 1] == ' ' && present >= 2)
+            || (degree_sign && c.get(k).is_some_and(|ch| ch.is_alphabetic()));
+        let ok = seconds && (symbols >= 1 || degree_sign) && (end || words_after) && v <= 180.0;
+        return ok.then_some((k, CoordValue::Degrees(v), 1));
+    };
+    if c.get(k + 1).is_some_and(|ch| ch.is_alphanumeric() && !ch.is_ascii_digit()) && !(seconds && symbols > 0) {
+        return None;
+    }
+    let value = match h {
+        'N' | 'S' if v <= 90.0 => CoordValue::Lat(if h == 'S' { -v } else { v }),
+        'E' | 'W' if v <= 180.0 => CoordValue::Lon(if h == 'W' { -v } else { v }),
+        _ => return None,
+    };
+    Some((k + 1, value, cost))
 }
 
 /// Fallback for OCR lines where a DMS label is merged with other text
@@ -1091,16 +1397,104 @@ mod tests {
         assert!((lat("25°52 00\"$") + 25.0 + 52.0 / 60.0).abs() < 1e-9);
         assert!((lon("27°24'00\"€") - (27.0 + 24.0 / 60.0)).abs() < 1e-9);
         assert!((lat("25°5000\"S") + 25.0 + 50.0 / 60.0).abs() < 1e-9);
+        // "2400" after "24-" is minutes and seconds, not 24° 00' (a dash for the degree mark).
+        assert!((lon("24-2400\"E") - (24.0 + 24.0 / 60.0)).abs() < 1e-9);
         for junk in [
             "GIS V1 Sept 2017- Eras Gous",
             "Magnetic Declination 18° West",
             "Sept 2017",
             "12 34 Street",
             "2017 5100S",
-            "24-2400\"E",
             "Price $25",
         ] {
             assert_eq!(parse_coordinate(junk), None, "{junk}");
+        }
+    }
+
+    #[test]
+    fn garbled_dms_labels() {
+        let dm = |d: f64, m: f64| d + m / 60.0;
+        // RapidOCR reads of the MCSA sheets' printed graticule labels (fixtures/castle-gorge,
+        // fixtures/mhlabatini): marks read as other symbols, digits or letters, or lost.
+        for (t, want) in [
+            ("25°47/00\"S", CoordValue::Lat(-dm(25.0, 47.0))),
+            ("25°48'00~s", CoordValue::Lat(-dm(25.0, 48.0))),
+            ("25°48/00\\S", CoordValue::Lat(-dm(25.0, 48.0))),
+            ("25°49/00*s", CoordValue::Lat(-dm(25.0, 49.0))),
+            ("25-4900s", CoordValue::Lat(-dm(25.0, 49.0))),
+            ("25-49004s", CoordValue::Lat(-dm(25.0, 49.0))),
+            ("2595000\"s", CoordValue::Lat(-dm(25.0, 50.0))),
+            ("255000s", CoordValue::Lat(-dm(25.0, 50.0))),
+            ("25950l00s", CoordValue::Lat(-dm(25.0, 50.0))),
+            ("2548100s", CoordValue::Lat(-dm(25.0, 48.0))),
+            ("25/48100S", CoordValue::Lat(-dm(25.0, 48.0))),
+            ("254810011s", CoordValue::Lat(-dm(25.0, 48.0))),
+            ("25°4900*s", CoordValue::Lat(-dm(25.0, 49.0))),
+            ("25°51'00/s", CoordValue::Lat(-dm(25.0, 51.0))),
+            ("/2551/00/s", CoordValue::Lat(-dm(25.0, 51.0))),
+            ("2552100/s", CoordValue::Lat(-dm(25.0, 52.0))),
+            ("25°4900*", CoordValue::Degrees(dm(25.0, 49.0))),
+            ("25°51/00/", CoordValue::Degrees(dm(25.0, 51.0))),
+            ("2725l00*", CoordValue::Degrees(dm(27.0, 25.0))),
+            ("2734,00\" GISV1Sept2017-ErasGous", CoordValue::Degrees(dm(27.0, 34.0))),
+            ("27°3400GIS V1 Sept 2017- Eras Gous", CoordValue::Degrees(dm(27.0, 34.0))),
+            ("2553 00/", CoordValue::Degrees(dm(25.0, 53.0))),
+            ("273700\"", CoordValue::Degrees(dm(27.0, 37.0))),
+            ("2791800*", CoordValue::Degrees(dm(27.0, 18.0))),
+            ("27018’004 GISV1Sept2017-ErasGous", CoordValue::Degrees(dm(27.0, 18.0))),
+            ("25048,00*S", CoordValue::Lat(-dm(25.0, 48.0))),
+            ("25°53'QoS", CoordValue::Lat(-dm(25.0, 53.0))),
+            ("27°37Q0\"E", CoordValue::Lon(dm(27.0, 37.0))),
+            ("27°20'0Q\"E", CoordValue::Lon(dm(27.0, 20.0))),
+            ("27936'00\"E", CoordValue::Lon(dm(27.0, 36.0))),
+            ("27\"3500\"E", CoordValue::Lon(dm(27.0, 35.0))),
+            ("27%3400cEV1Sept2017-ErasGous", CoordValue::Lon(dm(27.0, 34.0))),
+            ("27%34/00cEs V1 sept 2017", CoordValue::Lon(dm(27.0, 34.0))),
+            ("27%34'00cEV1 Sept 201", CoordValue::Lon(dm(27.0, 34.0))),
+            ("27*34/00\"E GIS V1 Sept 2017- Eras Gous", CoordValue::Lon(dm(27.0, 34.0))),
+            ("GIS V1 Sept 2017- Eras Gous 27*19/00\"E", CoordValue::Lon(dm(27.0, 19.0))),
+            ("25*48/00~S", CoordValue::Lat(-dm(25.0, 48.0))),
+            ("27°36'00~E", CoordValue::Lon(dm(27.0, 36.0))),
+            // RapidOCR reads of fixtures/grootkloof.
+            ("25*51/00\"1s", CoordValue::Lat(-dm(25.0, 51.0))),
+            ("25°51/001S", CoordValue::Lat(-dm(25.0, 51.0))),
+            ("2595300/S", CoordValue::Lat(-dm(25.0, 53.0))),
+            ("2552/00*s", CoordValue::Lat(-dm(25.0, 52.0))),
+            ("GISV Sept20t7-Eras Gous27°23'00\"E", CoordValue::Lon(dm(27.0, 23.0))),
+        ] {
+            let got = parse_coordinate(t);
+            assert!(close(got, Some(want)), "{t:?} -> {got:?}, want {want:?}");
+            assert_eq!(
+                coordinate_readings(t).first().map(|r| r.value).filter(|&v| same_value(v, want)),
+                Some(want),
+                "{t}"
+            );
+        }
+        // Read as printed, and with a mark misread: the grid fit picks the reading that agrees.
+        for (t, printed, garbled) in [
+            ("25-50'00\"S", CoordValue::Lat(-50.0), CoordValue::Lat(-dm(25.0, 50.0))),
+            ("272400E", CoordValue::Grid(272_400.0), CoordValue::Lon(dm(27.0, 24.0))),
+        ] {
+            let r: Vec<CoordValue> = coordinate_readings(t).into_iter().map(|r| r.value).collect();
+            assert!(r.len() == 2 && same_value(r[0], printed) && same_value(r[1], garbled), "{t:?} -> {r:?}");
+        }
+        // Fragments, other text and two labels in one read stay out.
+        for t in [
+            "25°49/003",
+            "8'00",
+            "200/",
+            "\"E",
+            "12 34 Street",
+            "12 34 56 Street",
+            "25 53 00",
+            "Sept 2017-E",
+            "1:25 000",
+            "Annual Change: 4.8' per year West",
+            "25°49/00\"S 27°23/00\"E",
+            "MCSA MAGALIESBERG SHEET 3 OF 10",
+            "11:30:00 S",
+        ] {
+            assert_eq!(parse_coordinate(t), None, "{t:?}");
         }
     }
 

@@ -24,7 +24,7 @@ use crate::geo::{
     latlon_to_merc, latlon_to_utm, merc_to_latlon, utm_to_latlon, Affine, Homography, LatLon, Utm, EARTH_RADIUS,
 };
 use crate::image::{unsharp_mask, Rgb8};
-use crate::labels::{parse_coordinate, CoordValue, OcrObservation};
+use crate::labels::{coordinate_readings, CoordValue, OcrObservation};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -1063,6 +1063,8 @@ pub struct GridResult {
     pub method: GridMethod,
     /// RMS residual of the GCP fit in ground metres.
     pub rms_m: f64,
+    /// Distinct latitude (northing) and longitude (easting) values read
+    /// from the labels used.
     pub n_lat: usize,
     pub n_lon: usize,
     pub gcps: Vec<Gcp>,
@@ -1131,6 +1133,13 @@ const PHOTO_HOMOGRAPHY_MIN_GAIN_M: f64 = 0.5;
 const MAX_HYPOTHESIS_PAIRS: usize = 240;
 /// Distinct fits kept per axis and slope sign for the joint choice.
 const TOP_FITS: usize = 6;
+/// A line fit's step between adjacent grid lines may be at most this many of
+/// the finest standard unit its label values share (one, or a few where
+/// grid lines were missed).
+const MAX_LINE_STEP_UNITS: f64 = 4.5;
+/// Conformality tolerance of label-only fits (label centres are a few
+/// pixels off their lines; a misread label is off by a whole interval).
+const LABELS_CONFORMAL_TOL: f64 = 0.15;
 
 /// Grid intervals for graticules, in degrees (DMS and decimal).
 const GEO_UNITS: [f64; 27] = [
@@ -1240,12 +1249,13 @@ fn edge_axis(o: &OcrObservation, ctx: &Ctx) -> Option<Ax> {
     let (cx, cy) = o.center();
     let ex = (cx / ctx.w).min(1.0 - cx / ctx.w);
     let ey = (cy / ctx.h).min(1.0 - cy / ctx.h);
-    if ex < EDGE_BAND && ey >= EDGE_BAND {
-        Some(Ax::Y)
-    } else if ey < EDGE_BAND && ex >= EDGE_BAND {
-        Some(Ax::X)
-    } else {
-        None
+    match (ex < EDGE_BAND, ey < EDGE_BAND) {
+        (true, false) => Some(Ax::Y),
+        (false, true) => Some(Ax::X),
+        // In a corner, text running up or down the side is a latitude label (a longitude label
+        // at the end of the bottom row reads across); otherwise either.
+        (true, true) if o.bbox[3].abs() >= 2.0 * o.bbox[2].abs() => Some(Ax::Y),
+        _ => None,
     }
 }
 
@@ -1334,33 +1344,38 @@ fn label_candidates(obs: &[OcrObservation], ctx: &Ctx) -> (Vec<Cand>, Vec<Cand>)
         };
         let hint = grid_axis_hint(&o.text);
         let axes = hint.map_or(vec![Ax::X, Ax::Y], |a| vec![a]);
-        match parse_coordinate(&o.text) {
-            Some(CoordValue::Lat(v)) => geo.push(mk(Sys::Geo, Ax::Y, v, false)),
-            Some(CoordValue::Lon(v)) => geo.push(mk(Sys::Geo, Ax::X, v, false)),
-            Some(CoordValue::Degrees(v)) => {
-                for (ax, v) in degree_readings(v, o, ctx) {
-                    geo.push(mk(Sys::Geo, ax, v, false));
+        // Every reading of a garbled label is a candidate: the fit keeps the one that agrees
+        // with the other labels.
+        let readings = coordinate_readings(&o.text);
+        for r in &readings {
+            match r.value {
+                CoordValue::Lat(v) => geo.push(mk(Sys::Geo, Ax::Y, v, false)),
+                CoordValue::Lon(v) => geo.push(mk(Sys::Geo, Ax::X, v, false)),
+                CoordValue::Degrees(v) => {
+                    for (ax, v) in degree_readings(v, o, ctx) {
+                        geo.push(mk(Sys::Geo, ax, v, false));
+                    }
                 }
-            }
-            Some(CoordValue::Grid(v)) => {
-                if let Some(u) = &ctx.utm {
-                    for &ax in &axes {
-                        if plausible_utm(ax, v, u, FULL_GRID_GATE_M) {
-                            utm.push(mk(Sys::Utm, ax, v, false));
+                CoordValue::Grid(v) => {
+                    if let Some(u) = &ctx.utm {
+                        for &ax in &axes {
+                            if plausible_utm(ax, v, u, FULL_GRID_GATE_M) {
+                                utm.push(mk(Sys::Utm, ax, v, false));
+                            }
                         }
                     }
                 }
             }
-            None => {
-                if let (Some(u), Some((n, digits))) = (&ctx.utm, parse_abbreviated(&o.text)) {
-                    let period = 10f64.powi(digits as i32 + 3);
-                    let base = n * 1000.0;
-                    for &ax in &axes {
-                        let target = if ax == Ax::X { u.easting } else { u.northing };
-                        let v = base + ((target - base) / period).round() * period;
-                        if plausible_utm(ax, v, u, ABBREV_GRID_GATE_M) {
-                            utm.push(mk(Sys::Utm, ax, v, true));
-                        }
+        }
+        if readings.is_empty() {
+            if let (Some(u), Some((n, digits))) = (&ctx.utm, parse_abbreviated(&o.text)) {
+                let period = 10f64.powi(digits as i32 + 3);
+                let base = n * 1000.0;
+                for &ax in &axes {
+                    let target = if ax == Ax::X { u.easting } else { u.northing };
+                    let v = base + ((target - base) / period).round() * period;
+                    if plausible_utm(ax, v, u, ABBREV_GRID_GATE_M) {
+                        utm.push(mk(Sys::Utm, ax, v, true));
                     }
                 }
             }
@@ -1631,7 +1646,15 @@ impl AxisLines<'_> {
             // line spacing on photos: no finer unit than the labels show.
             step = step.max(vals.windows(2).map(|w| w[1] - w[0]).fold(f64::INFINITY, f64::min));
         }
-        if let Some(u) = grid_unit(&vals, step, self.sys) {
+        let unit = grid_unit(&vals, step, self.sys);
+        // Grid lines are drawn at a round interval and labelled with its multiples, so the
+        // labels share a unit about as large as the step between lines. Labels that only
+        // share a far finer one are misreads put together (24°00'11" and 27°23' on adjacent
+        // meridians, 3.4° apart).
+        if unit.is_some_and(|u| step > MAX_LINE_STEP_UNITS * u) {
+            return None;
+        }
+        if let Some(u) = unit {
             let v0 = value_of(self.sys, self.ax, lin_at(tm));
             let u_px = (t_at(lin_of(self.sys, self.ax, v0 + u)) - t_at(lin_of(self.sys, self.ax, v0))).abs();
             if u_px >= 8.0 * tol {
@@ -1999,7 +2022,7 @@ fn combine(
     let tol = match (from_lines, ctx.photo) {
         (_, true) => PHOTO_CONFORMAL_TOL,
         (true, false) => 0.06,
-        (false, false) => 0.25,
+        (false, false) => LABELS_CONFORMAL_TOL,
     };
     if !((ratio - 1.0).abs() <= tol || (ratio * g - 1.0).abs() <= tol) {
         return None;
@@ -2057,6 +2080,12 @@ fn combine(
         v.dedup();
         v
     };
+    // Labels read: distinct values (several passes may read one label).
+    let n_labels = |cs: &[Cand], f: &AxisFit| {
+        let mut v: Vec<f64> = f.inliers.iter().map(|&i| cs[i].value).collect();
+        sort_dedup(&mut v);
+        v.len()
+    };
     let lon_obs = obs_of(cx, fx);
     let lat_obs = obs_of(cy, fy);
     let mut used: Vec<usize> = lon_obs.iter().chain(&lat_obs).copied().collect();
@@ -2075,8 +2104,8 @@ fn combine(
         transform,
         method,
         rms_m,
-        n_lat: lat_obs.len(),
-        n_lon: lon_obs.len(),
+        n_lat: n_labels(cy, fy),
+        n_lon: n_labels(cx, fx),
         gcps,
         used,
         lines,

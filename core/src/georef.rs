@@ -43,7 +43,7 @@ use crate::grid::{
     LineAxis,
 };
 use crate::image::Rgb8;
-use crate::labels::{classify_pois, parse_coordinate, parse_scale, CoordValue, OcrObservation, PoiLabel};
+use crate::labels::{classify_pois, parse_scale, OcrObservation, PoiLabel};
 use crate::refine::{
     confidence, evaluate_prepared, evaluate_prepared_homography, fit_confidence, refine_dem_box, refine_prepared_with,
     select_refined, PreparedDem, RefineOptions, RefineResult,
@@ -91,6 +91,8 @@ const RADIUS_RANGE_M: (f64, f64) = (1_000.0, 50_000.0);
 const PLAUSIBLE_SCALE: (f64, f64) = (0.02, 500.0);
 /// A mosaic counts as complete when this fraction of it has elevations.
 const COMPLETE_DEM: f64 = 0.98;
+/// Confidence of a labels-only fit (below 0.5: the app asks to check it).
+const LABELS_MAX_CONFIDENCE: f64 = 0.45;
 
 // ---------------------------------------------------------------------------
 // Request / response
@@ -868,10 +870,7 @@ impl<'a> Run<'a> {
 
     /// Grid labels read: ("latitude", "longitude") or ("northing", "easting").
     fn label_axes(&self, g: &GridResult) -> (&'static str, &'static str) {
-        let geographic = g.used_labels.iter().filter_map(|&i| self.req.ocr.get(i)).any(|o| {
-            matches!(parse_coordinate(&o.text), Some(CoordValue::Lat(_) | CoordValue::Lon(_) | CoordValue::Degrees(_)))
-        });
-        if geographic || g.used_labels.is_empty() {
+        if g.utm_zone.is_none() {
             ("latitude", "longitude")
         } else {
             ("northing", "easting")
@@ -951,7 +950,8 @@ impl<'a> Run<'a> {
         let (w, h) = self.size();
         let (scale, _) = scale_and_rotation(&g.transform, w as f64 / 2.0, h as f64 / 2.0);
         let rms = g.rms_m.max(0.75 * scale);
-        let mut conf = 0.5 * (1.0 - 0.5 * ramp(g.rms_m, 30.0, 150.0));
+        // Label centres alone are a rough fit no line confirms: always flagged for checking.
+        let mut conf = LABELS_MAX_CONFIDENCE * (1.0 - 0.5 * ramp(g.rms_m, 30.0, 150.0));
         let mut msg = format!(
             "Roughly located from {} coordinate label{} ({}).",
             g.n_lat + g.n_lon,

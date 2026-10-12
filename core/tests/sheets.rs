@@ -14,10 +14,12 @@
 //! independently of the core). `ocr.json` is unedited RapidOCR output for
 //! the app's OCR plan (fixtures/tools/ocr_like_app.py), a stand-in for Apple
 //! Vision (Grootkloof's is hand-built and clean); the phone-OCR tests build
-//! what Vision is likely to return from the printed labels instead. Tests that fail with today's core are `#[ignore]`d with
-//! the reason (`cargo test --release --test sheets -- --include-ignored
-//! --nocapture` prints what the labels parse to and what the core answers).
-//! Run with `cargo test --release`.
+//! what Vision is likely to return from the printed labels instead. The
+//! grid tests read the labels through `labels::coordinate_readings`, which
+//! repairs the garbled reads (' read as / or 1, " as ~, * or /, ° as 9, -
+//! or lost; `cargo test --release --test sheets -- --nocapture` prints what
+//! the labels parse to and what the core answers). Run with
+//! `cargo test --release`.
 
 mod common;
 use common::*;
@@ -390,7 +392,6 @@ fn castle_gorge_fixture_is_consistent() {
 }
 
 #[test]
-#[ignore = "fails today: of the stand-in OCR's latitude reads only 25°47'00\"S parses; 25°48'-25°51' come as 25°48/00\\S, 25°48'00~s, 25°49/00*s, 25-4900s, 2595000\"s (' read as /, \" as ~ or *, ° as - or 9), so the grid has one latitude label and is not found (grid.found false); offline and 60 km away the call fails"]
 fn castle_gorge_grid_far_gps_offline() {
     grid_far_offline(&CASTLE_GORGE);
 }
@@ -416,7 +417,6 @@ fn castle_gorge_grid_phone_ocr_half_the_labels() {
 }
 
 #[test]
-#[ignore = "fails today: parse_coordinate rejects ' read as / and \" read as ~ (25°50/00~S, 27*34/00\"E, 27°36'00~E); only 25*48'00\"S parses (° as * is accepted), so 1 latitude and 0 longitude labels: grid not found, and offline the call fails"]
 fn castle_gorge_grid_phone_ocr_garbled_marks() {
     grid_phone(
         &CASTLE_GORGE,
@@ -435,7 +435,6 @@ fn castle_gorge_grid_phone_ocr_label_merged_with_credit() {
 }
 
 #[test]
-#[ignore = "fails today: as castle_gorge_grid_phone_ocr_garbled_marks (/ for ' and ~ for \" are rejected: 1 latitude, 0 longitude labels; the merged read 27*34/00\"E GIS V1 Sept 2017- Eras Gous is rejected for its /); the merge alone passes"]
 fn castle_gorge_grid_phone_ocr_garbled_and_merged() {
     grid_phone(
         &CASTLE_GORGE,
@@ -454,7 +453,6 @@ fn mhlabatini_fixture_is_consistent() {
 }
 
 #[test]
-#[ignore = "fails today: of the stand-in OCR's latitude reads only 25°50' parses (25°5000S, 25°50'00\"s); 25°48', 25°49', 25°51', 25°52' come as 2548100s, 25/48100S, 25°4900*s, 25°51'00/s, 2552100/s (° dropped or read as /, ' as 1 or dropped, \" as * or /), so the grid has one latitude label and is not found (grid.found false); offline and 60 km away the call fails"]
 fn mhlabatini_grid_far_gps_offline() {
     grid_far_offline(&MHLABATINI);
 }
@@ -480,7 +478,6 @@ fn mhlabatini_grid_phone_ocr_half_the_labels() {
 }
 
 #[test]
-#[ignore = "fails today: parse_coordinate rejects ' read as / and \" read as ~ (25°51/00~S, 27*19/00\"E, 27°21'00~E); only 25*49'00\"S parses (° as * is accepted), so 1 latitude and 0 longitude labels: grid not found, and offline the call fails"]
 fn mhlabatini_grid_phone_ocr_garbled_marks() {
     grid_phone(&MHLABATINI, Degrade { garble: true, merge: false }, "grid, phone OCR: half the labels, marks garbled");
 }
@@ -495,7 +492,6 @@ fn mhlabatini_grid_phone_ocr_label_merged_with_credit() {
 }
 
 #[test]
-#[ignore = "fails today: as mhlabatini_grid_phone_ocr_garbled_marks (/ for ' and ~ for \" are rejected: 1 latitude, 0 longitude labels; the merged read GIS V1 Sept 2017- Eras Gous 27*19/00\"E is rejected for its /); the merge alone passes"]
 fn mhlabatini_grid_phone_ocr_garbled_and_merged() {
     grid_phone(
         &MHLABATINI,
