@@ -8,15 +8,19 @@
 //!    once per map from an overview of the whole map: the *paper grid* (the
 //!    paper white per block: 90th percentile per channel, 3 × 3 maximum, 3 × 3
 //!    box blur, floored at 0.2), and on the flat-fielded overview (`rgb /
-//!    paper`) in OKLab the darkest ink level `ink`, the paper noise `dead` and
-//!    the chroma `gain` that brings a photo's washed-out colours back.
+//!    paper`) in OKLab the darkest ink level `ink` (which sets a photo's
+//!    *flare*, removed in linear light), the paper noise `dead` and the chroma
+//!    `gain` that brings a photo's washed-out colours back; for a photo, the
+//!    *edge bands* where the table shows inside the page's corners.
 //! 2. **Render** ([`DarkStyle::render`]), per tile: flat-field each pixel by
-//!    the paper grid at its normalised map position, then map it through the
-//!    style's 65³ lookup table (trilinear) of [`dark_pixel`]: lightness
-//!    inverted in OKLab (paper → the app's night paper, black ink → light
-//!    grey), each feature's hue kept, saturated colour lifted even when light,
+//!    the paper grid at its normalised map position, remove the flare (a
+//!    per-channel curve), then map it through the style's 65³ lookup table
+//!    (trilinear) of [`dark_pixel`]: lightness inverted in OKLab (paper → the
+//!    app's night paper, black ink → light grey), each feature's hue kept,
+//!    saturated spot inks lifted even when light (tints only to a mid tone),
 //!    pale fills left as background, out-of-gamut colours brought in by
-//!    reducing chroma at constant lightness and hue.
+//!    reducing chroma at constant lightness and hue. Edge bands render as the
+//!    night paper.
 //!
 //! A [`DarkStyle`] is immutable, `Send + Sync`, and renders on the calling
 //! thread only: the app renders tiles on CATiledLayer's threads concurrently.
@@ -42,8 +46,20 @@ pub const GREY_GATE_DARK_L: f64 = 0.25;
 /// Gained chroma where saturated colour starts to count as a feature, and the ramp width.
 pub const SATURATION_START: f64 = 0.07;
 pub const SATURATION_RAMP: f64 = 0.08;
-/// How strongly saturation alone lifts a pixel (`f = max(t, 0.8 · s)`).
+/// How strongly saturation alone lifts a full-strength spot ink (`f = max(t, sw · s)`, `sw` up to
+/// 0.8): yellow roads and red routes are features even when light.
 pub const SATURATION_WEIGHT: f64 = 0.8;
+/// How strongly saturation alone lifts a tint (a light ink screened with white, such as a
+/// vegetation hatch or a boundary's pink band): `sw = 0.45 + (0.8 − 0.45) ·
+/// smoothstep(0.52, 0.64, S)`, `S` the HSV saturation `(max − min) / max` of the pixel's
+/// sRGB with its chroma gained. On the Grootkloof print the tints have S 0.47–0.55, the
+/// spot inks 0.62 (the dashed stream's mid blue) to 1.
+pub const TINT_WEIGHT: f64 = 0.45;
+pub const TINT_SATURATION: (f64, f64) = (0.52, 0.64);
+/// OKLab lightness of black ink on a print, and of a photo's darkest ink once the flare (the
+/// veiling light that lifts a photo's blacks) is removed in linear light: `φ = max(ink³ −
+/// 0.12³, 0) / (1 − 0.12³)`, `lin′ = clamp((lin − φ) / (1 − φ), 0, 1)`.
+pub const FLARE_FREE_INK: f64 = 0.12;
 /// Chroma boost of ink on the dark background.
 pub const CHROMA_BOOST: f64 = 1.1;
 /// Typical chroma of a printed map's coloured ink (median over clearly inked pixels: 0.135 on the
@@ -51,12 +67,24 @@ pub const CHROMA_BOOST: f64 = 1.1;
 pub const INK_CHROMA: f64 = 0.12;
 /// Largest chroma gain for washed-out colours.
 pub const MAX_GAIN: f64 = 1.8;
-/// Lookup table nodes per axis (over flat-fielded sRGB 0..1).
+/// Lookup table nodes per axis (over flat-fielded sRGB 0..1, flare removed).
 pub const LUT_SIZE: usize = 65;
+/// Intervals of the per-channel flare curve applied before the lookup table (photos only).
+pub const FLARE_CURVE_SIZE: usize = 1024;
 /// Overviews larger than this (long side) are box-downsampled before profiling.
 pub const MAX_OVERVIEW_SIDE: usize = 2048;
 /// Version of the profile JSON.
 pub const PROFILE_VERSION: u64 = 1;
+
+/// A profile with paper noise `dead` at least this is a photo: only then are the page's
+/// edges searched for non-paper bands (a PDF's full-bleed content is never cropped).
+pub const EDGE_MIN_DEAD: f64 = 0.035;
+/// Deepest edge band, as a fraction of the map's width (left, right) or height (top, bottom).
+pub const EDGE_MAX_DEPTH: f64 = 0.03;
+/// Paper pixels in a row that end an edge band.
+const EDGE_PAPER_RUN: usize = 3;
+/// Edge depths are stored in at most this many bins per edge.
+const EDGE_BINS: usize = 256;
 
 /// Paper white is never taken darker than this (sRGB), so deep shadow is not blown up.
 const PAPER_FLOOR: f32 = 0.2;
@@ -178,22 +206,71 @@ pub struct DarkParams {
 
 impl DarkParams {
     /// Typical parameters of a printed (PDF) map.
-    pub const PRINT: DarkParams = DarkParams { ink: 0.15, dead: 0.02, gain: 1.0 };
+    pub const PRINT: DarkParams = DarkParams { ink: 0.12, dead: 0.02, gain: 1.0 };
+
+    /// The flare (veiling light) over the map's ink in linear light, removed before the tone
+    /// map: `φ = max(ink³ − 0.12³, 0) / (1 − 0.12³)`. 0 for a print, ~0.053 for a phone photo.
+    pub fn flare(&self) -> f64 {
+        if self.ink <= FLARE_FREE_INK {
+            return 0.0;
+        }
+        let cube = |v: f64| v * v * v;
+        (cube(self.ink) - cube(FLARE_FREE_INK)) / (1.0 - cube(FLARE_FREE_INK))
+    }
+
+    /// OKLab lightness of the map's darkest ink once the flare is removed (0.12, or `ink` when
+    /// it is darker).
+    pub fn ink_lightness(&self) -> f64 {
+        self.ink.min(FLARE_FREE_INK)
+    }
 }
 
-/// The dark rendering of one flat-fielded pixel in OKLab, before gamut mapping:
-/// `(L, a, b)` → `(L′, a′, b′)` (see `docs/ARCHITECTURE.md`, "Dark map").
+/// Remove the flare `phi` from a linear-sRGB pixel: `clamp((lin − φ) / (1 − φ), 0, 1)`.
+#[inline]
+pub fn remove_flare(lin: [f64; 3], phi: f64) -> [f64; 3] {
+    if phi <= 0.0 {
+        lin
+    } else {
+        lin.map(|c| ((c - phi) / (1.0 - phi)).clamp(0.0, 1.0))
+    }
+}
+
+/// The flare removal on one encoded sRGB channel (0..1).
+fn remove_flare_srgb(v: f64, phi: f64) -> f64 {
+    linear_to_srgb(remove_flare([srgb_to_linear(v.clamp(0.0, 1.0)); 3], phi)[0])
+}
+
+/// HSV saturation `(max − min) / max` of an OKLab colour's sRGB (clipped to the gamut).
+fn hsv_saturation(lab: [f64; 3]) -> f64 {
+    let rgb = oklab_to_linear(lab).map(|c| linear_to_srgb(c.clamp(0.0, 1.0)));
+    let (max, min) = (rgb[0].max(rgb[1]).max(rgb[2]), rgb[0].min(rgb[1]).min(rgb[2]));
+    if max > 1e-6 {
+        (max - min) / max
+    } else {
+        0.0
+    }
+}
+
+/// The dark rendering of one flat-fielded pixel in OKLab (flare removed), before gamut
+/// mapping: `(L, a, b)` → `(L′, a′, b′)` (see `docs/ARCHITECTURE.md`, "Dark map").
 pub fn dark_lab([l, a, b]: [f64; 3], p: &DarkParams) -> [f64; 3] {
     let paper = night_paper_lab();
     let c = a.hypot(b);
     // How much ink, by lightness.
-    let t = (((1.0 - l) - p.dead) / ((1.0 - p.ink) - p.dead)).clamp(0.0, 1.0);
+    let t = (((1.0 - l) - p.dead) / ((1.0 - p.ink_lightness()) - p.dead)).clamp(0.0, 1.0);
     // Grey stays grey: no amplified colour casts. Near black, where OKLab chroma is unstable
     // (JPEG noise around black text has C ≈ 0.03), a colour must be proportionally stronger.
     let gate = smoothstep(GREY_GATE.0, GREY_GATE.1, c * (l / GREY_GATE_DARK_L).clamp(0.0, 1.0));
-    // Saturated colour is a feature even when light; pale fills stay background.
+    // Saturated colour is a feature even when light; pale fills stay background. A spot ink
+    // (yellow road, red route) is lifted fully, a tint (vegetation hatch) only to a mid tone.
     let s = ((c * p.gain * gate - SATURATION_START) / SATURATION_RAMP).clamp(0.0, 1.0);
-    let f = t.max(SATURATION_WEIGHT * s);
+    let sw = if s > 0.0 {
+        let sat = hsv_saturation([l, p.gain * a, p.gain * b]);
+        TINT_WEIGHT + (SATURATION_WEIGHT - TINT_WEIGHT) * smoothstep(TINT_SATURATION.0, TINT_SATURATION.1, sat)
+    } else {
+        SATURATION_WEIGHT
+    };
+    let f = t.max(sw * s);
     let l2 = paper[0] + (INK_LIGHTNESS - paper[0]) * f.powf(LIGHTNESS_GAMMA);
     // The night paper's slight tint on paper, the feature's hue on ink.
     let w = (4.0 * f).clamp(0.0, 1.0);
@@ -201,8 +278,14 @@ pub fn dark_lab([l, a, b]: [f64; 3], p: &DarkParams) -> [f64; 3] {
     [l2, k * a + (1.0 - w) * paper[1], k * b + (1.0 - w) * paper[2]]
 }
 
-/// The exact dark rendering of a flat-fielded linear-sRGB pixel, as encoded sRGB 0..1.
+/// The exact dark rendering of a flat-fielded linear-sRGB pixel, as encoded sRGB 0..1
+/// (flare removed, tone mapped, gamut mapped).
 pub fn dark_linear(lin: [f64; 3], p: &DarkParams) -> [f64; 3] {
+    tone_linear(remove_flare(lin, p.flare()), p)
+}
+
+/// [`dark_linear`] of a pixel whose flare is already removed.
+fn tone_linear(lin: [f64; 3], p: &DarkParams) -> [f64; 3] {
     oklab_to_srgb(dark_lab(linear_to_oklab(lin), p))
 }
 
@@ -284,6 +367,147 @@ impl PaperGrid {
 }
 
 // ---------------------------------------------------------------------------
+// Edge inset
+// ---------------------------------------------------------------------------
+
+/// Bands along the edges of a photographed page that are not paper (the table showing inside a
+/// curled or folded corner), rendered as the night paper. Per edge, the band's depth as a
+/// fraction of the map's width (`left`, `right`) or height (`top`, `bottom`), sampled along the
+/// edge like the paper grid: `n` bins with centres at `(i + 0.5) / n`, linear in between,
+/// clamped at the ends. A pixel whose centre `(u, v)` has `u < left(v)`, `1 − u < right(v)`,
+/// `v < top(u)` or `1 − v < bottom(u)` is outside the page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EdgeInset {
+    pub left: Vec<f32>,
+    pub right: Vec<f32>,
+    pub top: Vec<f32>,
+    pub bottom: Vec<f32>,
+}
+
+/// Running median (`max = false`, odd window) or maximum of `r` samples each side, mirrored at
+/// the ends (`c b | a b c d | c b`).
+fn running(v: &[f32], r: usize, max: bool) -> Vec<f32> {
+    let n = v.len() as isize;
+    let at = |i: isize| -> f32 {
+        let mut i = i;
+        if n == 1 {
+            return v[0];
+        }
+        loop {
+            if i < 0 {
+                i = -i;
+            } else if i >= n {
+                i = 2 * (n - 1) - i;
+            } else {
+                return v[i as usize];
+            }
+        }
+    };
+    let r = r as isize;
+    (0..n)
+        .map(|i| {
+            let mut w: Vec<f32> = (i - r..=i + r).map(at).collect();
+            if max {
+                w.into_iter().fold(f32::MIN, f32::max)
+            } else {
+                let k = w.len() / 2;
+                *w.select_nth_unstable_by(k, f32::total_cmp).1
+            }
+        })
+        .collect()
+}
+
+impl EdgeInset {
+    /// Edge bands of a `w × h` overview from its paper mask (`paper(x, y)`: the flat-fielded
+    /// pixel is light and grey). Per scanline across each edge, the depth is the distance from
+    /// the border to the first run of 3 paper pixels, capped at 3 % of the scanline; smoothed
+    /// along the edge by a running median of 9 then a running maximum of 5 (mirrored ends),
+    /// widened by one pixel where it is not 0 (the blurred border between table and paper), and
+    /// binned (each bin the largest depth within half a bin of it, so the interpolation never
+    /// falls below a scanline's own depth). `None` when no edge has a band.
+    pub fn from_paper_mask(w: usize, h: usize, paper: impl Fn(usize, usize) -> bool) -> Option<EdgeInset> {
+        // Depth along scanlines `0..lines`, each `len` long, with `at(line, k)` = paper at
+        // distance `k` from the border.
+        let edge = |lines: usize, len: usize, at: &dyn Fn(usize, usize) -> bool| -> Vec<f32> {
+            let cap = (EDGE_MAX_DEPTH * len as f64).round() as usize;
+            let depths: Vec<f32> = (0..lines)
+                .map(|line| {
+                    let mut run = 0;
+                    for k in 0..len.min(cap + EDGE_PAPER_RUN) {
+                        run = if at(line, k) { run + 1 } else { 0 };
+                        if run == EDGE_PAPER_RUN {
+                            return (k + 1 - EDGE_PAPER_RUN) as f32;
+                        }
+                    }
+                    cap as f32
+                })
+                .collect();
+            // Plus a pixel of margin where there is a band: the blurred border between table
+            // and paper is neither.
+            let depths: Vec<f32> = running(&running(&depths, 4, false), 2, true)
+                .into_iter()
+                .map(|d| if d > 0.0 { d + 1.0 } else { 0.0 })
+                .collect();
+            // Bin, normalise by the scanline's length.
+            let bins = lines.clamp(1, EDGE_BINS);
+            (0..bins)
+                .map(|b| {
+                    let lo = ((b as f64 - 0.5) * lines as f64 / bins as f64).floor().max(0.0) as usize;
+                    let hi = (((b as f64 + 1.5) * lines as f64 / bins as f64).ceil() as usize).min(lines);
+                    let d = depths[lo..hi.max(lo + 1).min(lines)].iter().copied().fold(0.0f32, f32::max);
+                    (((d as f64 / len as f64) * 1e4).ceil() / 1e4) as f32
+                })
+                .collect()
+        };
+        let inset = EdgeInset {
+            left: edge(h, w, &|y, k| paper(k, y)),
+            right: edge(h, w, &|y, k| paper(w - 1 - k, y)),
+            top: edge(w, h, &|x, k| paper(x, k)),
+            bottom: edge(w, h, &|x, k| paper(x, h - 1 - k)),
+        };
+        let any = [&inset.left, &inset.right, &inset.top, &inset.bottom].iter().any(|e| e.iter().any(|&d| d > 0.0));
+        any.then_some(inset)
+    }
+
+    /// Depth of one edge at position `u` along it.
+    #[inline]
+    fn depth(e: &[f32], u: f64) -> f64 {
+        let (i0, i1, f) = grid_axis(u, e.len());
+        (e[i0] + (e[i1] - e[i0]) * f) as f64
+    }
+
+    /// Whether the pixel centred at normalised map position `(u, v)` is outside the page.
+    pub fn outside(&self, u: f64, v: f64) -> bool {
+        u < Self::depth(&self.left, v)
+            || 1.0 - u < Self::depth(&self.right, v)
+            || v < Self::depth(&self.top, u)
+            || 1.0 - v < Self::depth(&self.bottom, u)
+    }
+
+    fn to_json(&self) -> Value {
+        json!({"left": json4(&self.left), "right": json4(&self.right), "top": json4(&self.top), "bottom": json4(&self.bottom)})
+    }
+
+    fn from_json(v: &Value) -> Result<EdgeInset, String> {
+        let side = |k: &str| -> Result<Vec<f32>, String> {
+            let a = v.get(k).and_then(Value::as_array).ok_or_else(|| format!("edge `{k}` missing"))?;
+            if a.is_empty() || a.len() > 4096 {
+                return Err(format!("edge `{k}` has {} values", a.len()));
+            }
+            a.iter()
+                .map(|x| {
+                    x.as_f64()
+                        .filter(|d| (0.0..=0.25).contains(d))
+                        .map(|d| d as f32)
+                        .ok_or_else(|| format!("edge `{k}` values must be in 0..0.25"))
+                })
+                .collect()
+        };
+        Ok(EdgeInset { left: side("left")?, right: side("right")?, top: side("top")?, bottom: side("bottom")? })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Profile
 // ---------------------------------------------------------------------------
 
@@ -292,10 +516,17 @@ impl PaperGrid {
 pub struct DarkProfile {
     pub params: DarkParams,
     pub paper: PaperGrid,
+    /// Non-paper bands along a photographed page's edges (photos only).
+    pub edge: Option<EdgeInset>,
 }
 
 fn round4(v: f64) -> f64 {
     (v * 1e4).round() / 1e4
+}
+
+/// Values stored with 4 decimals, as JSON numbers (`0.8375`, not the f32's `0.8374999761581421`).
+fn json4(v: &[f32]) -> Vec<f64> {
+    v.iter().map(|&x| round4(x as f64)).collect()
 }
 
 /// Quantile with linear interpolation between order statistics (NumPy's default).
@@ -433,23 +664,51 @@ impl DarkProfile {
             return Err(format!("Overview too small for a dark profile: {w}×{h} pixels"));
         }
         let paper = paper_grid(ov);
-        // OKLab L and C of the flat-fielded overview.
-        let lc: Vec<(f32, f32)> = (0..h)
-            .into_par_iter()
-            .flat_map_iter(|y| {
-                let v = (y as f64 + 0.5) / h as f64;
-                let paper = &paper;
-                (0..w).map(move |x| {
-                    let p = paper.sample((x as f64 + 0.5) / w as f64, v);
-                    let c = ov.rgb(x, y);
-                    let flat = [0, 1, 2].map(|k| (c[k] as f32 / 255.0 / p[k]).min(1.0) as f64);
-                    let [l, a, b] = srgb_to_oklab(flat);
-                    (l as f32, a.hypot(b) as f32)
-                })
+        let (params, lc) = Self::tone(ov, &paper);
+        let DarkParams { ink, dead, gain } = params;
+        let t_of = |l: f32| ((1.0 - l as f64) - dead) / ((1.0 - ink.min(FLARE_FREE_INK)) - dead);
+        // A photo's page edges: where the flat-fielded overview is not light grey paper.
+        let edge = if dead >= EDGE_MIN_DEAD {
+            EdgeInset::from_paper_mask(w, h, |x, y| {
+                let (l, c) = lc[y * w + x];
+                t_of(l) < 0.2 && c as f64 * gain < 0.05
             })
-            .collect();
+        } else {
+            None
+        };
+        Ok(DarkProfile { params, paper, edge })
+    }
+
+    /// The tone parameters of an overview flat-fielded by `paper`, and the OKLab L and C of
+    /// its pixels (flare removed).
+    fn tone(ov: &Rgb8, paper: &PaperGrid) -> (DarkParams, Vec<(f32, f32)>) {
+        let (w, h) = (ov.w, ov.h);
+        // The flat-fielded overview in linear light, by rows (computed per pass, not stored).
+        let flat_rows = |f: &(dyn Fn([f64; 3]) -> (f32, f32) + Sync)| -> Vec<(f32, f32)> {
+            (0..h)
+                .into_par_iter()
+                .flat_map_iter(|y| {
+                    let v = (y as f64 + 0.5) / h as f64;
+                    (0..w).map(move |x| {
+                        let p = paper.sample((x as f64 + 0.5) / w as f64, v);
+                        let c = ov.rgb(x, y);
+                        f([0, 1, 2].map(|k| srgb_to_linear((c[k] as f32 / 255.0 / p[k]).min(1.0) as f64)))
+                    })
+                })
+                .collect()
+        };
+        let lab_lc = |lin: [f64; 3]| {
+            let [l, a, b] = linear_to_oklab(lin);
+            (l as f32, a.hypot(b) as f32)
+        };
+        // The darkest ink, and the flare over it (none on a print: its L and C are final).
+        let lc = flat_rows(&lab_lc);
         let mut ls: Vec<f32> = lc.iter().map(|p| p.0).collect();
-        let ink = quantile(&mut ls, 0.007).clamp(0.12, 0.65);
+        let ink = round4(quantile(&mut ls, 0.007).clamp(FLARE_FREE_INK, 0.65));
+        let phi = DarkParams { ink, dead: 0.0, gain: 1.0 }.flare();
+        // OKLab L and C with the flare removed.
+        let lc = if phi > 0.0 { flat_rows(&|lin| lab_lc(remove_flare(lin, phi))) } else { lc };
+        let mut ls: Vec<f32> = lc.iter().map(|p| p.0).collect();
         // Paper noise: the brighter 45 % of the pixels.
         let l55 = quantile(&mut ls, 0.55) as f32;
         let mut bright: Vec<f32> = ls.iter().copied().filter(|&l| l > l55).collect();
@@ -459,32 +718,34 @@ impl DarkProfile {
         let med = quantile(&mut bright, 0.5);
         let mut dev: Vec<f32> = bright.iter().map(|&l| (l as f64 - med).abs() as f32).collect();
         let mad = quantile(&mut dev, 0.5);
-        let dead = (1.0 - med + 3.0 * 1.4826 * mad).clamp(0.015, 0.12);
+        let dead = round4((1.0 - med + 3.0 * 1.4826 * mad).clamp(0.015, 0.12));
+        let ink_l = ink.min(FLARE_FREE_INK);
+        let t_of = |l: f32| ((1.0 - l as f64) - dead) / ((1.0 - ink_l) - dead);
         // Chroma of clearly coloured ink.
-        let mut chroma: Vec<f32> = lc
-            .iter()
-            .filter(|&&(l, c)| {
-                let t = ((1.0 - l as f64) - dead) / ((1.0 - ink) - dead);
-                t >= 0.5 && c >= 0.025
-            })
-            .map(|p| p.1)
-            .collect();
-        let gain =
-            if chroma.len() < 200 { 1.0 } else { (INK_CHROMA / quantile(&mut chroma, 0.5)).clamp(1.0, MAX_GAIN) };
-        Ok(DarkProfile { params: DarkParams { ink: round4(ink), dead: round4(dead), gain: round4(gain) }, paper })
+        let mut chroma: Vec<f32> = lc.iter().filter(|&&(l, c)| t_of(l) >= 0.5 && c >= 0.025).map(|p| p.1).collect();
+        let gain = round4(if chroma.len() < 200 {
+            1.0
+        } else {
+            (INK_CHROMA / quantile(&mut chroma, 0.5)).clamp(1.0, MAX_GAIN)
+        });
+        (DarkParams { ink, dead, gain }, lc)
     }
 
-    /// `{"status":"ok","version":1,"ink","dead","gain","paper":{"cols","rows","rgb":[...]}}`.
+    /// `{"status":"ok","version":1,"ink","dead","gain","paper":{"cols","rows","rgb":[...]}}`, plus
+    /// `"edge":{"left","right","top","bottom"}` when a photographed page has edge bands.
     pub fn to_json(&self) -> String {
-        json!({
+        let mut v = json!({
             "status": "ok",
             "version": PROFILE_VERSION,
             "ink": self.params.ink,
             "dead": self.params.dead,
             "gain": self.params.gain,
-            "paper": {"cols": self.paper.cols, "rows": self.paper.rows, "rgb": self.paper.rgb},
-        })
-        .to_string()
+            "paper": {"cols": self.paper.cols, "rows": self.paper.rows, "rgb": json4(&self.paper.rgb)},
+        });
+        if let Some(e) = &self.edge {
+            v["edge"] = e.to_json();
+        }
+        v.to_string()
     }
 
     /// Parse and validate a profile written by [`DarkProfile::to_json`].
@@ -522,7 +783,11 @@ impl DarkProfile {
             .collect::<Result<Vec<f32>, _>>()?;
         let paper = PaperGrid { cols: dim("cols")?, rows: dim("rows")?, rgb };
         paper.validate()?;
-        Ok(DarkProfile { params, paper })
+        let edge = match v.get("edge") {
+            None | Some(Value::Null) => None,
+            Some(e) => Some(EdgeInset::from_json(e)?),
+        };
+        Ok(DarkProfile { params, paper, edge })
     }
 }
 
@@ -565,10 +830,16 @@ impl TileRect {
 pub struct DarkStyle {
     params: DarkParams,
     paper: PaperGrid,
-    /// Output sRGB × 255 at node `(r, g, b)` (index `(r · 65 + g) · 65 + b`, node k at k / 64).
+    edge: Option<EdgeInset>,
+    /// A photo's flare removal per channel, sampled over flat-fielded sRGB at k / 1024 (linear
+    /// in between), applied before the table: the removal's kink at `φ` would bend the
+    /// trilinear table's colours. `None` for a print (no flare).
+    flare_curve: Option<Box<[f32]>>,
+    /// Output sRGB × 255 at node `(r, g, b)` (index `(r · 65 + g) · 65 + b`, node k at k / 64),
+    /// over flat-fielded sRGB with the flare removed.
     lut: Box<[Node]>,
-    /// Every node with all coordinates ≥ this renders as the night paper, so a flat-fielded
-    /// pixel with every channel ≥ it is paper without interpolating (the same bytes).
+    /// A flat-fielded pixel with every channel ≥ this falls in that corner of the table (after
+    /// the flare curve), so it is paper without interpolating (the same bytes).
     paper_from: f32,
     /// The rendered night paper, 8-bit.
     paper_rgb: [u8; 3],
@@ -596,12 +867,16 @@ impl DarkStyle {
     pub fn new(profile: &DarkProfile) -> DarkStyle {
         let p = profile.params;
         let n = LUT_SIZE;
+        let phi = p.flare();
+        let flare_curve: Option<Box<[f32]>> = (phi > 0.0).then(|| {
+            (0..=FLARE_CURVE_SIZE).map(|k| remove_flare_srgb(k as f64 / FLARE_CURVE_SIZE as f64, phi) as f32).collect()
+        });
         let lin: Vec<f64> = (0..n).map(|k| srgb_to_linear(k as f64 / (n - 1) as f64)).collect();
         let mut lut = vec![Node::default(); n * n * n].into_boxed_slice();
         lut.par_chunks_mut(n * n).enumerate().for_each(|(r, plane)| {
             for (gi, row) in plane.chunks_exact_mut(n).enumerate() {
                 for (bi, o) in row.iter_mut().enumerate() {
-                    let c = dark_linear([lin[r], lin[gi], lin[bi]], &p);
+                    let c = tone_linear([lin[r], lin[gi], lin[bi]], &p);
                     *o = Node([(c[0] * 255.0) as f32, (c[1] * 255.0) as f32, (c[2] * 255.0) as f32, 0.0]);
                 }
             }
@@ -620,7 +895,22 @@ impl DarkStyle {
             from = k;
         }
         let paper_rgb = [0, 1, 2].map(|k| (white[k] + 0.5) as u8);
-        DarkStyle { params: p, paper: profile.paper.clone(), lut, paper_from: from as f32 / (n - 1) as f32, paper_rgb }
+        let corner = from as f32 / (n - 1) as f32;
+        // Before the flare curve: the first curve sample at or past the corner (the curve is
+        // monotone, so every pixel from there on lands in the corner).
+        let paper_from = match &flare_curve {
+            None => corner,
+            Some(c) => c.iter().position(|&v| v >= corner).unwrap_or(FLARE_CURVE_SIZE) as f32 / FLARE_CURVE_SIZE as f32,
+        };
+        DarkStyle {
+            params: p,
+            paper: profile.paper.clone(),
+            edge: profile.edge.clone(),
+            flare_curve,
+            lut,
+            paper_from,
+            paper_rgb,
+        }
     }
 
     /// Build the style from profile JSON.
@@ -636,9 +926,26 @@ impl DarkStyle {
         &self.paper
     }
 
+    pub fn edge(&self) -> Option<&EdgeInset> {
+        self.edge.as_ref()
+    }
+
     /// The lookup table's rendering of a flat-fielded pixel (sRGB 0..1), as sRGB × 255.
     #[inline]
     pub fn lut_rgb(&self, x: [f32; 3]) -> [f32; 3] {
+        match &self.flare_curve {
+            None => self.lut_interp(x),
+            Some(c) => self.lut_interp(x.map(|v| {
+                let f = v.clamp(0.0, 1.0) * FLARE_CURVE_SIZE as f32;
+                let i = (f as usize).min(FLARE_CURVE_SIZE - 1);
+                c[i] + (c[i + 1] - c[i]) * (f - i as f32)
+            })),
+        }
+    }
+
+    /// Trilinear interpolation of the table at `x` (flare already removed).
+    #[inline]
+    fn lut_interp(&self, x: [f32; 3]) -> [f32; 3] {
         const N: usize = LUT_SIZE;
         const SCALE: f32 = (LUT_SIZE - 1) as f32;
         let split = |v: f32| -> (usize, f32) {
@@ -707,25 +1014,47 @@ impl DarkStyle {
             return Err(format!("tile buffer holds {} bytes, needs {need}", rgba.len()));
         }
         let cols = self.paper.cols;
-        // Grid columns and weights per tile column (the same for every row).
-        let xs: Vec<(usize, usize, f32)> =
-            (0..w).map(|x| grid_axis(rect.u0 + (x as f64 + 0.5) / w as f64 * rect.du, cols)).collect();
+        // Map position, grid columns and weights per tile column (the same for every row).
+        let us: Vec<f64> = (0..w).map(|x| rect.u0 + (x as f64 + 0.5) / w as f64 * rect.du).collect();
+        let xs: Vec<(usize, usize, f32)> = us.iter().map(|&u| grid_axis(u, cols)).collect();
         let mut row3 = vec![[0.0f32; 3]; cols];
         // The paper grid interpolated at this row, × 255 (fourth lane unused): the flat field
         // is `min(c / (255 · paper), 1)` per channel.
         let mut paper_row = vec![[1.0f32; 4]; cols];
+        let flat = |px: &[u8], p: [f32; 4]| -> [f32; 3] {
+            [(px[0] as f32 / p[0]).min(1.0), (px[1] as f32 / p[1]).min(1.0), (px[2] as f32 / p[2]).min(1.0)]
+        };
+        // A photographed page's edge bands, per tile column: the top and bottom band depths.
+        let edge_cols: Option<(&EdgeInset, Vec<(f64, f64)>)> = self
+            .edge
+            .as_ref()
+            .map(|e| (e, us.iter().map(|&u| (EdgeInset::depth(&e.top, u), EdgeInset::depth(&e.bottom, u))).collect()));
         for y in 0..h {
-            self.paper.row_at(rect.v0 + (y as f64 + 0.5) / h as f64 * rect.dv, &mut row3);
+            let v = rect.v0 + (y as f64 + 0.5) / h as f64 * rect.dv;
+            self.paper.row_at(v, &mut row3);
             for (o, c) in paper_row.iter_mut().zip(&row3) {
                 *o = [255.0 * c[0], 255.0 * c[1], 255.0 * c[2], 1.0];
             }
             let row = &mut rgba[y * stride..y * stride + w * 4];
-            for (px, &(i0, i1, fx)) in row.chunks_exact_mut(4).zip(&xs) {
-                let p = lerp4(paper_row[i0], paper_row[i1], fx);
-                let x =
-                    [(px[0] as f32 / p[0]).min(1.0), (px[1] as f32 / p[1]).min(1.0), (px[2] as f32 / p[2]).min(1.0)];
-                let o = shade(x);
-                px[..3].copy_from_slice(&o);
+            match &edge_cols {
+                None => {
+                    for (px, &(i0, i1, fx)) in row.chunks_exact_mut(4).zip(&xs) {
+                        let o = shade(flat(px, lerp4(paper_row[i0], paper_row[i1], fx)));
+                        px[..3].copy_from_slice(&o);
+                    }
+                }
+                Some((e, tb)) => {
+                    let (left, right) = (EdgeInset::depth(&e.left, v), EdgeInset::depth(&e.right, v));
+                    for (((px, &(i0, i1, fx)), &u), &(top, bottom)) in row.chunks_exact_mut(4).zip(&xs).zip(&us).zip(tb)
+                    {
+                        let o = if u < left || 1.0 - u < right || v < top || 1.0 - v < bottom {
+                            self.paper_rgb
+                        } else {
+                            shade(flat(px, lerp4(paper_row[i0], paper_row[i1], fx)))
+                        };
+                        px[..3].copy_from_slice(&o);
+                    }
+                }
             }
         }
         Ok(())
@@ -821,9 +1150,29 @@ mod tests {
                 rows: 2,
                 rgb: vec![0.9412, 0.93, 0.9, 1.0, 1.0, 1.0, 0.5, 0.25, 0.2, 0.7, 0.7, 0.7],
             },
+            edge: None,
         };
         let s = profile.to_json();
+        assert!(!s.contains("edge"));
         assert_eq!(DarkProfile::from_json(&s).unwrap(), profile);
+        let edged = DarkProfile {
+            edge: Some(EdgeInset {
+                left: vec![0.0, 0.0123],
+                right: vec![0.0],
+                top: vec![0.02, 0.0, 0.0],
+                bottom: vec![0.0, 0.03],
+            }),
+            ..profile.clone()
+        };
+        let e = edged.to_json();
+        assert_eq!(DarkProfile::from_json(&e).unwrap(), edged);
+        let mut ev: Value = serde_json::from_str(&e).unwrap();
+        ev["edge"]["top"] = json!([]);
+        assert!(DarkProfile::from_json(&ev.to_string()).is_err());
+        ev["edge"]["top"] = json!([0.5]);
+        assert!(DarkProfile::from_json(&ev.to_string()).is_err());
+        ev["edge"] = Value::Null;
+        assert_eq!(DarkProfile::from_json(&ev.to_string()).unwrap(), profile);
         let mut v: Value = serde_json::from_str(&s).unwrap();
         for (path, bad) in [
             ("version", json!(2)),
@@ -848,7 +1197,7 @@ mod tests {
     #[test]
     fn paper_corner_of_the_table_is_exactly_the_night_paper() {
         for (p, expect_from) in [(DarkParams::PRINT, 0.985), (DarkParams { ink: 0.4, dead: 0.06, gain: 1.8 }, 0.95)] {
-            let style = DarkStyle::new(&DarkProfile { params: p, paper: PaperGrid::uniform([1.0; 3]) });
+            let style = DarkStyle::new(&DarkProfile { params: p, paper: PaperGrid::uniform([1.0; 3]), edge: None });
             assert!(style.paper_from <= expect_from, "{p:?}: paper corner from {}", style.paper_from);
             assert_eq!(style.paper_rgb, [33, 33, 36]);
             // Interpolating inside the corner gives the same bytes as the shortcut.
@@ -862,9 +1211,12 @@ mod tests {
                 assert_eq!(style.lut_rgb(x).map(|v| (v + 0.5) as u8), style.paper_rgb, "{x:?}");
             }
             // One node below the corner is no longer all paper.
-            let below = style.paper_from - 1.0 / 64.0;
             let n = LUT_SIZE;
-            let k = (below * 64.0).round() as usize;
+            let corner = match &style.flare_curve {
+                None => style.paper_from,
+                Some(c) => c[(style.paper_from * FLARE_CURVE_SIZE as f32).round() as usize],
+            };
+            let k = (corner * 64.0).round() as usize - 1;
             let differs = (k..n).any(|r| {
                 (k..n).any(|g| (k..n).any(|b| style.lut[(r * n + g) * n + b].0 != style.lut[n * n * n - 1].0))
             });
@@ -873,8 +1225,39 @@ mod tests {
     }
 
     #[test]
+    fn running_filters_mirror_the_ends() {
+        let v = [5.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 9.0, 0.0];
+        // The last sample's window is (9, 0, 9): the mirror repeats its neighbour.
+        assert_eq!(running(&v, 1, false), vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 9.0]);
+        assert_eq!(running(&v, 1, true), vec![5.0, 5.0, 0.0, 0.0, 0.0, 9.0, 9.0, 9.0]);
+        assert_eq!(running(&[3.0], 4, false), vec![3.0]);
+    }
+
+    #[test]
+    fn edge_inset_finds_bands_and_tells_outside() {
+        // 100×80 page: a band 6 px deep along the left edge on rows 20..60 (a table showing),
+        // thin ink lines elsewhere along the border.
+        let (w, h) = (100, 80);
+        let paper = |x: usize, y: usize| !((20..60).contains(&y) && x < 6) && x != 10 && y != 3;
+        let e = EdgeInset::from_paper_mask(w, h, paper).expect("a band");
+        assert_eq!(e.left.len(), h);
+        assert_eq!(e.top.len(), w);
+        // Depth 6 of 100 where the band is (capped at 3 % = 3 px), plus a pixel of margin.
+        assert!((e.left[40] - 0.04).abs() < 1e-6, "{:?}", e.left);
+        assert_eq!(e.left[5], 0.0);
+        assert!(e.right.iter().all(|&d| d == 0.0));
+        assert!(e.bottom.iter().all(|&d| d == 0.0));
+        // Row 3 is ink: the first 3 paper pixels down from the top start at row 0, so no band.
+        assert!(e.top.iter().all(|&d| d == 0.0), "{:?}", e.top);
+        assert!(e.outside(0.01, 0.5) && !e.outside(0.04, 0.5) && !e.outside(0.01, 0.05));
+        // Nothing found: no inset.
+        assert!(EdgeInset::from_paper_mask(w, h, |_, _| true).is_none());
+    }
+
+    #[test]
     fn render_rejects_bad_arguments() {
-        let style = DarkStyle::new(&DarkProfile { params: DarkParams::PRINT, paper: PaperGrid::uniform([1.0; 3]) });
+        let style =
+            DarkStyle::new(&DarkProfile { params: DarkParams::PRINT, paper: PaperGrid::uniform([1.0; 3]), edge: None });
         let mut buf = vec![255u8; 16 * 4];
         assert!(style.render(&mut buf, 4, 4, 16, TileRect::FULL).is_ok());
         assert_eq!(&buf[..4], &[33, 33, 36, 255]);

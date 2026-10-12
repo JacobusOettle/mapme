@@ -57,7 +57,7 @@ fn render_rgb(style: &DarkStyle, img: &Rgb8, rect: TileRect) -> Rgb8 {
 }
 
 fn style_of(params: DarkParams) -> DarkStyle {
-    DarkStyle::new(&DarkProfile { params, paper: PaperGrid::uniform([1.0; 3]) })
+    DarkStyle::new(&DarkProfile { params, paper: PaperGrid::uniform([1.0; 3]), edge: None })
 }
 
 fn take_json(p: *mut c_char) -> Value {
@@ -68,9 +68,35 @@ fn take_json(p: *mut c_char) -> Value {
 }
 
 fn print_profile(name: &str, p: &DarkProfile) {
+    let edge = match &p.edge {
+        None => "no edge bands".to_string(),
+        Some(e) => {
+            let max = |v: &[f32]| v.iter().copied().fold(0.0f32, f32::max);
+            let (n, k) = (400usize, 400usize);
+            let outside = (0..n * k)
+                .filter(|i| {
+                    e.outside((i % n) as f64 / n as f64 + 0.5 / n as f64, (i / n) as f64 / k as f64 + 0.5 / k as f64)
+                })
+                .count();
+            format!(
+                "edge bands up to left {:.4} right {:.4} top {:.4} bottom {:.4} ({:.2} % of the map)",
+                max(&e.left),
+                max(&e.right),
+                max(&e.top),
+                max(&e.bottom),
+                100.0 * outside as f64 / (n * k) as f64
+            )
+        }
+    };
     println!(
-        "{name}: ink {:.4}, dead {:.4}, gain {:.4}, paper grid {}×{}",
-        p.params.ink, p.params.dead, p.params.gain, p.paper.cols, p.paper.rows
+        "{name}: ink {:.4} (flare {:.4}), dead {:.4}, gain {:.4}, paper grid {}×{}, {edge}, profile JSON {} bytes",
+        p.params.ink,
+        p.params.flare(),
+        p.params.dead,
+        p.params.gain,
+        p.paper.cols,
+        p.paper.rows,
+        p.to_json().len()
     );
 }
 
@@ -316,11 +342,20 @@ fn lightness_order_is_inverted() {
                 );
             }
             assert!(ls[0] - ls[255] > 0.4, "{p:?}: range {} … {}", ls[0], ls[255]);
-            // Strictly: between the darkest ink and paper, every step darker renders lighter.
+            // Strictly: between the darkest ink and paper, every step darker renders lighter,
+            // except where saturation alone lifts the ink (a photo's dark brown with its chroma
+            // gained: L′ at the lift's ceiling, `f = 0.8`).
+            let ceiling =
+                night_paper_lab()[0] + (INK_LIGHTNESS - night_paper_lab()[0]) * SATURATION_WEIGHT.powf(LIGHTNESS_GAMMA);
             for i in 1..ls.len() {
                 let l = srgb_to_oklab(ramp(i as f64 / 255.0))[0];
-                if l > p.ink + 0.01 && 1.0 - l > p.dead + 0.01 {
-                    assert!(ls[i] < ls[i - 1], "{p:?}: flat at {i} (input L {l:.3})");
+                if l > p.ink + 0.01 && 1.0 - l > p.dead + 0.01 && ls[i - 1] < ceiling - 1e-6 {
+                    assert!(
+                        ls[i] < ls[i - 1],
+                        "{p:?}: flat at {i} (input L {l:.3}, L′ {} {}, ceiling {ceiling})",
+                        ls[i - 1],
+                        ls[i]
+                    );
                 }
             }
         }
@@ -401,6 +436,81 @@ fn pale_fills_stay_dark_and_yellow_roads_stay_readable() {
     }
 }
 
+/// WCAG contrast ratio of two encoded sRGB colours.
+fn contrast(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let y = |c: [f64; 3]| {
+        let l = c.map(srgb_to_linear);
+        0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2]
+    };
+    let (ya, yb) = (y(a), y(b));
+    (ya.max(yb) + 0.05) / (ya.min(yb) + 0.05)
+}
+
+fn delta_e(a: [f64; 3], b: [f64; 3]) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+/// The print's inks, rendered with its own profile (exact path). Spot inks (yellow and orange
+/// roads, the red route, the cyan gate symbol) are lifted to L′ ≈ 0.8 even when light; tints
+/// (the vegetation hatch, the boundary's pink band) only to a mid tone, so they stay below
+/// the roads and the route instead of glaring; contours stay calm tan.
+#[test]
+fn print_inks_keep_their_hierarchy() {
+    let p = map_fixture().profile.params;
+    let inks: [(&str, [u8; 3]); 13] = [
+        ("black text", [0, 0, 0]),
+        ("yellow road", [255, 255, 2]),
+        ("orange road", [254, 156, 2]),
+        ("route red", [235, 10, 4]),
+        ("dark route red", [179, 25, 23]),
+        ("boundary pink", [249, 129, 128]),
+        ("vegetation hatch", [185, 222, 101]),
+        ("gate cyan", [0, 229, 255]),
+        ("river blue", [13, 89, 230]),
+        ("dashed river", [82, 144, 214]),
+        ("contour tan", [180, 150, 120]),
+        ("pale green fill", [212, 228, 168]),
+        ("grey casing", [150, 150, 150]),
+    ];
+    let night = NIGHT_PAPER_SRGB;
+    let mut out = std::collections::HashMap::new();
+    for (name, c) in inks {
+        let x = c.map(|v| v as f64 / 255.0);
+        let o = dark_pixel(x, &p);
+        let lab = srgb_to_oklab(o);
+        let o8 = o.map(|v| (v * 255.0).round() as u8);
+        println!(
+            "{name:>17} #{:02X}{:02X}{:02X} → #{:02X}{:02X}{:02X}  L′ {:.3}  C {:.3}  {:.2}:1 on the night paper",
+            c[0],
+            c[1],
+            c[2],
+            o8[0],
+            o8[1],
+            o8[2],
+            lab[0],
+            chroma(lab),
+            contrast(o, night)
+        );
+        out.insert(name, lab);
+    }
+    let l = |n: &str| out[n][0];
+    assert!((l("yellow road") - 0.80).abs() <= 0.01, "yellow road L′ {:.3}", l("yellow road"));
+    assert!(l("orange road") >= 0.75, "orange road L′ {:.3}", l("orange road"));
+    assert!(l("gate cyan") >= 0.75, "gate cyan L′ {:.3}", l("gate cyan"));
+    assert!(l("route red") >= 0.75, "route red L′ {:.3}", l("route red"));
+    assert!(l("dashed river") >= 0.62, "dashed river L′ {:.3}", l("dashed river"));
+    // Tints stay below the spot inks.
+    assert!(l("vegetation hatch") <= 0.65, "vegetation hatch L′ {:.3}", l("vegetation hatch"));
+    assert!(l("vegetation hatch") >= 0.5, "vegetation hatch L′ {:.3}", l("vegetation hatch"));
+    assert!(chroma(out["vegetation hatch"]) > 0.08, "vegetation lost its green");
+    let de = delta_e(out["route red"], out["boundary pink"]);
+    assert!(de >= 0.1, "route and boundary band ΔE {de:.3}");
+    // Contours stay calm, pale fills stay background.
+    assert!((0.45..=0.62).contains(&l("contour tan")), "contour L′ {:.3}", l("contour tan"));
+    assert!(l("pale green fill") < 0.4);
+    assert!(l("black text") >= 0.88);
+}
+
 // ---------------------------------------------------------------------------
 // Lookup table, tiles, levels
 // ---------------------------------------------------------------------------
@@ -454,7 +564,9 @@ fn fixture_pixels(fx: &Fixture, n: usize, seed: u64) -> Vec<[f64; 3]> {
 
 /// The 65³ trilinear table against the exact formula. Map pixels (random pixels of the print and
 /// of the real photo, flat-fielded) are within 2/255 at the 99th percentile and within an OKLab
-/// distance of 0.02 everywhere. The largest per-channel errors (up to ~15/255) sit where the
+/// distance of 0.02 (print) or 0.035 (photo: its chroma gain of 1.8 and the tint weight make the
+/// formula steeper there; the flare removal runs as a per-channel curve before the table, so
+/// its kink does not bend the table) everywhere. The largest per-channel errors (up to ~15/255) sit where the
 /// gamut mapping pins a channel at 0 (e.g. the B of a bright orange), where sRGB encoding is
 /// steepest: an OKLab distance of ~0.003 there. Over the whole cube (any colour, including the
 /// most saturated ones the gamut mapping bends hardest) the errors are larger but rare.
@@ -467,13 +579,15 @@ fn lookup_table_matches_the_formula() {
             e.max, e.p999, e.p99, e.mean, e.max_de, e.worst
         );
     };
-    for (name, fx, seed) in [("print pixels", map_fixture(), 0xDA2C), ("photo pixels", photo_fixture(), 0xDA2D)] {
+    for (name, fx, seed, max_de, tile_p999) in
+        [("print pixels", map_fixture(), 0xDA2C, 0.02, 2), ("photo pixels", photo_fixture(), 0xDA2D, 0.035, 4)]
+    {
         let style = DarkStyle::from_json(&fx.json).unwrap();
         let e = lut_error(&style, &fixture_pixels(fx, 100_000, seed));
         report(name, &e);
         assert!(e.p99 <= 2.0, "{name}: 99th percentile error {:.2}/255", e.p99);
         assert!(e.mean <= 0.25, "{name}: mean error {:.3}/255", e.mean);
-        assert!(e.max_de <= 0.02, "{name}: OKLab error {:.4} at {:?}", e.max_de, e.worst);
+        assert!(e.max_de <= max_de, "{name}: OKLab error {:.4} at {:?}", e.max_de, e.worst);
         // The 8-bit renders of a tile agree too.
         let (x, y, n) = (fx.image.w / 3, fx.image.h / 3, 512);
         let mut lut = rgba_from_rgb(&crop_rgb(&fx.image, x, y, n, n));
@@ -485,7 +599,7 @@ fn lookup_table_matches_the_formula() {
         d.sort_unstable();
         let (p999, max) = (d[(d.len() - 1) * 999 / 1000], d[d.len() - 1]);
         println!("  512×512 tile, LUT vs exact render: bytes differ by ≤ {p999} for 99.9 %, ≤ {max} for all");
-        assert!(p999 <= 2, "{name}: 8-bit render differs by {p999} at the 99.9th percentile");
+        assert!(p999 <= tile_p999, "{name}: 8-bit render differs by {p999} at the 99.9th percentile");
     }
     for (name, p, seed) in [("whole cube, print", DarkParams::PRINT, 0xC0BE), ("whole cube, photo", PHOTO, 0xC0BF)] {
         let mut rng = Rng::new(seed);
@@ -498,6 +612,31 @@ fn lookup_table_matches_the_formula() {
     }
 }
 
+/// The `n × n` crop of `image` at `(cx, cy)` rendered as 2 × 2 and 3 × 3 tiles gives exactly
+/// `whole`, its render as one tile.
+fn assert_tilings_match(name: &str, style: &DarkStyle, image: &Rgb8, (cx, cy, n): (usize, usize, usize), whole: &Rgb8) {
+    let (mw, mh) = (image.w, image.h);
+    let crop = crop_rgb(image, cx, cy, n, n);
+    for k in [2usize, 3] {
+        let edges: Vec<usize> = (0..=k).map(|i| i * n / k).collect();
+        let mut tiled = vec![0u8; n * n * 3];
+        for j in 0..k {
+            for i in 0..k {
+                let (x0, y0, tw, th) = (edges[i], edges[j], edges[i + 1] - edges[i], edges[j + 1] - edges[j]);
+                let tile = crop_rgb(&crop, x0, y0, tw, th);
+                let out = render_rgb(style, &tile, TileRect::of_pixels(cx + x0, cy + y0, tw, th, mw, mh));
+                for y in 0..th {
+                    tiled[((y0 + y) * n + x0) * 3..((y0 + y) * n + x0 + tw) * 3]
+                        .copy_from_slice(&out.data[y * tw * 3..(y + 1) * tw * 3]);
+                }
+            }
+        }
+        let diff = tiled.iter().zip(&whole.data).filter(|(a, b)| a != b).count();
+        println!("{name}: {k}×{k} tiles vs one tile: {diff} bytes differ");
+        assert_eq!(diff, 0, "{name}: {k}×{k} tiles differ from the single tile");
+    }
+}
+
 #[test]
 fn tiles_are_seamless_across_sizes_and_levels() {
     let _g = serial();
@@ -507,24 +646,17 @@ fn tiles_are_seamless_across_sizes_and_levels() {
     let (cx, cy, n) = (1200, 1700, 1024);
     let crop = crop_rgb(&fx.image, cx, cy, n, n);
     let whole = render_rgb(&style, &crop, TileRect::of_pixels(cx, cy, n, n, mw, mh));
-    for k in [2usize, 3] {
-        let edges: Vec<usize> = (0..=k).map(|i| i * n / k).collect();
-        let mut tiled = vec![0u8; n * n * 3];
-        for j in 0..k {
-            for i in 0..k {
-                let (x0, y0, tw, th) = (edges[i], edges[j], edges[i + 1] - edges[i], edges[j + 1] - edges[j]);
-                let tile = crop_rgb(&crop, x0, y0, tw, th);
-                let out = render_rgb(&style, &tile, TileRect::of_pixels(cx + x0, cy + y0, tw, th, mw, mh));
-                for y in 0..th {
-                    tiled[((y0 + y) * n + x0) * 3..((y0 + y) * n + x0 + tw) * 3]
-                        .copy_from_slice(&out.data[y * tw * 3..(y + 1) * tw * 3]);
-                }
-            }
-        }
-        let diff = tiled.iter().zip(&whole.data).filter(|(a, b)| a != b).count();
-        println!("{k}×{k} tiles vs one tile: {diff} bytes differ");
-        assert_eq!(diff, 0, "{k}×{k} tiles differ from the single tile");
-    }
+    assert_tilings_match("print", &style, &fx.image, (cx, cy, n), &whole);
+    // The real photo's top-right corner, across its edge bands (the table's slivers).
+    let photo = photo_fixture();
+    let pstyle = DarkStyle::from_json(&photo.json).unwrap();
+    assert!(pstyle.edge().is_some());
+    let (px, pn) = (photo.image.w - 600, 600);
+    let pcrop = crop_rgb(&photo.image, px, 0, pn, pn);
+    let pwhole = render_rgb(&pstyle, &pcrop, TileRect::of_pixels(px, 0, pn, pn, photo.image.w, photo.image.h));
+    let night = pwhole.data.chunks_exact(3).filter(|p| p == &[33, 33, 36]).count();
+    assert!(night * 3 > pn * pn, "the photo corner is mostly night paper");
+    assert_tilings_match("photo corner", &pstyle, &photo.image, (px, 0, pn), &pwhole);
     // Pyramid level 1: the half-size crop rendered over the same rectangle ≈ the half-size render.
     let half = render_rgb(&style, &box_downsample(&crop, 2), TileRect::of_pixels(cx, cy, n, n, mw, mh));
     let reference = box_downsample(&whole, 2);
@@ -550,6 +682,9 @@ fn profile_of_the_printed_map() {
     assert!(p.ink < 0.25, "ink {}", p.ink);
     assert!((1.0..=1.3).contains(&p.gain), "gain {}", p.gain);
     assert!(p.dead <= 0.03, "dead {}", p.dead);
+    // A print has no flare and no edge bands (its full-bleed content is never cropped).
+    assert_eq!(p.flare(), 0.0);
+    assert!(fx.profile.edge.is_none() && !fx.json.contains("edge"));
     // The paper of a PDF render is white everywhere.
     let lowest = fx.profile.paper.rgb.iter().copied().fold(1.0f32, f32::min);
     assert!(lowest > 0.9, "paper grid down to {lowest}");
@@ -584,6 +719,39 @@ fn profile_of_the_real_photo_and_its_even_paper() {
     let (si, so) = evenness("real photo paper", &fx.image, &out, &mask);
     assert!(so < 0.02, "rendered paper uneven: std L {so:.4} (input {si:.4})");
     assert!(so < si / 2.0);
+    let (w, h) = (out.w, out.h);
+    let labs: Vec<[f64; 3]> = out.data.chunks_exact(3).map(lab_u8).collect();
+    // The wooden table showing at the page's left and right edges (1.2 % of the image, bright
+    // orange) is not drawn: bright orange pixels within 3 % of those edges.
+    let band = w * 3 / 100;
+    let orange = labs
+        .iter()
+        .enumerate()
+        .filter(|&(i, lab)| {
+            let (x, hue) = (i % w, lab[2].atan2(lab[1]).to_degrees());
+            (x < band || x >= w - band) && lab[0] > 0.6 && chroma(*lab) > 0.08 && (40.0..80.0).contains(&hue)
+        })
+        .count();
+    let orange_pct = 100.0 * orange as f64 / (w * h) as f64;
+    // The flare removed, the photo's ink is as calm as the print's: inside the page (5 % in from
+    // its edges) the mean lightness and the share of bright pixels.
+    let inner: Vec<f64> = labs
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| {
+            let (x, y) = (i % w, i / w);
+            x >= w / 20 && x < w - w / 20 && y >= h / 20 && y < h - h / 20
+        })
+        .map(|(_, lab)| lab[0])
+        .collect();
+    let mean = inner.iter().sum::<f64>() / inner.len() as f64;
+    let bright = 100.0 * inner.iter().filter(|&&l| l > 0.55).count() as f64 / inner.len() as f64;
+    println!(
+        "real photo render: {orange_pct:.3} % bright orange at the left and right edges; inside the page mean L {mean:.3}, {bright:.1} % above L 0.55"
+    );
+    assert!(orange_pct < 0.05, "table slivers drawn: {orange_pct:.3} %");
+    assert!(mean <= 0.335, "photo renders hazy: mean L {mean:.3}");
+    assert!(bright <= 7.0, "photo renders busy: {bright:.1} % above L 0.55");
 }
 
 #[test]
@@ -796,12 +964,31 @@ fn speed() {
     let t0 = Instant::now();
     let _ = DarkProfile::from_rgb8(&box_downsample(&fx.image, 3)).unwrap();
     let profile_ms = t0.elapsed().as_secs_f64() * 1e3;
+    // A photo tile (flare curve, edge bands) at the page's top-right corner.
+    let photo = photo_fixture();
+    let pstyle = DarkStyle::from_json(&photo.json).unwrap();
+    let (px, py) = (photo.image.w - n, 0);
+    let psrc = rgba_from_rgb(&crop_rgb(&photo.image, px, py, n, n));
+    let prect = TileRect::of_pixels(px, py, n, n, photo.image.w, photo.image.h);
+    let mut ptimes: Vec<f64> = (0..15)
+        .map(|_| {
+            let mut tile = psrc.clone();
+            let t = Instant::now();
+            pstyle.render(&mut tile, n, n, n * 4, prect).unwrap();
+            t.elapsed().as_secs_f64() * 1e3
+        })
+        .collect();
+    ptimes.sort_by(f64::total_cmp);
+    let t0 = Instant::now();
+    let _ = DarkProfile::from_rgb8(&photo.image).unwrap();
+    let photo_profile_ms = t0.elapsed().as_secs_f64() * 1e3;
     println!(
-        "style (65³ LUT) build {:.1} ms (best of 3); 512×512 tile render {:.2} ms median, {:.2} ms best; profile of a 1169×1653 overview {profile_ms:.0} ms",
-        builds[0], times[7], times[0]
+        "style (65³ LUT) build {:.1} ms (best of 3); 512×512 tile render {:.2} ms median, {:.2} ms best (photo {:.2} ms median); profile of a 1169×1653 overview {profile_ms:.0} ms (photo, 850×1116: {photo_profile_ms:.0} ms)",
+        builds[0], times[7], times[0], ptimes[7]
     );
     assert!(builds[0] < 150.0, "style creation took {:.1} ms", builds[0]);
     assert!(times[7] < 30.0, "512×512 render took {:.2} ms", times[7]);
+    assert!(ptimes[7] < 30.0, "512×512 photo render took {:.2} ms", ptimes[7]);
 }
 
 // ---------------------------------------------------------------------------
@@ -833,19 +1020,29 @@ fn dark_dump() {
     let (mw, mh) = (map.image.w, map.image.h);
     let ov = box_downsample(&map.image, 3);
     save("map_overview", &ov, &render_rgb(&style, &ov, TileRect::FULL));
-    for (name, x, y, w, h) in [("map_gully_1to1", 1200, 1700, 1200, 1000), ("map_legend_1to1", 100, 3850, 1500, 1050)] {
+    for (name, x, y, w, h) in [
+        ("map_gully_1to1", 1200, 1700, 1200, 1000),
+        ("map_legend_1to1", 100, 3850, 1500, 1050),
+        ("map_vegetation_1to1", 900, 700, 1000, 800),
+    ] {
         let c = crop_rgb(&map.image, x, y, w, h);
         save(name, &c, &render_rgb(&style, &c, TileRect::of_pixels(x, y, w, h, mw, mh)));
     }
 
     let photo = photo_fixture();
     print_profile("real photo", &photo.profile);
+    std::fs::write(dir.join("photo_profile.json"), &photo.json).unwrap();
     let style = DarkStyle::from_json(&photo.json).unwrap();
     let (pw, ph) = (photo.image.w, photo.image.h);
     save("photo_overview", &photo.image, &render_rgb(&style, &photo.image, TileRect::FULL));
-    let (x, y, w, h) = (500, 850, 700, 600);
-    let c = crop_rgb(&photo.image, x, y, w, h);
-    save("photo_crop_1to1", &c, &render_rgb(&style, &c, TileRect::of_pixels(x, y, w, h, pw, ph)));
+    for (name, x, y, w, h) in [
+        ("photo_crop_1to1", 500, 850, 700, 600),
+        ("photo_corner_1to1", pw - 400, 0, 400, 400),
+        ("photo_fold_1to1", 0, 1550, 700, 400),
+    ] {
+        let c = crop_rgb(&photo.image, x, y, w, h);
+        save(name, &c, &render_rgb(&style, &c, TileRect::of_pixels(x, y, w, h, pw, ph)));
+    }
 
     let synth = synth_fixture();
     print_profile("synthetic photo", &synth.profile);
