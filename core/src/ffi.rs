@@ -6,6 +6,7 @@
 //! are ever created, so `mm_session_progress` / `mm_session_cancel` may run
 //! on other threads while `mm_session_georeference` works.
 
+use crate::dark::{DarkProfile, DarkStyle, TileRect};
 use crate::dem::TileId;
 use crate::georef::{failed_json, fit_control_points_json, Session};
 use crate::image::{Rgb8, RgbaView};
@@ -15,6 +16,11 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 /// Opaque session handle (`MMSession` in C).
 pub struct MMSession {
     inner: Session,
+}
+
+/// Opaque, immutable dark map style (`MMDarkStyle` in C); shared by the threads that render tiles.
+pub struct MMDarkStyle {
+    inner: DarkStyle,
 }
 
 /// Largest raster accepted (pixels per side and in total).
@@ -260,6 +266,126 @@ pub unsafe extern "C" fn mm_detect_page(rgba: *const u8, width: u32, height: u32
             Err(message) => failed_json(&message),
         }
     })
+}
+
+/// Analyse an overview of the whole map for dark rendering (8-bit RGBA, alpha
+/// ignored, rows `bytes_per_row` apart; read during the call, not kept). Returns
+/// `{"status":"ok","version":1,"ink","dead","gain","paper":{"cols","rows","rgb"}}`
+/// or `{"status":"failed","message"}`, never NULL.
+///
+/// # Safety
+/// `rgba` must be NULL or point to at least `bytes_per_row * (height - 1) + width * 4` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn mm_dark_profile(rgba: *const u8, width: u32, height: u32, bytes_per_row: u32) -> *mut c_char {
+    if rgba.is_null() {
+        return into_c_string(failed_json("rgba is NULL"));
+    }
+    if width == 0
+        || height == 0
+        || width > MAX_SIDE
+        || height > MAX_SIDE
+        || width as u64 * height as u64 > MAX_PIXELS
+        || (bytes_per_row as u64) < width as u64 * 4
+    {
+        return into_c_string(failed_json(&format!(
+            "Invalid image: {width}×{height} pixels, {bytes_per_row} bytes per row"
+        )));
+    }
+    let (w, h, stride) = (width as usize, height as usize, bytes_per_row as usize);
+    let Some(len) = stride.checked_mul(h - 1).and_then(|n| n.checked_add(w * 4)) else {
+        return into_c_string(failed_json("Invalid image: too large"));
+    };
+    json_call(|| {
+        let data = std::slice::from_raw_parts(rgba, len);
+        let Some(view) = RgbaView::new(data, w, h, stride) else {
+            return failed_json("Invalid image");
+        };
+        match DarkProfile::from_rgba(&view) {
+            Ok(p) => p.to_json(),
+            Err(message) => failed_json(&message),
+        }
+    })
+}
+
+/// Build a dark style from profile JSON (`mm_dark_profile`'s output). NULL when
+/// the JSON is not a valid profile. Free with `mm_dark_style_free`.
+///
+/// # Safety
+/// `profile_json` must be NULL or a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn mm_dark_style_new(profile_json: *const c_char) -> *mut MMDarkStyle {
+    let Ok(json) = c_str(profile_json, "profile_json") else {
+        return std::ptr::null_mut();
+    };
+    catch_unwind(AssertUnwindSafe(|| match DarkStyle::from_json(json) {
+        Ok(inner) => Box::into_raw(Box::new(MMDarkStyle { inner })),
+        Err(_) => std::ptr::null_mut(),
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// Destroy a dark style. NULL is ignored.
+///
+/// # Safety
+/// `style` must be NULL or a pointer returned by `mm_dark_style_new` that was
+/// not freed yet, with no render on it still running.
+#[no_mangle]
+pub unsafe extern "C" fn mm_dark_style_free(style: *mut MMDarkStyle) {
+    if style.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| drop(Box::from_raw(style))));
+}
+
+/// Render one tile of the map dark, in place (8-bit RGBA, alpha untouched).
+/// The tile covers the normalised map rectangle `[u0, u0 + du] × [v0, v0 + dv]`.
+/// Returns 0, -2 on invalid arguments, -3 on an internal error. Safe to call
+/// from many threads at once with one style (each with its own tile).
+///
+/// # Safety
+/// `style` must be NULL or a live style; `rgba` must be NULL or point to at
+/// least `bytes_per_row * (height - 1) + width * 4` writable bytes not accessed
+/// by anyone else during the call.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn mm_dark_render(
+    style: *const MMDarkStyle,
+    rgba: *mut u8,
+    width: u32,
+    height: u32,
+    bytes_per_row: u32,
+    u0: f64,
+    v0: f64,
+    du: f64,
+    dv: f64,
+) -> i32 {
+    if style.is_null()
+        || rgba.is_null()
+        || width == 0
+        || height == 0
+        || width > MAX_SIDE
+        || height > MAX_SIDE
+        || width as u64 * height as u64 > MAX_PIXELS
+        || (bytes_per_row as u64) < width as u64 * 4
+        || ![u0, v0, du, dv].iter().all(|v| v.is_finite())
+        || du <= 0.0
+        || dv <= 0.0
+    {
+        return MM_ERR_ARGUMENT;
+    }
+    let (w, h, stride) = (width as usize, height as usize, bytes_per_row as usize);
+    let Some(len) = stride.checked_mul(h - 1).and_then(|n| n.checked_add(w * 4)) else {
+        return MM_ERR_ARGUMENT;
+    };
+    let style = &(*style).inner;
+    catch_unwind(AssertUnwindSafe(|| {
+        let data = std::slice::from_raw_parts_mut(rgba, len);
+        match style.render(data, w, h, stride, TileRect { u0, v0, du, dv }) {
+            Ok(()) => MM_OK,
+            Err(_) => MM_ERR_ARGUMENT,
+        }
+    }))
+    .unwrap_or(MM_ERR_PANIC)
 }
 
 /// `{"version": "0.1.0", "build": "release aarch64-ios"}`.

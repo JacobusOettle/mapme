@@ -561,3 +561,94 @@ pub fn save_png(img: &Rgb8, path: &std::path::Path) {
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header().unwrap().write_image_data(&img.data).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Image helpers and the real photo (dark map tests)
+// ---------------------------------------------------------------------------
+
+/// Decode a JPEG file as packed RGB.
+pub fn load_jpeg_file(path: &std::path::Path) -> Rgb8 {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+    let px = dec.decode().expect("decode jpeg");
+    let info = dec.info().unwrap();
+    assert_eq!(info.pixel_format, jpeg_decoder::PixelFormat::RGB24);
+    Rgb8::from_rgb(info.width as usize, info.height as usize, px).unwrap()
+}
+
+/// The real phone photo (1932×2576) of the printed sheet, folded, on a wooden table.
+pub fn real_photo_image() -> Rgb8 {
+    load_jpeg_file(&fixture_dir().join("photo/printed-map-photo.jpg"))
+}
+
+/// Ground-truth paper corners TL, TR, BR, BL of the real photo (`truth.json` `page_quad`).
+pub fn real_photo_page_quad() -> [(f64, f64); 4] {
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture_dir().join("photo/truth.json")).unwrap()).unwrap();
+    let q = v["page_quad"].as_array().unwrap();
+    std::array::from_fn(|i| (q[i][0].as_f64().unwrap(), q[i][1].as_f64().unwrap()))
+}
+
+/// The real photo flattened by its page corners, as the app does (`rectify`, ~1700×2232).
+pub fn real_photo_flattened() -> Rgb8 {
+    rectify(&real_photo_image(), &real_photo_page_quad()).0
+}
+
+/// Packed RGB → RGBA (alpha 255).
+pub fn rgba_from_rgb(img: &Rgb8) -> Vec<u8> {
+    let mut out = vec![255u8; img.w * img.h * 4];
+    for (o, i) in out.chunks_exact_mut(4).zip(img.data.chunks_exact(3)) {
+        o[..3].copy_from_slice(i);
+    }
+    out
+}
+
+/// Tightly packed RGBA → packed RGB.
+pub fn rgb_from_rgba(rgba: &[u8], w: usize, h: usize) -> Rgb8 {
+    let data = rgba.chunks_exact(4).take(w * h).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    Rgb8::from_rgb(w, h, data).unwrap()
+}
+
+/// Pixels `[x, x + w) × [y, y + h)` of `img`.
+pub fn crop_rgb(img: &Rgb8, x: usize, y: usize, w: usize, h: usize) -> Rgb8 {
+    assert!(x + w <= img.w && y + h <= img.h, "crop outside the image");
+    let mut data = Vec::with_capacity(w * h * 3);
+    for row in y..y + h {
+        data.extend_from_slice(&img.data[(row * img.w + x) * 3..(row * img.w + x + w) * 3]);
+    }
+    Rgb8::from_rgb(w, h, data).unwrap()
+}
+
+/// Box-downsample by an integer factor (the image is cut to a multiple of it).
+pub fn box_downsample(img: &Rgb8, f: usize) -> Rgb8 {
+    let (w, h) = (img.w / f, img.h / f);
+    let n = (f * f) as u32;
+    let mut data = vec![0u8; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..3 {
+                let mut s = 0u32;
+                for dy in 0..f {
+                    for dx in 0..f {
+                        s += img.data[((y * f + dy) * img.w + x * f + dx) * 3 + c] as u32;
+                    }
+                }
+                data[(y * w + x) * 3 + c] = ((s + n / 2) / n) as u8;
+            }
+        }
+    }
+    Rgb8::from_rgb(w, h, data).unwrap()
+}
+
+/// `a` and `b` next to each other, tops aligned, with a `gap` px mid-grey gutter.
+pub fn side_by_side(a: &Rgb8, b: &Rgb8, gap: usize) -> Rgb8 {
+    let (w, h) = (a.w + gap + b.w, a.h.max(b.h));
+    let mut data = vec![128u8; w * h * 3];
+    for (img, x0) in [(a, 0), (b, a.w + gap)] {
+        for y in 0..img.h {
+            data[(y * w + x0) * 3..(y * w + x0 + img.w) * 3]
+                .copy_from_slice(&img.data[y * img.w * 3..(y + 1) * img.w * 3]);
+        }
+    }
+    Rgb8::from_rgb(w, h, data).unwrap()
+}

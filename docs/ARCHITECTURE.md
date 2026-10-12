@@ -387,38 +387,66 @@ inversion turns a topographic map muddy: yellow roads and pale green fills go da
 photo's shading and paper tint invert into blotches. The core renders it instead
 (`core/src/dark.rs`, C ABI `mm_dark_profile`, `mm_dark_style_new`, `mm_dark_render`):
 
-1. **Profile** (once per map, from an overview of the whole map, long side ≤ 2048 px):
-   * *paper grid*: blocks of `B = max(8, long side / 32)` px; per block and channel the 90th
-     percentile (the paper white there); a 3 × 3 maximum filter (blocks full of ink borrow the
-     paper of their neighbours) then a 3 × 3 box blur, edges replicated; floored at 0.2. Stored
-     as `cols × rows` sRGB triples; sampled bilinearly in normalised map coordinates with cell
-     centres at `((i + 0.5) / cols, (j + 0.5) / rows)`, clamped at the edges.
-   * *flat field*: `x = clamp(rgb / paper(u, v), 0, 1)` per channel (sRGB-encoded values). White
+1. **Profile** (once per map, from an overview of the whole map, long side ≤ 2048 px; a larger
+   one is box-downsampled first):
+   * *paper grid*: `cols = round(w / B)` × `rows = round(h / B)` cells (at least 1 × 1) of
+     `B = max(8, long side / 32)` px, cell `i` covering pixels `[i·w/cols, (i+1)·w/cols)` so its
+     centre is exactly at the sampling centre below; per cell and channel the 90th percentile
+     (the paper white there); a 3 × 3 maximum filter (cells full of ink borrow the paper of
+     their neighbours) then a 3 × 3 box blur, edges replicated; floored at 0.2; rounded to 1e-4.
+     Stored as `cols × rows` sRGB triples; sampled bilinearly in normalised map coordinates with
+     cell centres at `((i + 0.5) / cols, (j + 0.5) / rows)`, clamped at the edges. The grid
+     position is quantised to 1/4096 of a cell, so every tiling of the map computes the same
+     paper for the same map position.
+   * *flat field*: `x = min(rgb / paper(u, v), 1)` per channel (sRGB-encoded values). White
      paper becomes exactly white wherever it is, in shadow or not.
    * on the flat-fielded overview in OKLab: `ink = clamp(P0.7 %(L), 0.12, 0.65)` (the map's
-     darkest ink: ~0.15 for print, ~0.35–0.45 for a photo); paper noise from the pixels above
-     the 55th percentile of L, `dead = clamp(1 − median + 3 · 1.4826 · MAD, 0.015, 0.12)` (paper
-     grain and JPEG noise stay paper); `gain = clamp(0.07 / median C, 1, 1.8)` over coloured ink
+     darkest ink: 0.12 for the Grootkloof print, 0.38 for the phone photo of it); paper noise
+     from the pixels above the 55th percentile of L,
+     `dead = clamp(1 − median + 3 · 1.4826 · MAD, 0.015, 0.12)` (paper grain and JPEG noise stay
+     paper: 0.015 print, 0.059 photo); `gain = clamp(0.12 / median C, 1, 1.8)` over coloured ink
      pixels (`t ≥ 0.5`, `C ≥ 0.025`; 1 when fewer than 200), so a photo's washed-out colours
-     come back.
+     come back. 0.12 is a print's typical ink chroma: the print's coloured ink has a median C of
+     0.135 (gain 1), a synthetic photo of it (lighting, blur, noise) 0.108 (gain 1.11), the real
+     phone photo 0.080 (gain 1.50).
+   * JSON: `{"status":"ok","version":1,"ink","dead","gain","paper":{"cols","rows","rgb":[…]}}`
+     (~25 × 33 cells, ~15 KB); 170 ms for a 1169 × 1653 overview.
 2. **Render** each pixel of the flat-fielded tile (OKLab `L, a, b`, `C = |(a, b)|`):
    * `t = clamp(((1 − L) − dead) / ((1 − ink) − dead), 0, 1)` – how much ink, by lightness;
-   * `gate = smoothstep(0.012, 0.03, C)` – grey stays grey (no amplified colour casts);
+   * `gate = smoothstep(0.012, 0.03, C · clamp(L / 0.25, 0, 1))` – grey stays grey (no
+     amplified colour casts); near black, where OKLab chroma is unstable, a colour must be
+     proportionally stronger (JPEG noise around black text, e.g. sRGB (0, 0, 4) with C 0.034,
+     would otherwise come out light blue or pink);
    * `s = clamp((C · gain · gate − 0.07) / 0.08, 0, 1)` – saturated colour is a feature even when
      light (yellow roads, routes, water lines), while pale fills (C < 0.07) stay background;
    * `f = max(t, 0.8 · s)`; `L′ = Lp + (0.90 − Lp) · f^0.78`, `Lp` = OKLab L of the night paper
      sRGB (0.13, 0.13, 0.14) (`Theme.uiNightPaper`);
    * `w = clamp(4 f, 0, 1)`; `(a′, b′) = w · 1.1 · gain · gate · (a, b) + (1 − w) · (ap, bp)`
      (the night paper's slight cool tint on paper, the feature's hue on ink);
-   * back to sRGB; out-of-gamut colours lose chroma (same L and hue) rather than being clipped
-     per channel.
+   * back to sRGB; out-of-gamut colours lose chroma (same L and hue, bisection on the chroma
+     scale) rather than being clipped per channel.
 
    Paper becomes the night paper (#212124) exactly, black ink light grey (L 0.90), brown contours
-   tan, blue water blue, red routes red, yellow roads stay readable. The style precomputes the
-   render as a 65³ lookup table over flat-fielded sRGB (trilinear), so a 512 px tile takes a few
-   milliseconds on one core; tiles render on CATiledLayer's threads and are cached as JPEG in
-   `tiles-dark-v2/` (generated on first view, and in the background after import). The library
-   card uses `thumb-dark.jpg`.
+   tan, blue water blue, red routes salmon red, yellow roads stay yellow (L′ 0.8), pale green and
+   blue fills stay dark (L′ < 0.4). The style precomputes the render as a 65³ lookup table over
+   flat-fielded sRGB (trilinear; 16-byte nodes, 4.4 MB, built in ~30 ms on 4 threads), plus the
+   corner of the cube where every node is the night paper (x ≥ 63/64 for a print, lower for a
+   photo), which skips the interpolation with the same bytes. Against the exact formula, on
+   random pixels of the print and of the real photo the table is within 2/255 per channel for
+   99 % of pixels (mean 0.03–0.09/255) and within OKLab ΔE 0.018 everywhere; the largest
+   per-channel differences (up to ~15/255) are where the gamut mapping pins a channel at 0 (the
+   B of a bright orange), where sRGB encoding is steepest and ΔE is ~0.003. A 512 px tile of
+   the print takes ~5 ms on one 2.1 GHz Xeon core (11 ms for random noise, the worst case);
+   rendering in place, the alpha untouched. Tiles render on CATiledLayer's threads and are
+   cached as JPEG in `tiles-dark-v2/` (generated on first view, and in the background after
+   import). The library card uses `thumb-dark.jpg`.
+
+   Checked in `core/tests/dark.rs`: a 1024 px crop rendered as one tile, 2 × 2 or 3 × 3 tiles
+   gives identical bytes, and the half-size crop rendered over the same rectangle is within
+   0.7/255 (mean) of the half-size render. After rendering, the paper is even: std of L over
+   paper pixels 0.0594 → 0.0120 on the real (folded) photo, 0.0869 → 0.0089 on the synthetic
+   photo with its one-sided shadow (night paper L 0.249). `dark_dump` (ignored) writes
+   before/after images of the print, the real photo and a synthetic photo.
 
 ## Repository layout
 
@@ -438,6 +466,7 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
   src/warp.rs         photo warp: offset lattice for paper that is not flat, fitted to
                       traced grid lines and contours, held-out checks, inverse
   src/page.rs         page (paper sheet) finder for photos: mm_detect_page
+  src/dark.rs         dark map: paper grid + flat field, OKLab tone map, 65³ LUT, tile render
   src/labels.rs       coordinate / scale / POI label parsing
   src/grid.rs         grid-line detection, label↔line association, GCP fit
   src/control_points.rs manual calibration fits
@@ -447,7 +476,8 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
   tests/              integration tests on fixtures/grootkloof (photo.rs: synthetic
                       photos of the sheet, flattened from imperfect corners;
                       realphoto.rs: the real phone photo of the folded sheet;
-                      warp.rs: the warp contract and its accuracy on that photo)
+                      warp.rs: the warp contract and its accuracy on that photo;
+                      dark.rs: dark map rendering)
 fixtures/grootkloof/  the real map (PDF + extracted JPEG), DEM tiles, OCR fixture, truth
 ios/                  XcodeGen project (project.yml), app, unit tests, UI tests
 scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
