@@ -1242,10 +1242,18 @@ fn poi_kind(words: &[String]) -> PoiKind {
     PoiKind::Place
 }
 
-/// Turn OCR text into POI candidates (place names, spot heights), skipping
-/// coordinate labels, scale text and legend/title boilerplate.
-pub fn classify_pois(obs: &[OcrObservation]) -> Vec<PoiLabel> {
-    // Normalise whitespace and merge duplicate observations (multi-pass OCR).
+/// What `classify_pois` makes of one (merged) observation.
+enum Verdict {
+    Poi(PoiLabel),
+    /// Map furniture: coordinates, scale, legend, title, imprint.
+    Furniture,
+    /// Unreadable (mostly symbols or digits that are no height).
+    Junk,
+}
+
+/// Merge reads of one label from several OCR passes: identical text (case
+/// and spacing aside) close together keeps the most confident read.
+fn merge_identical(obs: &[OcrObservation]) -> Vec<OcrObservation> {
     let mut merged: Vec<OcrObservation> = Vec::new();
     for o in obs {
         let text = o.text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1268,63 +1276,267 @@ pub fn classify_pois(obs: &[OcrObservation]) -> Vec<PoiLabel> {
             None => merged.push(OcrObservation { text, bbox: o.bbox, confidence: o.confidence }),
         }
     }
+    merged
+}
+
+/// A word of legend text: one of `LEGEND_WORDS`, the start of one cut off by
+/// the OCR ("Non-Peren", "Police Stati", "100m Inter"), several run together
+/// ("PerennialRiver", "DryWaterCourse"), a number, a measure or a single letter.
+fn generic_word(w: &str) -> bool {
+    if w.chars().count() <= 1 || w.chars().all(|c| c.is_ascii_digit()) || is_measure(w) {
+        return true;
+    }
+    let cut = |l: &&str| l.len() > w.len() && l.starts_with(w);
+    if LEGEND_WORDS.contains(&w) || (w.len() >= 4 && LEGEND_WORDS.iter().chain(META_WORDS).any(cut)) {
+        return true;
+    }
+    // Legend words run together: every split point reachable from the start.
+    let n = w.len();
+    let mut reach = vec![false; n + 1];
+    reach[0] = true;
+    for i in 0..n {
+        if !reach[i] || !w.is_char_boundary(i) {
+            continue;
+        }
+        for l in LEGEND_WORDS.iter().filter(|l| l.len() >= 3) {
+            if w[i..].starts_with(l) {
+                reach[i + l.len()] = true;
+            }
+        }
+    }
+    reach[n]
+}
+
+/// Height of the letters of a read: the short side of its box, or less for
+/// a slanted line of text, whose box is about as tall as it is long (from
+/// the box's diagonal and the number of characters, ~0.55 text heights each).
+fn letter_height(o: &OcrObservation) -> f64 {
+    let n = o.text.chars().filter(|c| !c.is_whitespace()).count().max(1) as f64;
+    o.text_height().min(o.bbox[2].hypot(o.bbox[3]) / (0.55 * n))
+}
+
+fn verdict(o: &OcrObservation, furniture: bool, th: f64) -> Verdict {
+    // Large lettering is the title.
+    if furniture || letter_height(o) > TITLE_TEXT_HEIGHT * th {
+        return Verdict::Furniture;
+    }
+    let text = o.text.as_str();
+    if parse_coordinate(text).is_some() || parse_scale(text).is_some() || has_angle_mark(text) {
+        return Verdict::Furniture;
+    }
+    let (x, y) = o.center();
+    if let Some(h) = parse_height(text) {
+        return Verdict::Poi(PoiLabel {
+            name: text.to_string(),
+            kind: PoiKind::SpotHeight,
+            elevation_m: Some(h),
+            x,
+            y,
+        });
+    }
+    if text.contains('©') || text.to_lowercase().contains("(c)") {
+        return Verdict::Furniture;
+    }
+    let mut words = words_of(text);
+    // A trailing height belongs to the name ("Sugarbush Hill 1523m").
+    let mut elevation = None;
+    let mut name = text.to_string();
+    if words.len() >= 2 {
+        let raw: Vec<&str> = text.split_whitespace().collect();
+        let tail = if raw.len() >= 2 && raw[raw.len() - 1].eq_ignore_ascii_case("m") {
+            raw[raw.len() - 2..].join("")
+        } else {
+            raw[raw.len() - 1].to_string()
+        };
+        if let Some(h) = parse_height(&tail).or_else(|| {
+            let t = tail.trim_end_matches(['m', 'M']);
+            t.parse::<f64>().ok().filter(|v| t.len() >= 3 && (-400.0..=8850.0).contains(v))
+        }) {
+            elevation = Some(h);
+            let keep = if tail.len() > raw[raw.len() - 1].len() { raw.len() - 2 } else { raw.len() - 1 };
+            name = raw[..keep].join(" ");
+            words = words_of(&name);
+        }
+    }
+    // Symbols the OCR read around a name ("AASVOELKRANS★", "/FARMGATE").
+    let name = name.trim_matches(|c: char| !c.is_alphanumeric() && !"()'.".contains(c)).to_string();
+    let letters = name.chars().filter(|c| c.is_alphabetic()).count();
+    let others = name.chars().filter(|c| !c.is_whitespace() && !c.is_alphabetic()).count();
+    if letters < 3 || (letters as f64) < 0.6 * (letters + others) as f64 {
+        return Verdict::Junk;
+    }
+    if words.iter().any(|w| META_WORDS.contains(&w.as_str())) {
+        return Verdict::Furniture;
+    }
+    if words.iter().all(|w| generic_word(w)) {
+        return Verdict::Furniture;
+    }
+    // Letters and digits run together in most words (two or more): an imprint read badly
+    // ("GISV1$eet20x"; "RANDWATERBOX2" is a name).
+    let mixed = words
+        .iter()
+        .filter(|w| w.chars().any(|c| c.is_ascii_digit()) && w.chars().any(char::is_alphabetic) && !is_measure(w))
+        .count();
+    if mixed >= 2 && 2 * mixed > words.len() {
+        return Verdict::Junk;
+    }
+    if letters <= 3 {
+        // A short read with no vowel or no consonant is no word ("HHL", "Pws", "AAI"); three
+        // letters read up or down the map are a piece of a longer label printed along a
+        // stream or slope ("ERN", "ADE", "KLO").
+        let vowel = |c: char| "aeiouyAEIOUY".contains(c);
+        let alpha: Vec<char> = name.chars().filter(|c| c.is_alphabetic()).collect();
+        let upright = o.bbox[3] >= 1.5 * o.bbox[2];
+        if !alpha.iter().any(|&c| vowel(c)) || alpha.iter().all(|&c| vowel(c)) || upright {
+            return Verdict::Junk;
+        }
+    }
+    Verdict::Poi(PoiLabel { name, kind: poi_kind(&words), elevation_m: elevation, x, y })
+}
+
+/// Lettering this many times the median text height is the title.
+const TITLE_TEXT_HEIGHT: f64 = 1.6;
+
+/// Lowercase letters and digits of a text: what fragments are compared on.
+fn fragment_key(text: &str) -> Vec<char> {
+    text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// `needle` occurs in `hay` with at most `k` edits (substitutions,
+/// insertions, deletions; Sellers' algorithm).
+fn approx_contains(hay: &[char], needle: &[char], k: usize) -> bool {
+    let m = needle.len();
+    let mut prev: Vec<usize> = (0..=m).collect();
+    if prev[m] <= k {
+        return true;
+    }
+    for &h in hay {
+        let mut cur = vec![0usize; m + 1];
+        for i in 1..=m {
+            let sub = prev[i - 1] + usize::from(needle[i - 1] != h);
+            cur[i] = sub.min(prev[i] + 1).min(cur[i - 1] + 1);
+        }
+        if cur[m] <= k {
+            return true;
+        }
+        prev = cur;
+    }
+    false
+}
+
+/// Longest run of characters `a` and `b` share.
+fn longest_common_run(a: &[char], b: &[char]) -> usize {
+    let mut best = 0;
+    let mut prev = vec![0usize; b.len() + 1];
+    for &x in a {
+        let mut cur = vec![0usize; b.len() + 1];
+        for (j, &y) in b.iter().enumerate() {
+            if x == y {
+                cur[j + 1] = prev[j] + 1;
+                best = best.max(cur[j + 1]);
+            }
+        }
+        prev = cur;
+    }
+    best
+}
+
+/// Fraction of box `a`'s area inside box `b` (`[x, y, w, h]`).
+fn covered_by(a: &[f64; 4], b: &[f64; 4]) -> f64 {
+    let ix = (a[0] + a[2]).min(b[0] + b[2]) - a[0].max(b[0]);
+    let iy = (a[1] + a[3]).min(b[1] + b[3]) - a[1].max(b[1]);
+    let area = a[2] * a[3];
+    if ix <= 0.0 || iy <= 0.0 || area <= 0.0 {
+        0.0
+    } else {
+        ix * iy / area
+    }
+}
+
+/// Several passes read one label in pieces ("KUDUKONA" / "UDU", "1283" /
+/// "283", "MHLABATINI" / "BATI" / "ABATI", "Police Station" / "Stati") or
+/// differently ("KRAAL" / "KRAAZ", "KWAMI LODGE" / "NAMI LODO", "1471" /
+/// "1472"): a POI is a piece or another read of a read next to it when that
+/// read holds its text (exactly, or within one edit from 5 characters), or
+/// when their boxes all but coincide and they share most of their text. The
+/// longer read wins, then the one in more words ("SPARKLING WATERS HOTEL"
+/// over "SPARKLINGWATERSHOTEL"), then the more confident one; a piece of
+/// legend text goes with it. Unreadable reads ("21728" around "1728") never
+/// absorb a POI.
+fn drop_fragments(merged: &[OcrObservation], verdicts: &mut [Verdict]) {
+    let keys: Vec<Vec<char>> = merged.iter().map(|o| fragment_key(&o.text)).collect();
+    let words: Vec<usize> = merged.iter().map(|o| o.text.split_whitespace().count()).collect();
+    let mut drop = vec![false; merged.len()];
+    for (a, oa) in merged.iter().enumerate() {
+        if !matches!(verdicts[a], Verdict::Poi(_)) || keys[a].len() < 3 {
+            continue;
+        }
+        let (ax, ay) = oa.center();
+        drop[a] = merged.iter().enumerate().any(|(b, ob)| {
+            // Unreadable reads and numbers that are no height ("21728") absorb nothing.
+            let absorbs = match verdicts[b] {
+                Verdict::Poi(_) => true,
+                Verdict::Furniture => ob.text.chars().filter(|c| c.is_alphabetic()).count() >= 3,
+                Verdict::Junk => false,
+            };
+            if b == a || !absorbs {
+                return false;
+            }
+            let (ka, kb) = (&keys[a], &keys[b]);
+            let rank = |k: usize, o: &OcrObservation| (keys[k].len(), words[k], o.confidence);
+            let (ra, rb) = (rank(a, oa), rank(b, ob));
+            // A misread of legend text ("TRIG BEAGON") is legend text.
+            let better = (matches!(verdicts[b], Verdict::Furniture) && rb.0 >= ra.0)
+                || rb.0 > ra.0
+                || (rb.0 == ra.0 && (rb.1 > ra.1 || (rb.1 == ra.1 && (rb.2 > ra.2 || (rb.2 == ra.2 && b < a)))));
+            if !better {
+                return false;
+            }
+            let m = 1.5 * oa.text_height().max(ob.text_height());
+            let [x, y, w, h] = ob.bbox;
+            let near = ax >= x - m && ax <= x + w + m && ay >= y - m && ay <= y + h + m;
+            if !near {
+                return false;
+            }
+            // Two reads of one place: boxes that all but coincide, most of the text shared.
+            let same_place = covered_by(&oa.bbox, &ob.bbox).max(covered_by(&ob.bbox, &oa.bbox)) >= 0.6;
+            if same_place && longest_common_run(ka, kb) as f64 >= 0.6 * ka.len().min(kb.len()) as f64 {
+                return true;
+            }
+            let edits = usize::from(ka.len() >= 5);
+            if kb.len() == ka.len() {
+                // Same length: the same read spaced differently, or one letter read differently.
+                ka.iter().zip(kb).filter(|(p, q)| p != q).count() <= edits
+            } else {
+                approx_contains(kb, ka, edits)
+            }
+        });
+    }
+    for (v, d) in verdicts.iter_mut().zip(drop) {
+        if d {
+            *v = Verdict::Junk;
+        }
+    }
+}
+
+/// Turn OCR text into POI candidates (place names, spot heights), skipping
+/// coordinate labels, scale text and legend/title boilerplate, and the
+/// pieces and misreads several OCR passes make of one label.
+pub fn classify_pois(obs: &[OcrObservation]) -> Vec<PoiLabel> {
+    let merged = merge_identical(obs);
     let th = median(merged.iter().map(|o| o.text_height()).filter(|&h| h > 0.0).collect()).unwrap_or(20.0);
     let scale_bar = scale_bar_members(&merged, th);
     let legend = legend_members(&merged, th);
-
-    let mut out: Vec<PoiLabel> = Vec::new();
-    for (i, o) in merged.iter().enumerate() {
-        if scale_bar[i] || legend[i] || o.text_height() > 1.8 * th {
-            continue;
-        }
-        let text = o.text.as_str();
-        if parse_coordinate(text).is_some() || parse_scale(text).is_some() || has_angle_mark(text) {
-            continue;
-        }
-        let (x, y) = o.center();
-        if let Some(h) = parse_height(text) {
-            out.push(PoiLabel { name: text.to_string(), kind: PoiKind::SpotHeight, elevation_m: Some(h), x, y });
-            continue;
-        }
-        if text.contains('©') || text.to_lowercase().contains("(c)") {
-            continue;
-        }
-        let mut words = words_of(text);
-        // A trailing height belongs to the name ("Sugarbush Hill 1523m").
-        let mut elevation = None;
-        let mut name = text.to_string();
-        if words.len() >= 2 {
-            let raw: Vec<&str> = text.split_whitespace().collect();
-            let tail = if raw.len() >= 2 && raw[raw.len() - 1].eq_ignore_ascii_case("m") {
-                raw[raw.len() - 2..].join("")
-            } else {
-                raw[raw.len() - 1].to_string()
-            };
-            if let Some(h) = parse_height(&tail).or_else(|| {
-                let t = tail.trim_end_matches(['m', 'M']);
-                t.parse::<f64>().ok().filter(|v| t.len() >= 3 && (-400.0..=8850.0).contains(v))
-            }) {
-                elevation = Some(h);
-                let keep = if tail.len() > raw[raw.len() - 1].len() { raw.len() - 2 } else { raw.len() - 1 };
-                name = raw[..keep].join(" ");
-                words = words_of(&name);
-            }
-        }
-        let letters = name.chars().filter(|c| c.is_alphabetic()).count();
-        let others = name.chars().filter(|c| !c.is_whitespace() && !c.is_alphabetic()).count();
-        if letters < 3 || (letters as f64) < 0.6 * (letters + others) as f64 {
-            continue;
-        }
-        if words.iter().any(|w| META_WORDS.contains(&w.as_str())) {
-            continue;
-        }
-        let generic =
-            |w: &String| LEGEND_WORDS.contains(&w.as_str()) || w.chars().all(|c| c.is_ascii_digit()) || is_measure(w);
-        if words.iter().all(generic) {
-            continue;
-        }
-        out.push(PoiLabel { name, kind: poi_kind(&words), elevation_m: elevation, x, y });
-    }
+    let mut verdicts: Vec<Verdict> =
+        merged.iter().enumerate().map(|(i, o)| verdict(o, scale_bar[i] || legend[i], th)).collect();
+    drop_fragments(&merged, &mut verdicts);
+    let mut out: Vec<PoiLabel> = verdicts
+        .into_iter()
+        .filter_map(|v| match v {
+            Verdict::Poi(p) => Some(p),
+            _ => None,
+        })
+        .collect();
 
     drop_truncated_heights(&mut out);
 
@@ -1345,13 +1557,32 @@ pub fn classify_pois(obs: &[OcrObservation]) -> Vec<PoiLabel> {
 }
 
 /// Drop spot heights that are misreads with digits missing, such as "112" for a "1412" that a
-/// grid line cuts through: on a sheet whose heights nearly all have the same number of digits
-/// (at least 4 heights, 80 % alike), a height with fewer digits and under half the median is
-/// not believable. Sheets that span lowland and mountain keep their short heights.
+/// grid line cuts through:
+///
+/// * on a sheet whose heights nearly all have the same number of digits (at least 4 heights,
+///   80 % alike), a height with fewer digits and under half the median is not believable;
+/// * on a sheet with at least `MIN_FOUR_DIGIT_HEIGHTS` heights of four digits, a three-digit
+///   height `h` well below all of them (more than `TRUNCATED_HEIGHT_MARGIN_M` under the lowest)
+///   is a misread when 1000 + h or 2000 + h falls among them (their range widened by that
+///   margin): "478" for 1478 on a sheet of 1100–1800 m heights, however many such misreads
+///   there are.
+///
+/// Sheets that span lowland and mountain keep their short heights.
 fn drop_truncated_heights(pois: &mut Vec<PoiLabel>) {
     let digits = |h: f64| (h.abs().trunc() as u64).to_string().len();
-    let heights: Vec<f64> =
-        pois.iter().filter(|p| p.kind == PoiKind::SpotHeight).filter_map(|p| p.elevation_m).collect();
+    let heights = |pois: &[PoiLabel]| -> Vec<f64> {
+        pois.iter().filter(|p| p.kind == PoiKind::SpotHeight).filter_map(|p| p.elevation_m).collect()
+    };
+    let four: Vec<f64> = heights(pois).into_iter().filter(|&h| h >= 1000.0).collect();
+    if four.len() >= MIN_FOUR_DIGIT_HEIGHTS {
+        let lo = four.iter().copied().fold(f64::INFINITY, f64::min) - TRUNCATED_HEIGHT_MARGIN_M;
+        let hi = four.iter().copied().fold(f64::NEG_INFINITY, f64::max) + TRUNCATED_HEIGHT_MARGIN_M;
+        let truncated = |h: f64| {
+            (100.0..1000.0).contains(&h) && h < lo && [1000.0, 2000.0].iter().any(|k| (lo..=hi).contains(&(k + h)))
+        };
+        pois.retain(|p| p.kind != PoiKind::SpotHeight || !p.elevation_m.is_some_and(truncated));
+    }
+    let heights = heights(pois);
     if heights.len() < 4 {
         return;
     }
@@ -1365,6 +1596,11 @@ fn drop_truncated_heights(pois: &mut Vec<PoiLabel>) {
         p.kind != PoiKind::SpotHeight || p.elevation_m.is_none_or(|h| digits(h) >= typical || h >= 0.5 * med)
     });
 }
+
+/// `drop_truncated_heights`: four-digit heights needed to judge three-digit ones…
+const MIN_FOUR_DIGIT_HEIGHTS: usize = 3;
+/// …and how far beyond their range (metres) a truncated height may point.
+const TRUNCATED_HEIGHT_MARGIN_M: f64 = 250.0;
 
 /// "5m", "100m", "2km" style measurement tokens.
 fn is_measure(w: &str) -> bool {
@@ -1666,6 +1902,82 @@ mod tests {
         let obs: Vec<_> =
             heights.iter().enumerate().map(|(k, t)| ob(t, 200.0 + 300.0 * k as f64, 400.0, 54.0, 20.0)).collect();
         assert_eq!(classify_pois(&obs).len(), heights.len());
+    }
+
+    #[test]
+    fn three_digit_misreads_of_mountain_heights_are_dropped() {
+        let at = |hs: &[&str]| -> Vec<OcrObservation> {
+            hs.iter()
+                .enumerate()
+                .map(|(k, t)| ob(t, 200.0 + 300.0 * k as f64, 400.0 + 97.0 * k as f64, 54.0, 20.0))
+                .collect()
+        };
+        let names = |p: Vec<PoiLabel>| p.into_iter().map(|q| q.name).collect::<Vec<_>>();
+        // Magaliesberg: 1100–1800 m, with as many misreads as heights read whole (the 80 % rule
+        // gives up on such a sheet).
+        let p = classify_pois(&at(&["1478", "514", "1283", "649", "1716", "341", "1554", "132", "478", "1141"]));
+        assert_eq!(names(p), vec!["1478", "1283", "1716", "1554", "1141"]);
+        // Lowland and mountain on one sheet: fewer than three four-digit heights.
+        let p = classify_pois(&at(&["112", "348", "905", "1210", "1488", "760"]));
+        assert_eq!(p.len(), 6);
+        // Hills around 1000 m: three-digit heights close to the four-digit ones are real.
+        let p = classify_pois(&at(&["1012", "1043", "1121", "987", "912", "844", "763"]));
+        assert_eq!(p.len(), 7, "{:?}", names(p));
+        // Low three-digit heights far below them that point nowhere into their range stay too.
+        let p = classify_pois(&at(&["1012", "1043", "1121", "623"]));
+        assert_eq!(p.len(), 4);
+    }
+
+    #[test]
+    fn pieces_of_one_label_are_one_poi() {
+        let obs = vec![
+            ob("KUDUKONA", 397.0, 422.0, 145.0, 23.0),
+            ob("UDU", 409.0, 427.0, 41.0, 19.0),
+            ob("1283", 1033.0, 578.0, 53.0, 26.0),
+            ob("283", 1037.0, 579.0, 47.0, 24.0),
+            ob("KRAAL", 2143.0, 2340.0, 73.0, 24.0),
+            ob("KRAAZ", 2135.0, 2338.0, 83.0, 27.0),
+            ob("RANDWATERBOX2", 1553.0, 2259.0, 245.0, 23.0),
+            ob("RAN", 1551.0, 2258.0, 48.0, 26.0),
+            ob("UPPERCASTLEGUL", 380.0, 2539.0, 205.0, 205.0),
+            ob("CASTLI", 443.0, 2593.0, 88.0, 88.0),
+            ob("TRIGBEACON", 1000.0, 1000.0, 167.0, 23.0),
+            ob("TRIG BEACON", 1002.0, 1000.0, 170.0, 31.0),
+            // A read that is no label does not swallow the height inside it.
+            ob("21728", 3300.0, 3800.0, 80.0, 41.0),
+            ob("1728", 3323.0, 3807.0, 54.0, 28.0),
+            // The same name elsewhere on the sheet is another POI.
+            ob("KUDUKONA", 2400.0, 3000.0, 145.0, 23.0),
+            ob("UDU", 3000.0, 4000.0, 41.0, 19.0),
+        ];
+        let mut obs = obs;
+        obs[4].confidence = 0.95;
+        let names: Vec<String> = classify_pois(&obs).into_iter().map(|p| p.name).collect();
+        assert_eq!(
+            names,
+            vec!["KUDUKONA", "1283", "KRAAL", "RANDWATERBOX2", "UPPERCASTLEGUL", "1728", "KUDUKONA", "UDU"]
+        );
+    }
+
+    #[test]
+    fn legend_pieces_and_unreadable_words_are_not_pois() {
+        let obs = vec![
+            ob("Non-Peren", 492.0, 4342.0, 136.0, 28.0),
+            ob("Non-Perennial River", 492.0, 4344.0, 251.0, 24.0),
+            ob("PerennialRiver", 493.0, 4380.0, 187.0, 23.0),
+            ob("DryWaterCourse", 494.0, 4310.0, 222.0, 23.0),
+            ob("Police Stati", 490.0, 4519.0, 140.0, 29.0),
+            ob("100m Inter", 491.0, 4730.0, 137.0, 29.0),
+            ob("Place of w", 491.0, 4625.0, 137.0, 29.0),
+            ob("HHL", 177.0, 4091.0, 102.0, 103.0),
+            ob("Pws", 170.0, 4608.0, 34.0, 105.0),
+            ob("GUN", 520.0, 2538.0, 59.0, 26.0),
+            ob("Hut", 2000.0, 2000.0, 50.0, 25.0),
+            ob("Elm Hut", 2400.0, 2000.0, 100.0, 25.0),
+            ob("AASVOELKRANS", 335.0, 2640.0, 205.0, 26.0),
+        ];
+        let names: Vec<String> = classify_pois(&obs).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, vec!["GUN", "Elm Hut", "AASVOELKRANS"]);
     }
 
     #[test]

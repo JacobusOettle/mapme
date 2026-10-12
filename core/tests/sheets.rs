@@ -27,7 +27,7 @@ use mapme_core::dem::TileId;
 use mapme_core::geo::Homography;
 use mapme_core::georef::{GeorefRequest, GeorefResponse, GpsFix, Method, Session, Status};
 use mapme_core::image::Rgb8;
-use mapme_core::labels::{parse_coordinate, CoordValue, OcrObservation};
+use mapme_core::labels::{parse_coordinate, CoordValue, OcrObservation, PoiKind};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -184,7 +184,7 @@ fn report(name: &str, sheet: &Sheet, r: &GeorefResponse) -> f64 {
         "[{} {name}] {:?} {:?} conf {:?} rms {:?} → max error {err:.1} m at the graticule intersections: {}",
         sheet.dir, r.status, r.method, r.confidence, r.rms_m, r.message
     );
-    for k in ["grid", "scale_range", "selected", "best_confidence", "candidates"] {
+    for k in ["grid", "scale_range", "selected", "best_confidence", "candidates", "spot_heights_off_dem"] {
         if let Some(v) = d.get(k) {
             println!("    {k}: {v}");
         }
@@ -357,6 +357,8 @@ fn contours_at(sheet: &Sheet, at: (f64, f64), what: &str) {
     assert_eq!(r.status, Status::Ok, "{}", r.message);
     assert_eq!(r.method, Some(Method::Contours));
     assert!(err <= CONTOUR_MAX_ERR_M, "max error {err:.1} m");
+    // The spot heights were checked against the terrain the match used.
+    assert!(r.diagnostics.get("spot_heights_off_dem").is_some(), "{}", r.diagnostics);
 }
 
 /// (4) Contours with the map outside the search radius: no answer, not a wrong one.
@@ -498,4 +500,78 @@ fn mhlabatini_grid_phone_ocr_garbled_and_merged() {
         Degrade { garble: true, merge: true },
         "grid, phone OCR: half the labels, garbled, 27°19' merged",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Points of interest read from the map (RapidOCR stand-in OCR of all three sheets)
+// ---------------------------------------------------------------------------
+
+/// The POIs of a grid answer from `ocr` (the user 60 km away, no DEM).
+fn sheet_pois(dir: &str, map: Rgb8, ocr: Vec<OcrObservation>, far: (f64, f64)) -> Vec<mapme_core::labels::PoiLabel> {
+    let s = Session::new(map);
+    let r = s.georeference(&request(ocr, far, &["grid"]));
+    assert_eq!(r.status, Status::Ok, "{dir}: {}", r.message);
+    println!("[{dir}] {} POIs:", r.pois.len());
+    for p in &r.pois {
+        let e = p.elevation_m.map(|e| format!(" {e:.0} m")).unwrap_or_default();
+        println!("    {:?} {:?}{e} ({:.0}, {:.0})", p.kind, p.name, p.x, p.y);
+    }
+    r.pois
+}
+
+#[test]
+fn pois_on_the_sheets() {
+    let _g = serial();
+    let groot = sheet_dir("grootkloof");
+    let rapid = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/grootkloof-rapidocr.json");
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(rapid).unwrap()).unwrap();
+    let groot_rapid: Vec<OcrObservation> = serde_json::from_value(v["observations"].clone()).unwrap();
+    let groot_map = load_jpeg_file(&groot.join("map.jpg"));
+    let far_groot = (-25.8499, 27.9988);
+    let lists = [
+        ("grootkloof (hand-built OCR)", sheet_pois("grootkloof", groot_map.clone(), load_ocr(&groot), far_groot)),
+        ("grootkloof (RapidOCR)", sheet_pois("grootkloof-rapidocr", groot_map, groot_rapid, far_groot)),
+        ("castle-gorge", sheet_pois("castle-gorge", CASTLE_GORGE.map(), CASTLE_GORGE.ocr(), CASTLE_GORGE.far)),
+        ("mhlabatini", sheet_pois("mhlabatini", MHLABATINI.map(), MHLABATINI.ocr(), MHLABATINI.far)),
+    ];
+    for (what, pois) in &lists {
+        // Every spot height on these sheets has four digits: the misreads with a digit lost
+        // ("478" for 1478, "283" next to "1283") are gone.
+        for p in pois.iter().filter(|p| p.kind == PoiKind::SpotHeight) {
+            assert!(p.elevation_m.is_some_and(|e| e >= 1000.0), "{what}: {p:?}");
+        }
+        // No legend entry, imprint or title.
+        for p in pois {
+            let n = p.name.to_lowercase();
+            for bad in ["peren", "inter", "stati", "place of", "gous", "gisv", "mcsa", "trig bea"] {
+                assert!(!n.contains(bad), "{what}: {p:?}");
+            }
+        }
+        // No piece of another POI next to it.
+        let key = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+        for a in pois.iter() {
+            for b in pois.iter().filter(|b| b.name.len() > a.name.len()) {
+                // Within the longer one's extent (~24 px a character on these sheets).
+                let near = (a.x - b.x).abs() < 12.0 * b.name.len() as f64 && (a.y - b.y).abs() < 40.0;
+                assert!(!(near && key(&b.name).contains(&key(&a.name))), "{what}: {a:?} is a piece of {b:?}");
+            }
+        }
+    }
+    let names = |i: usize| lists[i].1.iter().map(|p| p.name.as_str()).collect::<Vec<_>>();
+    let [groot, groot_rapid, castle, mhl] = [0, 1, 2, 3].map(names);
+    assert_eq!(groot, vec!["KWAMI LODGE", "SUGARBUSH HILL COUNTRY COTTAGE", "1428", "1412", "1523"]);
+    for n in ["KWAMI LODGE", "SPARKLING WATERS HOTEL", "WOODY GULLY", "CAVE KLOOF", "1614"] {
+        assert!(groot_rapid.contains(&n), "{n}: {groot_rapid:?}");
+    }
+    for n in ["LONG POOL", "LIGHTNING RAVINE", "NEEDLE GULLY", "PINACLE GULLY", "1769", "1283"] {
+        assert!(castle.contains(&n), "{n}: {castle:?}");
+    }
+    for n in ["AASVOELKRANS", "AASVOEL GULLY", "MHLABATINIPARKING", "MOUNT SERENE", "1754"] {
+        assert!(mhl.contains(&n), "{n}: {mhl:?}");
+    }
+    let serene = lists[3].1.iter().find(|p| p.name == "MOUNT SERENE").unwrap();
+    assert_eq!((serene.kind, serene.elevation_m), (PoiKind::Peak, Some(1471.0)));
+    // 100, 102 and 81 POIs before the clean-up (legend entries, pieces of labels, misread
+    // heights); what is left is the map's names and heights, read as well as the OCR read them.
+    assert!(groot_rapid.len() <= 55 && castle.len() <= 60 && mhl.len() <= 40, "{groot_rapid:?} {castle:?} {mhl:?}");
 }

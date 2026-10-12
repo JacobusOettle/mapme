@@ -43,7 +43,7 @@ use crate::grid::{
     LineAxis,
 };
 use crate::image::Rgb8;
-use crate::labels::{classify_pois, parse_scale, OcrObservation, PoiLabel};
+use crate::labels::{classify_pois, parse_scale, OcrObservation, PoiKind, PoiLabel};
 use crate::refine::{
     confidence, evaluate_prepared, evaluate_prepared_homography, fit_confidence, refine_dem_box, refine_prepared_with,
     select_refined, PreparedDem, RefineOptions, RefineResult,
@@ -93,6 +93,9 @@ const PLAUSIBLE_SCALE: (f64, f64) = (0.02, 500.0);
 const COMPLETE_DEM: f64 = 0.98;
 /// Confidence of a labels-only fit (below 0.5: the app asks to check it).
 const LABELS_MAX_CONFIDENCE: f64 = 0.45;
+/// A spot height further than this (metres) outside the DEM elevations around
+/// its position is a misread.
+const SPOT_HEIGHT_DEM_TOLERANCE_M: f64 = 150.0;
 
 // ---------------------------------------------------------------------------
 // Request / response
@@ -730,7 +733,60 @@ impl<'a> Run<'a> {
         resp.diagnostics = Value::Object(diag);
         if resp.status != Status::NeedDem && !resp.is_cancelled() {
             resp.pois = self.pois();
+            if let (Status::Ok, Some(m)) = (resp.status, resp.pixel_to_mercator) {
+                let dropped = self.check_heights_against_dem(&mut resp.pois, &Homography { m });
+                if let (Some(n), Value::Object(d)) = (dropped, &mut resp.diagnostics) {
+                    d.insert("spot_heights_off_dem".into(), json!(n));
+                }
+            }
         }
+    }
+
+    /// Spot heights the terrain contradicts are misreads ("478" for 1478,
+    /// "1614" for 1514): where the session holds DEM tiles under the located
+    /// map (the contour stage or a check fetched them), a spot height more
+    /// than `SPOT_HEIGHT_DEM_TOLERANCE_M` outside the elevations around its
+    /// position is dropped, and a peak's height likewise forgotten. Returns
+    /// how many were dropped, None without terrain data.
+    fn check_heights_against_dem(&self, pois: &mut Vec<PoiLabel>, t: &Homography) -> Option<usize> {
+        if !pois.iter().any(|p| p.elevation_m.is_some()) {
+            return None;
+        }
+        let (w, h) = self.size();
+        let plan = fine_plan(&t.local_affine(w as f64 / 2.0, h as f64 / 2.0), w, h)?;
+        let (dem, zoom) = self.s.fine_dem(&plan)?;
+        if zoom < FINE_ZOOM - 1 {
+            // Coarse tiles smooth cliffs and summits by more than the tolerance.
+            return None;
+        }
+        // Elevation range within one DEM pixel of a point (None where unknown).
+        let range = |x: f64, y: f64| -> Option<(f64, f64)> {
+            let (mx, my) = t.apply(x, y);
+            let r = dem.res;
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for (dx, dy) in [(0.0, 0.0), (-r, 0.0), (r, 0.0), (0.0, -r), (0.0, r), (-r, -r), (r, r), (-r, r), (r, -r)] {
+                let v = dem.sample(mx + dx, my + dy) as f64;
+                if !v.is_finite() {
+                    return None;
+                }
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+            Some((lo, hi))
+        };
+        let off = |p: &PoiLabel| match (p.elevation_m, range(p.x, p.y)) {
+            (Some(e), Some((lo, hi))) => e < lo - SPOT_HEIGHT_DEM_TOLERANCE_M || e > hi + SPOT_HEIGHT_DEM_TOLERANCE_M,
+            _ => false,
+        };
+        let before = pois.len();
+        pois.retain(|p| p.kind != PoiKind::SpotHeight || !off(p));
+        for p in pois.iter_mut().filter(|p| p.kind == PoiKind::Peak) {
+            if off(p) {
+                p.elevation_m = None;
+            }
+        }
+        Some(before - pois.len())
     }
 
     /// Map labels (place names, peaks, spot heights), excluding the labels
