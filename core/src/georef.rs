@@ -9,10 +9,16 @@
 //! * **grid**: grid lines + coordinate labels (`grid.rs`). A line fit with a
 //!   small RMS is the answer. A labels-only fit seeds the contour stage.
 //! * **contours**: a labels-only fit is refined against the zoom-13 DEM
-//!   first. Otherwise the coarse FFT search runs around the GPS position on
-//!   zoom-11 tiles, then the best candidates are refined on zoom-13 tiles
-//!   (the best alone first when it clearly stands out) and the most
-//!   confident one wins.
+//!   first. Otherwise the areas to search are, in order: the hints (request
+//!   hints and the map's coordinate labels, `hints.rs`), the near disc around
+//!   the GPS position (20 km, then up to 50 km), and beyond 50 km the wide
+//!   search (`georef/wide_search.rs`). A hint or the near disc gets the
+//!   coarse FFT search on zoom-11 tiles, then its best candidates are refined
+//!   on zoom-13 tiles (the best alone first when it clearly stands out) and
+//!   the most confident one wins; the wide search works chunk by chunk on
+//!   zoom-10/9 tiles with zoom-11 re-checks. Every need_dem answer asks for
+//!   at most `max_tiles_per_round` tiles; the response's `search` reports
+//!   the progress and `hint_queries` the names worth geocoding.
 //!
 //! A request with `photo: true` (a photo of a paper map, flattened by its
 //! page borders) analyses an illumination- and white-balance-normalised copy
@@ -42,6 +48,10 @@ use crate::grid::{
     detect_lines, detect_lines_photo, georeference_from_grid_with, GridLine, GridMethod, GridOptions, GridResult,
     LineAxis,
 };
+use crate::hints::{
+    ground_distance_m, hint_queries, label_band, label_hints, order_hints, HintSource, LabelBand, SearchHint,
+    DEFAULT_HINT_RADIUS_M, HINT_RADIUS_RANGE_M,
+};
 use crate::image::Rgb8;
 use crate::labels::{classify_pois, parse_coordinate, parse_scale, CoordValue, OcrObservation, PoiLabel};
 use crate::refine::{
@@ -51,9 +61,10 @@ use crate::refine::{
 use crate::search::{coarse_search, map_field, required_dem_box, rotation_sweep, Candidate, MapField, SearchParams};
 use crate::skeleton::{contour_samples, default_sampling, ContourSamples};
 use crate::warp::{fit_warp, ContourInput, GridLines, Warp, WarpFit, WarpInput};
+use crate::wide::NEAR_ZOOM;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
@@ -85,8 +96,20 @@ pub const FINE_ZOOM: u8 = 13;
 const MAX_FINE_TILES: u64 = 36;
 /// Scale range (ground m/px) searched without a scale prior.
 pub const DEFAULT_SCALE_RANGE: (f64, f64) = (0.4, 12.0);
+/// Search radius around the GPS fix without one in the request (ground metres).
+pub const DEFAULT_RADIUS_M: f64 = 50_000.0;
 /// Allowed search radius (ground metres).
-const RADIUS_RANGE_M: (f64, f64) = (1_000.0, 50_000.0);
+pub const RADIUS_RANGE_M: (f64, f64) = (1_000.0, 2_000_000.0);
+/// The near area: the disc around the fix searched at zoom 11 (the whole
+/// search up to this radius); beyond it the wide search takes over.
+pub const NEAR_RADIUS_M: f64 = 50_000.0;
+/// The near disc is searched out to this radius first (a third of the
+/// coarse search's cost: the map is usually close), then to `NEAR_RADIUS_M`.
+pub const NEAR_FIRST_RADIUS_M: f64 = 20_000.0;
+/// Most tiles one need_dem answer asks for, without one in the request.
+pub const DEFAULT_MAX_TILES_PER_ROUND: usize = 64;
+/// Allowed `max_tiles_per_round`.
+pub const MAX_TILES_RANGE: (usize, usize) = (1, 4096);
 /// Ground scales (m/px) outside this range are not plausible map transforms.
 const PLAUSIBLE_SCALE: (f64, f64) = (0.02, 500.0);
 /// A mosaic counts as complete when this fraction of it has elevations.
@@ -125,6 +148,10 @@ pub struct GeorefRequest {
     /// The raster is a photo of a paper map, flattened by its page borders
     /// (photo mode: lighting normalisation, homography fits).
     pub photo: bool,
+    /// Candidate areas searched before the area around the GPS fix.
+    pub hints: Vec<SearchHint>,
+    /// Most tiles one need_dem answer asks for.
+    pub max_tiles_per_round: usize,
 }
 
 impl Default for GeorefRequest {
@@ -134,13 +161,26 @@ impl Default for GeorefRequest {
             ocr: Vec::new(),
             dpi: None,
             contour_rgb: None,
-            search_radius_m: 20_000.0,
+            search_radius_m: DEFAULT_RADIUS_M,
             allow_rotation: false,
             methods: vec!["grid".into(), "contours".into()],
             verify: false,
             photo: false,
+            hints: Vec::new(),
+            max_tiles_per_round: DEFAULT_MAX_TILES_PER_ROUND,
         }
     }
+}
+
+/// A hint as sent: everything but `lat` and `lon` may be missing or null.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawHint {
+    lat: Option<f64>,
+    lon: Option<f64>,
+    radius_m: Option<f64>,
+    source: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -155,6 +195,8 @@ struct RawRequest {
     methods: Option<Vec<String>>,
     verify: Option<bool>,
     photo: Option<bool>,
+    hints: Option<Vec<RawHint>>,
+    max_tiles_per_round: Option<f64>,
 }
 
 impl TryFrom<RawRequest> for GeorefRequest {
@@ -169,6 +211,23 @@ impl TryFrom<RawRequest> for GeorefRequest {
             }
             Some(_) => return Err("contour_rgb must be [r, g, b] with values 0-255".into()),
         };
+        let mut hints = Vec::new();
+        for (i, h) in r.hints.unwrap_or_default().into_iter().enumerate() {
+            let (Some(lat), Some(lon)) = (h.lat, h.lon) else {
+                return Err(format!("hints[{i}] needs lat and lon"));
+            };
+            hints.push(SearchHint {
+                lat,
+                lon,
+                radius_m: h.radius_m.filter(|r| r.is_finite()).unwrap_or(DEFAULT_HINT_RADIUS_M),
+                source: h.source.as_deref().map_or(HintSource::Place, HintSource::parse),
+                name: h.name.filter(|n| !n.trim().is_empty()),
+            });
+        }
+        let max_tiles = match r.max_tiles_per_round {
+            Some(v) if v.is_finite() => v.round().clamp(MAX_TILES_RANGE.0 as f64, MAX_TILES_RANGE.1 as f64) as usize,
+            _ => d.max_tiles_per_round,
+        };
         Ok(GeorefRequest {
             gps: r.gps,
             ocr: r.ocr.unwrap_or_default(),
@@ -179,6 +238,8 @@ impl TryFrom<RawRequest> for GeorefRequest {
             methods: r.methods.unwrap_or(d.methods),
             verify: r.verify.unwrap_or(d.verify),
             photo: r.photo.unwrap_or(d.photo),
+            hints,
+            max_tiles_per_round: max_tiles,
         })
     }
 }
@@ -229,6 +290,50 @@ pub struct GeorefResponse {
     /// top of `pixel_to_mercator` (absent otherwise; see `warp.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warp: Option<Warp>,
+    /// Names on the map worth geocoding into `hints` (every response to a
+    /// request with OCR text; see `hints::hint_queries`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint_queries: Option<Vec<String>>,
+    /// Where the contour search stands (whenever it ran).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<SearchProgress>,
+}
+
+/// Stage of the contour search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchStage {
+    /// Searching the hint areas.
+    Hints,
+    /// Searching the disc around the GPS fix at zoom 11.
+    Near,
+    /// Searching the rest of the radius chunk by chunk.
+    Wide,
+    /// Checking candidates (zoom-11 re-check, zoom-13 refinement).
+    Refine,
+    /// Finished (located or not).
+    Done,
+}
+
+/// Progress of the contour search, for the app's progress UI ("Searched
+/// 320 of 1 000 km").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchProgress {
+    /// The search radius (ground metres, after clamping).
+    pub radius_m: f64,
+    /// Radius around the fix searched completely so far.
+    pub searched_radius_m: f64,
+    /// DEM zoom of the current (or last) coarse search.
+    pub coarse_zoom: u8,
+    /// Coarse terrain tiles the whole search plans to use (hints, near
+    /// area, wide chunks; candidate checks come on top).
+    pub tiles_planned: usize,
+    /// Of those, tiles supplied (or marked missing) so far.
+    pub tiles_fetched: usize,
+    /// Hint areas searched so far, and planned.
+    pub hints_tried: usize,
+    pub hints_planned: usize,
+    pub stage: SearchStage,
 }
 
 /// Message of a call stopped by `Session::cancel`.
@@ -251,6 +356,8 @@ impl GeorefResponse {
             diagnostics: Value::Object(Map::new()),
             timings_ms: BTreeMap::new(),
             warp: None,
+            hint_queries: None,
+            search: None,
         }
     }
 
@@ -450,6 +557,10 @@ pub struct Session {
     contours: Mutex<HashMap<ContourKey, Arc<OnceLock<Arc<ContourProducts>>>>>,
     searches: Mutex<Vec<(SearchKey, Arc<Vec<Candidate>>)>>,
     refinements: Mutex<HashMap<RefineKey, RefineResult>>,
+    /// The wide search's plan and the candidates of its searched chunks.
+    wide: Mutex<Option<wide_search::WideCache>>,
+    /// Zoom-11 re-checks of wide-search candidates.
+    rechecks: Mutex<HashMap<wide_search::RecheckKey, Option<Candidate>>>,
     cancel: AtomicBool,
     /// f32 bits of the progress of the running call.
     progress: AtomicU32,
@@ -459,8 +570,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Searches kept in the cache.
-const SEARCH_CACHE: usize = 4;
+/// Searches kept in the cache (hint areas and the near area).
+const SEARCH_CACHE: usize = 32;
 
 impl Session {
     pub fn new(image: Rgb8) -> Session {
@@ -473,6 +584,8 @@ impl Session {
             contours: Mutex::new(HashMap::new()),
             searches: Mutex::new(Vec::new()),
             refinements: Mutex::new(HashMap::new()),
+            wide: Mutex::new(None),
+            rechecks: Mutex::new(HashMap::new()),
             cancel: AtomicBool::new(false),
             progress: AtomicU32::new(0f32.to_bits()),
         }
@@ -669,15 +782,52 @@ enum Found {
 /// `Err` stops the call with that response (need_dem, cancelled).
 type Step<T> = Result<T, Box<GeorefResponse>>;
 
+/// Hint areas searched at most.
+const MAX_HINTS: usize = 8;
+
+/// An area searched at the near resolution.
+#[derive(Clone, Copy)]
+enum Area<'h> {
+    Hint(&'h SearchHint),
+    Near,
+}
+
+/// Outcome of one area search.
+enum AreaResult {
+    /// Located, with its confidence.
+    Located(Box<GeorefResponse>, f64),
+    NotFound,
+    /// The map has no usable contours (no area will do better).
+    NoContours,
+}
+
 struct Run<'a> {
     s: &'a Session,
     req: &'a GeorefRequest,
     gps: Option<LatLon>,
     radius_m: f64,
+    /// Most tiles one need_dem answer asks for.
+    max_tiles: usize,
     timings: BTreeMap<String, f64>,
     diag: Map<String, Value>,
     used_labels: Vec<usize>,
     t0: Instant,
+    /// Hint areas to search, in order, and how many were searched.
+    hints: Vec<SearchHint>,
+    hints_tried: usize,
+    /// Zoom-11 coarse tiles of the hint areas and the near area (never released).
+    pinned: HashSet<TileId>,
+    /// Present and missing coarse tiles of the areas and chunks searched.
+    searched_tiles: HashSet<TileId>,
+    missing_tiles: HashSet<TileId>,
+    /// Progress of the contour search (the response's `search`).
+    progress_info: Option<SearchProgress>,
+    /// Coarse tiles of the wide plan: planned, and supplied so far.
+    wide_tiles: (usize, usize),
+    /// Diagnostics of each area searched (`diagnostics.search_areas`).
+    areas: Vec<Value>,
+    /// Where coordinate labels of one axis put the map centre.
+    band: Option<LabelBand>,
 }
 
 impl<'a> Run<'a> {
@@ -696,9 +846,28 @@ impl<'a> Run<'a> {
         let radius_m = if req.search_radius_m.is_finite() {
             req.search_radius_m.clamp(RADIUS_RANGE_M.0, RADIUS_RANGE_M.1)
         } else {
-            GeorefRequest::default().search_radius_m
+            DEFAULT_RADIUS_M
         };
-        Run { s, req, gps, radius_m, timings: BTreeMap::new(), diag, used_labels: Vec::new(), t0: Instant::now() }
+        Run {
+            s,
+            req,
+            gps,
+            radius_m,
+            max_tiles: req.max_tiles_per_round.clamp(MAX_TILES_RANGE.0, MAX_TILES_RANGE.1),
+            timings: BTreeMap::new(),
+            diag,
+            used_labels: Vec::new(),
+            t0: Instant::now(),
+            hints: Vec::new(),
+            hints_tried: 0,
+            pinned: HashSet::new(),
+            searched_tiles: HashSet::new(),
+            missing_tiles: HashSet::new(),
+            progress_info: None,
+            wide_tiles: (0, 0),
+            areas: Vec::new(),
+            band: None,
+        }
     }
 
     fn size(&self) -> (usize, usize) {
@@ -721,6 +890,19 @@ impl<'a> Run<'a> {
     fn finish(&mut self, resp: &mut GeorefResponse) {
         self.timings.insert("total".into(), ms_since(self.t0));
         resp.timings_ms = std::mem::take(&mut self.timings).into_iter().map(|(k, v)| (k, round_dp(v, 1))).collect();
+        if !self.req.ocr.is_empty() {
+            resp.hint_queries = Some(hint_queries(&self.req.ocr));
+        }
+        if let Some(mut p) = self.progress_info.take() {
+            if resp.status != Status::NeedDem && !resp.is_cancelled() {
+                p.stage = SearchStage::Done;
+            }
+            p.hints_tried = self.hints_tried;
+            resp.search = Some(p);
+        }
+        if !self.areas.is_empty() {
+            self.diag.insert("search_areas".into(), Value::Array(std::mem::take(&mut self.areas)));
+        }
         let mut diag = std::mem::take(&mut self.diag);
         if let Value::Object(extra) = std::mem::take(&mut resp.diagnostics) {
             diag.extend(extra);
@@ -1005,20 +1187,34 @@ impl<'a> Run<'a> {
     // --- DEM, contour products, search, refinement ----------------------------
 
     /// Stop with need_dem if any of `tiles` is unknown (and start computing
-    /// the contour products meanwhile).
+    /// the contour products meanwhile). At most `max_tiles_per_round` tiles
+    /// are asked for; the next call asks for the rest.
     fn need(&mut self, tiles: &[TileId], stage: &str, key: ContourKey) -> Step<()> {
-        let mut unknown = lock(&self.s.dem).unknown(tiles);
+        self.need_more(tiles, &[], stage, key)
+    }
+
+    /// `need`, filling the answer up to `max_tiles_per_round` with unknown
+    /// tiles of `lookahead` (the next wide chunk) when `tiles` leave room,
+    /// so one round fetches a chunk's candidate checks and the next chunk.
+    fn need_more(&mut self, tiles: &[TileId], lookahead: &[TileId], stage: &str, key: ContourKey) -> Step<()> {
+        let (mut unknown, mut ahead) = {
+            let store = lock(&self.s.dem);
+            (store.unknown(tiles), store.unknown(lookahead))
+        };
         if unknown.is_empty() {
             return Ok(());
         }
         unknown.sort();
         unknown.dedup();
+        let total = unknown.len();
+        unknown.truncate(self.max_tiles);
+        ahead.sort();
+        ahead.dedup();
+        ahead.retain(|t| !unknown.contains(t));
+        let n_ahead = ahead.len().min(self.max_tiles - unknown.len());
+        unknown.extend(ahead.into_iter().take(n_ahead));
         self.s.prefetch_contours(key);
-        let zooms: Vec<u8> = {
-            let mut z: Vec<u8> = unknown.iter().map(|t| t.z).collect();
-            z.dedup();
-            z
-        };
+        let zooms: Vec<u8> = unknown.iter().map(|t| t.z).collect::<BTreeSet<u8>>().into_iter().collect();
         let mut r = GeorefResponse::empty(
             Status::NeedDem,
             format!(
@@ -1028,7 +1224,13 @@ impl<'a> Run<'a> {
                 zooms.iter().map(|z| z.to_string()).collect::<Vec<_>>().join(", ")
             ),
         );
-        r.diagnostics = json!({"stage": stage, "tiles_wanted": tiles.len(), "tiles_unknown": unknown.len()});
+        r.diagnostics = json!({
+            "stage": stage,
+            "tiles_wanted": tiles.len(),
+            "tiles_unknown": total,
+            "tiles_requested": unknown.len(),
+            "lookahead": n_ahead,
+        });
         r.need_tiles = unknown;
         Err(Box::new(r))
     }
@@ -1087,9 +1289,11 @@ impl<'a> Run<'a> {
         Some((denom.0, denom.0 * 0.0254 / dpi))
     }
 
-    fn search_params(&mut self, gps: LatLon, init: Option<&GridResult>) -> SearchParams {
+    /// Ground scale range (m/px) to search at latitude `lat`: from an OCR'd
+    /// scale and the dpi, a labels-only fit, or the default range.
+    fn scale_range(&mut self, lat: f64, init: Option<&GridResult>) -> (f64, f64) {
         let (w, h) = self.size();
-        let cos_lat = gps.lat.to_radians().cos();
+        let cos_lat = lat.to_radians().cos();
         // Maps drawn in Web Mercator print at the nominal scale in Mercator
         // metres, so the ground scale can be up to cos(lat) smaller.
         let (lo, hi, source) = if let Some((denom, prior)) = self.scale_prior() {
@@ -1108,13 +1312,20 @@ impl<'a> Run<'a> {
         let (lo, hi) = (lo.clamp(PLAUSIBLE_SCALE.0, PLAUSIBLE_SCALE.1), hi.clamp(PLAUSIBLE_SCALE.0, PLAUSIBLE_SCALE.1));
         self.diag
             .insert("scale_range".into(), json!({"min": round_dp(lo, 3), "max": round_dp(hi, 3), "source": source}));
+        (lo, hi)
+    }
+
+    /// Coarse search parameters for the area of `radius_m` around `centre`.
+    fn search_params(&mut self, centre: LatLon, radius_m: f64, init: Option<&GridResult>) -> SearchParams {
+        let (lo, hi) = self.scale_range(centre.lat, init);
         SearchParams {
-            center_merc: latlon_to_merc(gps.lat, gps.lon),
-            search_radius_m: self.radius_m,
+            center_merc: latlon_to_merc(centre.lat, centre.lon),
+            search_radius_m: radius_m,
             scale_min: lo,
             scale_max: hi,
             rotations_deg: if self.req.allow_rotation { rotation_sweep(10.0) } else { vec![0.0] },
             top_k: MAX_REFINE_CANDIDATES,
+            region: None,
         }
     }
 
@@ -1269,42 +1480,274 @@ impl<'a> Run<'a> {
             }
         }
 
-        let Some(gps) = self.gps else {
+        // 2. Where to search: hint areas, the near disc around the fix, the
+        //    wide area beyond it.
+        self.plan_search(init);
+        if self.gps.is_none() && self.hints.is_empty() {
             return Ok(Found::NotFound(
-                "No coordinate labels found on this map, and contour matching needs your location. Turn on \
-                 location services or calibrate manually."
+                "No coordinate labels found on this map, and contour matching needs your location or a place to \
+                 search. Turn on location services or calibrate manually."
                     .into(),
             ));
+        }
+        // Sub-confident matches wait while other areas may still give a
+        // confident one; the most confident is reported at the end.
+        let mut fallback: Option<(f64, Box<GeorefResponse>)> = None;
+        let keep = |fallback: &mut Option<(f64, Box<GeorefResponse>)>, conf: f64, r: Box<GeorefResponse>| {
+            if fallback.as_ref().is_none_or(|f| conf > f.0) {
+                *fallback = Some((conf, r));
+            }
         };
 
-        // 2. Coarse search around the GPS position.
-        let params = self.search_params(gps, init);
+        // 3. Hint areas, at the near resolution.
+        for i in 0..self.hints.len() {
+            let hint = self.hints[i].clone();
+            self.set_progress(SearchStage::Hints, NEAR_ZOOM, 0.0);
+            let area = Area::Hint(&hint);
+            let r = hint.radius_m.clamp(HINT_RADIUS_RANGE_M.0, HINT_RADIUS_RANGE_M.1);
+            let outcome = self.area_search(area, hint.latlon(), r, init, labelled.as_ref())?;
+            self.hints_tried = i + 1;
+            match outcome {
+                AreaResult::Located(resp, conf) if conf >= CONFIDENT => return Ok(Found::Located(resp)),
+                AreaResult::Located(resp, conf) => keep(&mut fallback, conf, resp),
+                AreaResult::NoContours => return Ok(Found::NotFound(no_contours.into())),
+                AreaResult::NotFound => {}
+            }
+        }
+
+        // 4. The near disc around the fix (the whole search up to 50 km).
+        if let Some(gps) = self.gps {
+            let near = self.radius_m.min(NEAR_RADIUS_M);
+            let wide = self.radius_m > NEAR_RADIUS_M;
+            self.set_progress(SearchStage::Near, NEAR_ZOOM, 0.0);
+            if self.near_outside_band(gps, near) {
+                // The labels put the map elsewhere: nothing to search here.
+                self.areas.push(json!({"area": "near", "outcome": "outside the labels' band"}));
+            } else {
+                // The inner disc first (where the map usually is: as fast as
+                // a 20 km search), then the whole near disc.
+                let steps: Vec<f64> =
+                    if near > NEAR_FIRST_RADIUS_M { vec![NEAR_FIRST_RADIUS_M, near] } else { vec![near] };
+                for r in steps {
+                    match self.area_search(Area::Near, gps, r, init, labelled.as_ref())? {
+                        AreaResult::Located(resp, conf) => keep(&mut fallback, conf, resp),
+                        AreaResult::NoContours => return Ok(Found::NotFound(no_contours.into())),
+                        AreaResult::NotFound => {}
+                    }
+                    if fallback.as_ref().is_some_and(|f| f.0 >= CONFIDENT) {
+                        break;
+                    }
+                    self.set_progress(SearchStage::Near, NEAR_ZOOM, r);
+                }
+            }
+            self.set_progress(SearchStage::Near, NEAR_ZOOM, near);
+            if let Some((conf, _)) = &fallback {
+                if *conf >= CONFIDENT || !wide {
+                    return Ok(Found::Located(fallback.take().unwrap().1));
+                }
+            }
+            // 5. The wide area, chunk by chunk, nearest first.
+            if wide {
+                let prod = self.products(self.contour_key())?;
+                let (lo, hi) = self.scale_range(gps.lat, init);
+                if let Some(r) = self.wide_search(&prod, gps, (lo, hi))? {
+                    return Ok(Found::Located(r));
+                }
+            }
+        }
+        if let Some((_, r)) = fallback {
+            return Ok(Found::Located(r));
+        }
+        Ok(Found::NotFound(self.not_found_message()))
+    }
+
+    /// Plan the hint areas (request hints and the map's coordinate labels,
+    /// those within the radius of the fix) and the progress counters.
+    fn plan_search(&mut self, init: Option<&GridResult>) {
+        let (w, h) = self.size();
+        let mut hints: Vec<SearchHint> = self.req.hints.clone();
+        // Coordinate labels the grid fit could not use.
+        if init.is_none() && !self.req.ocr.is_empty() {
+            let lat = self
+                .req
+                .ocr
+                .iter()
+                .find_map(|o| match parse_coordinate(&o.text) {
+                    Some(CoordValue::Lat(v)) => Some(v),
+                    _ => None,
+                })
+                .or(self.gps.map(|g| g.lat))
+                .unwrap_or(0.0);
+            let scale = self.scale_range(lat, None);
+            let labels = label_hints(&self.req.ocr, w, h, scale);
+            if !labels.is_empty() {
+                self.diag.insert("label_hints".into(), serde_json::to_value(&labels).unwrap_or(Value::Null));
+            }
+            hints.extend(labels);
+            // Labels of one axis only: a band the search is cut down to.
+            if self.gps.is_some() {
+                self.band = label_band(&self.req.ocr, w, h, scale, lat);
+                if let Some(b) = &self.band {
+                    self.diag.insert("label_band".into(), serde_json::to_value(b).unwrap_or(Value::Null));
+                }
+            }
+        }
+        let n_in = hints.len();
+        let gps = self.gps;
+        let radius = self.radius_m;
+        hints.retain(|h| h.is_valid() && gps.is_none_or(|g| ground_distance_m(g, h.latlon()) <= radius));
+        let mut hints = order_hints(hints);
+        let ignored = n_in - hints.len().min(n_in);
+        hints.truncate(MAX_HINTS);
+        if ignored > 0 {
+            self.diag.insert("hints_ignored".into(), json!(ignored));
+        }
+        self.hints = hints;
+        // Coarse tiles of the hint and near areas.
+        let mut planned: HashSet<TileId> = HashSet::new();
+        let areas: Vec<(LatLon, f64)> = self
+            .hints
+            .iter()
+            .map(|h| (h.latlon(), h.radius_m.clamp(HINT_RADIUS_RANGE_M.0, HINT_RADIUS_RANGE_M.1)))
+            .chain(
+                self.gps
+                    .map(|g| (g, self.radius_m.min(NEAR_RADIUS_M)))
+                    .filter(|(g, r)| !self.near_outside_band(*g, *r)),
+            )
+            .collect();
+        for (c, r) in areas {
+            let p = self.search_params(c, r, init);
+            planned.extend(tiles_covering(COARSE_ZOOM, &required_dem_box(&p, w, h)));
+        }
+        self.pinned = planned;
+        if let Some(g) = self.gps.filter(|_| self.radius_m > NEAR_RADIUS_M) {
+            let scale = self.scale_range(g.lat, init);
+            self.plan_wide_progress(g, scale);
+        }
+        self.progress_info = Some(SearchProgress {
+            radius_m: if self.gps.is_some() { self.radius_m } else { 0.0 },
+            searched_radius_m: 0.0,
+            coarse_zoom: NEAR_ZOOM,
+            tiles_planned: self.pinned.len(),
+            tiles_fetched: 0,
+            hints_tried: 0,
+            hints_planned: self.hints.len(),
+            stage: if self.hints.is_empty() { SearchStage::Near } else { SearchStage::Hints },
+        });
+        self.update_fetched();
+    }
+
+    /// The labels' band as a Mercator box (unbounded along the free axis).
+    fn band_merc(&self) -> Option<MercBox> {
+        let b = self.band.as_ref()?;
+        let half = std::f64::consts::PI * crate::geo::EARTH_RADIUS;
+        let mut m = MercBox { min_x: -half, min_y: -half, max_x: half, max_y: half };
+        if let Some((s, n)) = b.lat {
+            m.min_y = latlon_to_merc(s, 0.0).1;
+            m.max_y = latlon_to_merc(n, 0.0).1;
+        }
+        if let Some((wl, el)) = b.lon {
+            m.min_x = latlon_to_merc(0.0, wl).0;
+            m.max_x = latlon_to_merc(0.0, el).0;
+        }
+        Some(m)
+    }
+
+    /// Does the labels' band miss the near disc (`near` metres around `gps`)?
+    fn near_outside_band(&self, gps: LatLon, near: f64) -> bool {
+        let Some(b) = &self.band else { return false };
+        let dlat = near / 111_320.0;
+        let dlon = near / (111_320.0 * gps.lat.to_radians().cos().max(0.05));
+        let lat_out = b.lat.is_some_and(|(s, n)| gps.lat + dlat < s || gps.lat - dlat > n);
+        let lon_out = b.lon.is_some_and(|(wl, el)| gps.lon + dlon < wl || gps.lon - dlon > el);
+        lat_out || lon_out
+    }
+
+    /// Update the progress object: stage, coarse zoom and (when larger) the
+    /// radius searched completely.
+    fn set_progress(&mut self, stage: SearchStage, zoom: u8, searched_m: f64) {
+        let tried = self.hints_tried;
+        if let Some(p) = &mut self.progress_info {
+            p.stage = stage;
+            p.coarse_zoom = zoom;
+            p.searched_radius_m = p.searched_radius_m.max(searched_m.min(p.radius_m));
+            p.hints_tried = tried;
+        }
+        self.update_fetched();
+    }
+
+    /// Recount the planned coarse tiles supplied so far: the hint and near
+    /// areas' and the wide chunks' (`wide_tiles`, kept by the wide search:
+    /// tiles of searched chunks count even once released).
+    fn update_fetched(&mut self) {
+        let known = {
+            let store = lock(&self.s.dem);
+            self.pinned.iter().filter(|t| store.known(t)).count()
+        };
+        let (planned, fetched) = self.wide_tiles;
+        let tried = self.hints_tried;
+        if let Some(p) = &mut self.progress_info {
+            p.tiles_planned = self.pinned.len() + planned;
+            p.tiles_fetched = known + fetched.min(planned);
+            p.hints_tried = tried;
+        }
+    }
+
+    /// Search one area at the near resolution: the zoom-11 coarse search
+    /// within `radius_m` of `centre`, then the zoom-13 refinement of its best
+    /// candidates (the best alone first when it clearly stands out), with
+    /// the labels-only fit when there is one. Accepts at `ACCEPT`.
+    fn area_search(
+        &mut self,
+        area: Area,
+        centre: LatLon,
+        radius_m: f64,
+        init: Option<&GridResult>,
+        labelled: Option<&Refined>,
+    ) -> Step<AreaResult> {
+        let (w, h) = self.size();
+        let key = self.contour_key();
+        let stage = match area {
+            Area::Hint(_) => "hint",
+            Area::Near => "coarse",
+        };
+        let params = self.search_params(centre, radius_m, init);
         let coarse_box = required_dem_box(&params, w, h);
         let coarse_tiles = tiles_covering(COARSE_ZOOM, &coarse_box);
-        self.need(&coarse_tiles, "coarse", key)?;
-        let present = {
+        self.need(&coarse_tiles, stage, key)?;
+        let present: Vec<TileId> = {
             let store = lock(&self.s.dem);
-            coarse_tiles.iter().filter(|t| store.present(t)).count()
+            coarse_tiles.iter().filter(|t| store.present(t)).copied().collect()
         };
-        if present == 0 {
-            return Ok(Found::NotFound(
-                "Terrain data for your area couldn't be downloaded, so contour lines can't be matched. Try again \
-                 with a connection, or calibrate manually."
-                    .into(),
-            ));
+        self.searched_tiles.extend(present.iter().copied());
+        self.missing_tiles.extend(coarse_tiles.iter().filter(|t| !present.contains(t)).copied());
+        let mut record = json!({
+            "area": match area { Area::Hint(_) => "hint", Area::Near => "near" },
+            "center": [round_dp(centre.lat, 5), round_dp(centre.lon, 5)],
+            "radius_km": round_dp(radius_m / 1000.0, 1),
+            "tiles": coarse_tiles.len(),
+            "tiles_present": present.len(),
+        });
+        if let Area::Hint(hint) = area {
+            record["source"] = json!(hint.source);
+            record["name"] = json!(hint.name);
+        }
+        if present.is_empty() {
+            record["outcome"] = json!("no terrain");
+            self.areas.push(record);
+            return Ok(AreaResult::NotFound);
         }
         let prod = self.products(key)?;
         if prod.samples.n_segs < MIN_SEGMENTS {
-            return Ok(Found::NotFound(no_contours.into()));
+            return Ok(AreaResult::NoContours);
         }
-        let cands = self.search(&prod, key, &params, &coarse_box, present)?;
-        let gps_merc = latlon_to_merc(gps.lat, gps.lon);
+        let cands = self.search(&prod, key, &params, &coarse_box, present.len())?;
         let cdiag: Vec<Value> = cands
             .iter()
             .map(|c| {
                 let (mx, my) = c.center_merc(w, h);
                 let (lat, lon) = merc_to_latlon(mx, my);
-                let km = ((mx - gps_merc.0).hypot(my - gps_merc.1) * gps.lat.to_radians().cos()) / 1000.0;
+                let km = ground_distance_m(centre, LatLon::new(lat, lon)) / 1000.0;
                 json!({
                     "score": c.score,
                     "peak_ratio": c.peak_ratio,
@@ -1316,48 +1759,107 @@ impl<'a> Run<'a> {
             })
             .collect();
         self.diag.insert("candidates".into(), Value::Array(cdiag));
-        let not_found = format!(
-            "Couldn't match this map's contours to terrain within {:.0} km of you. Try calibrating manually or \
-             pick the contour colour.",
-            self.radius_m / 1000.0
-        );
+        record["candidates"] = json!(cands.len());
 
-        // 3. Refinement: the best candidate alone when it stands out, else the top few.
+        // Refinement: the best candidate alone when it stands out, else the top few.
         let n = cands.len().min(MAX_REFINE_CANDIDATES);
         if n == 0 && labelled.is_none() {
-            return Ok(Found::NotFound(not_found));
+            record["outcome"] = json!("no candidates");
+            self.areas.push(record);
+            return Ok(AreaResult::NotFound);
         }
         if n > 0 && cands[0].peak_ratio >= DISTINCT_PEAK_RATIO {
             let first = self.refine_candidates(&prod, key, &cands[..1])?;
             if let Some((c, r, zoom, bbox)) = first.first() {
                 let conf = confidence(c, r);
                 if conf >= CONFIDENT {
-                    self.diag.insert("selected".into(), json!({"candidate": 0, "refined": 1}));
-                    return Ok(Found::Located(Box::new(self.contour_ok(r, conf, (*zoom, bbox), false, &prod))));
+                    let sel = json!({"candidate": 0, "refined": 1, "confidence": round_dp(conf, 3)});
+                    record["outcome"] = json!("located");
+                    record["selected"] = sel.clone();
+                    self.areas.push(record);
+                    let resp = self.contour_ok(r, conf, (*zoom, bbox), false, &prod);
+                    return Ok(AreaResult::Located(self.own_diag(resp, sel), conf));
                 }
             }
         }
         let mut results = self.refine_candidates(&prod, key, &cands[..n])?;
         let n_search = results.len();
         if let Some(l) = labelled {
-            results.push(l);
+            results.push(l.clone());
         }
         let pairs: Vec<(Candidate, RefineResult)> = results.iter().map(|(c, r, _, _)| (c.clone(), r.clone())).collect();
         let Some((best, conf)) = select_refined(&pairs) else {
-            return Ok(Found::NotFound(not_found));
+            record["outcome"] = json!("nothing refined");
+            self.areas.push(record);
+            return Ok(AreaResult::NotFound);
         };
         let fits: Vec<f64> = pairs.iter().map(|(_, r)| round_dp(fit_confidence(r), 3)).collect();
-        self.diag.insert(
-            "selected".into(),
-            json!({"candidate": best, "refined": results.len(), "fit_confidences": fits,
-                   "confidence": round_dp(conf, 3)}),
-        );
+        let sel = json!({"candidate": best, "refined": results.len(), "fit_confidences": fits,
+                         "confidence": round_dp(conf, 3)});
+        record["selected"] = sel.clone();
         if conf < ACCEPT {
             self.diag.insert("best_confidence".into(), json!(round_dp(conf, 3)));
-            return Ok(Found::NotFound(not_found));
+            record["outcome"] = json!("not confident");
+            self.areas.push(record);
+            return Ok(AreaResult::NotFound);
         }
+        record["outcome"] = json!("located");
+        self.areas.push(record);
         let (_, r, zoom, bbox) = &results[best];
-        Ok(Found::Located(Box::new(self.contour_ok(r, conf, (*zoom, bbox), best >= n_search, &prod))))
+        let resp = self.contour_ok(r, conf, (*zoom, bbox), best >= n_search, &prod);
+        Ok(AreaResult::Located(self.own_diag(resp, sel), conf))
+    }
+
+    /// Move the diagnostics of a located match (`refined`, `warp`) into its
+    /// response with `selected`, so a match kept while other areas are
+    /// searched reports its own.
+    fn own_diag(&mut self, mut resp: GeorefResponse, selected: Value) -> Box<GeorefResponse> {
+        let mut d = Map::new();
+        for k in ["refined", "warp"] {
+            if let Some(v) = self.diag.remove(k) {
+                d.insert(k.into(), v);
+            }
+        }
+        d.insert("selected".into(), selected);
+        resp.diagnostics = Value::Object(d);
+        Box::new(resp)
+    }
+
+    /// Why nothing was found, saying what was searched.
+    fn not_found_message(&self) -> String {
+        let present = self.searched_tiles.len();
+        let missing = self.missing_tiles.iter().filter(|t| !self.searched_tiles.contains(t)).count();
+        if present == 0 && missing > 0 {
+            return "Terrain data for the search area couldn't be downloaded, so contour lines can't be matched. Try \
+                    again with a connection, or calibrate manually."
+                .into();
+        }
+        let mut what = vec![format!("searched {} terrain tile{}", group_thousands(present as f64), plural(present))];
+        if missing > 0 {
+            what.push(format!("{} couldn't be downloaded", group_thousands(missing as f64)));
+        }
+        let tried = &self.hints[..self.hints_tried.min(self.hints.len())];
+        let n = |s: HintSource| tried.iter().filter(|h| h.source == s).count();
+        let (places, labels, user) = (n(HintSource::Place), n(HintSource::Label), n(HintSource::User));
+        if places > 0 {
+            what.push(format!("tried {places} place{} named on the map", plural(places)));
+        }
+        if labels > 0 {
+            what.push("tried the position its coordinate labels give".into());
+        }
+        if user > 0 {
+            what.push(format!("tried the area{} you picked", plural(user)));
+        }
+        let head = match self.gps {
+            Some(_) => format!("No match within {} km of you", group_thousands((self.radius_m / 1000.0).round())),
+            None => "No match in the areas tried".into(),
+        };
+        let advice = if self.gps.is_some() && self.radius_m < RADIUS_RANGE_M.1 {
+            "Search a wider area, pick the contour colour, or calibrate manually."
+        } else {
+            "Pick the contour colour, or calibrate manually."
+        };
+        format!("{head} ({}). {advice}", what.join("; "))
     }
 
     /// A located contour match; `dem` is the DEM zoom and box of its
@@ -1561,6 +2063,27 @@ fn round_dp(v: f64, decimals: i32) -> f64 {
     }
 }
 
+/// "1 000"-style grouping of a whole number (no-break space between groups).
+fn group_thousands(v: f64) -> String {
+    let digits = format!("{:.0}", v.max(0.0));
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push('\u{a0}');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
 /// "±2 m" style uncertainty text.
 fn plus_minus(m: f64) -> String {
     if m.is_finite() {
@@ -1573,6 +2096,8 @@ fn plus_minus(m: f64) -> String {
 fn ms_since(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3
 }
+
+mod wide_search;
 
 #[cfg(test)]
 mod tests {

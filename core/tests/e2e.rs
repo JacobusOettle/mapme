@@ -313,7 +313,11 @@ fn contours_far_away_fail_honestly() {
     summary("contours 55km W", r, None, &l);
     assert_eq!(r["status"], "failed", "{r}");
     assert!(r["pixel_to_mercator"].is_null());
-    assert!(r["message"].as_str().unwrap().contains("Couldn't match"), "{}", r["message"]);
+    // The default radius is 50 km; the message says what was searched.
+    let m = r["message"].as_str().unwrap();
+    assert!(m.starts_with("No match within 50 km of you (searched "), "{m}");
+    assert_eq!(r["search"]["stage"], "done");
+    assert_eq!(r["search"]["searched_radius_m"], 50_000.0);
     if let Some(c) = r["diagnostics"]["best_confidence"].as_f64() {
         assert!(c < 0.5);
     }

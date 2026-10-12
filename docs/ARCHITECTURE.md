@@ -44,7 +44,9 @@ of interest.
   `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`,
   256×256, elevation = `R·256 + G + B/256 − 32768` metres, slippy-map XYZ
   tiling in Web Mercator. Zoom 11 (≈76 m Mercator px) is used for the coarse
-  search and zoom 13 (≈19 m) for refinement and verification.
+  search within 50 km of the GPS fix and around hints, zoom 10 (≈153 m) and
+  zoom 9 (≈306 m) for the wide search beyond (see *Wide search*), and zoom 13
+  (≈19 m) for refinement and verification.
 
 ## Georeferencing pipeline (mapme-core)
 
@@ -63,8 +65,12 @@ order:
    If labels exist but no lines are found, label centres are used directly as
    a coarse fit, which is then refined with contours when a DEM is available.
 2. **Contour matching against a DEM** (`contour.rs`, `skeleton.rs`,
-   `search.rs`, `refine.rs`). This needs a GPS position (the map is assumed to
-   lie within `search_radius_m` of you):
+   `search.rs`, `refine.rs`). This needs somewhere to look: the GPS position
+   (the map is assumed to lie within `search_radius_m` of you, 50 km by
+   default, up to 2 000 km) and/or hints (places named on the map that the app
+   geocoded, the map's own coordinate labels). Hint areas are searched first,
+   then the near disc around the fix, then the wide area beyond 50 km chunk by
+   chunk (see *Wide search*):
    * *Contour mask*: classify pixels by colour (default: the brown/tan/orange
      contour hues used by most topo maps; the user can override by picking a
      contour colour).
@@ -230,9 +236,13 @@ contour path). Inside the outermost graticule lines the grid path is at
 which is off the printed graticule by up to ~7 px (~30 m) near the creases.
 
 The core is pull-based for DEM data. When it needs tiles it does not have, it
-answers `need_dem` with the tile list. The app downloads them (cached on disk),
+answers `need_dem` with the tile list (at most `max_tiles_per_round`, default
+64; the next call asks for the rest). The app downloads them (cached on disk),
 adds them, and calls again. Tiles that cannot be fetched (offline) are marked
-missing so the core proceeds without them.
+missing so the core proceeds without them. Every result is cached in the
+session, so each call continues where the last one stopped; a wide search
+takes about one round per chunk, and the app keeps answering until `ok` or
+`failed` (or the user cancels).
 
 ## C ABI (core/include/mapme_core.h)
 
@@ -246,6 +256,7 @@ char      *mm_session_georeference(MMSession *s, const char *request_json);
 float      mm_session_progress(const MMSession *s);   /* 0..1, thread-safe */
 void       mm_session_cancel(MMSession *s);           /* thread-safe */
 char      *mm_fit_control_points(const char *request_json);
+char      *mm_search_estimate(const char *request_json);  /* stateless */
 char      *mm_detect_page(const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t bytes_per_row);
 char      *mm_dark_profile(const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t bytes_per_row);
 MMDarkStyle *mm_dark_style_new(const char *profile_json);   /* immutable, thread-safe */
@@ -261,6 +272,9 @@ All strings are UTF-8 JSON and owned by the caller after return; free them with
 caught and turned into `{"status":"failed","message":...}`. A session is not
 thread-safe except for `progress`/`cancel`. RGBA input is 8-bit, alpha
 ignored, rows `bytes_per_row` apart, copied by the session.
+
+`mm_search_estimate` says what a search will fetch and how long it takes,
+before running it (stateless, microseconds; see *Wide search*).
 
 `mm_detect_page` finds the sheet of paper in a photo (`page.rs`, stateless,
 ~20–60 ms for 12–24 MP): `{"status":"ok","quad":[[x,y]×4],"confidence","coverage"}`
@@ -283,16 +297,28 @@ cropped, darkened, blurred or re-tilted.
   "ocr": [{"text": "25°49'00\"S", "bbox": [116, 449, 36, 185], "confidence": 0.92}],
   "dpi": 300.0,
   "contour_rgb": null,
-  "search_radius_m": 20000,
+  "search_radius_m": 50000,
   "allow_rotation": false,
   "methods": ["grid", "contours"],
   "verify": false,
-  "photo": false
+  "photo": false,
+  "hints": [{"lat": -25.80, "lon": 27.36, "radius_m": 15000, "source": "place", "name": "Grootkloof"}],
+  "max_tiles_per_round": 64
 }
 ```
 
 Every field is optional; defaults are as shown, except `gps`, `dpi` and
-`contour_rgb`, which default to `null`, and `ocr`, which defaults to `[]`.
+`contour_rgb`, which default to `null`, and `ocr` and `hints`, which default
+to `[]`. `search_radius_m` is clamped to 1 000 … 2 000 000 (ground metres);
+up to 50 000 it is the near disc searched at zoom 11, beyond that the rest is
+the wide search. `hints` are candidate areas (`lat`, `lon` required;
+`radius_m` defaults to 15 000 and is clamped to 1 000 … 50 000; `source` is
+`"place"` (a name from `hint_queries` the app geocoded; the default, also for
+unknown values), `"label"` (coordinates read on the map) or `"user"` (an area
+the user picked); `name` is optional). With a GPS fix, hints farther than
+`search_radius_m` from it are ignored (`diagnostics.hints_ignored`); without
+one the hints alone say where to search. `max_tiles_per_round` (clamped to
+1 … 4 096) caps every need_dem answer.
 `bbox` is `[x, y, w, h]` in base-image pixels. `dpi` is the raster's pixels per
 inch when known (PDF render), which turns an OCR'd scale like `1:25 000` into a
 scale prior. `photo` marks a photo of a paper map that the app flattened by its
@@ -324,6 +350,38 @@ image's pixels, like everything else.
   `[{"z":11,"x":1179,"y":1175}, …]`; add them and call again with the same
   request.
 * `method` is `"grid" | "labels" | "contours" | null`.
+* `hint_queries` (every response to a request with OCR text): names on the
+  map worth geocoding into `hints`, best first, at most 12: the title and the
+  series name (from furniture lines such as "MCSA MAGALIESBERG SHEET 3 OF 10"),
+  then place, peak and water names by text size. Legend entries (columns of
+  short labels, or legend, furniture and route-note words only, also when OCR
+  merged them: "DryWaterCourse", "NOENTRYSIGN"), scale bars, coordinates, spot
+  heights, credits ("GIS V1 Sept 2017 - …") and the same name read twice or
+  partially are left out. Grootkloof: `["GROOTKLOOF", "HAMERKOP",
+  "MAGALIESBERG", "SUGARBUSH HILL COUNTRY COTTAGE", "KWAMI LODGE"]`.
+* `search` (whenever the contour search ran): its progress, for the app's
+  "Searched 320 of 1 000 km" UI:
+  `{"radius_m", "searched_radius_m", "coarse_zoom", "tiles_planned",
+  "tiles_fetched", "hints_tried", "hints_planned", "stage"}`. `radius_m` is
+  the clamped search radius (0 without a fix), `searched_radius_m` the radius
+  around the fix searched completely so far (the near disc, then the nearest
+  point of the first wide chunk not searched yet; chunks are a few hundred km
+  wide, so it grows in steps), `coarse_zoom` that of the current coarse stage
+  (11, 10 or 9), `tiles_planned`/`tiles_fetched` the coarse tiles of the whole
+  search (hint and near areas, wide chunks; candidate checks come on top),
+  `stage` one of `"hints" | "near" | "wide" | "refine" | "done"`.
+* A failed contour search says what was searched: "No match within 1 000 km
+  of you (searched 1 073 terrain tiles; tried 3 places named on the map).
+  Search a wider area, pick the contour colour, or calibrate manually."
+  (thousands grouped with a no-break space, U+00A0; "Search a wider area" is
+  left out at 2 000 km). Without a fix or hints: "… contour matching needs your
+  location or a place to search …"; with no terrain downloaded at all: "Terrain
+  data for the search area couldn't be downloaded …".
+* `diagnostics.search_areas` lists every hint and near area searched (centre,
+  radius, tiles, candidates, outcome), `diagnostics.label_hints` the hints read
+  from coordinate labels and `diagnostics.wide` the wide search (zoom, chunks
+  searched, candidates re-checked and refined with their numbers);
+  `diagnostics.selected.source` is `"wide"` for a wide match.
 * `pixel_to_mercator` is affine (last row `[0, 0, 1]`) except in photo mode,
   where it may be a full homography; always evaluate it projectively.
 * `scale_m_per_px` is in *ground* metres.
@@ -379,6 +437,189 @@ image's pixels, like everything else.
 {"points": [{"x": 878, "y": 541, "lat": -25.8167, "lon": 27.3833}], "model": "auto"}
 → {"status": "ok", "pixel_to_mercator": [...9], "rms_m": 2.0, "residuals_m": [1.2, ...], "model": "affine"}
 ```
+
+## Wide search
+
+The user's first search covers 50 km around the GPS fix (the near disc, as
+before but with a larger default radius). When the map is not found there the
+app can search further, up to 2 000 km (`search_radius_m`), and offer places
+named on the map (`hint_queries`, geocoded into `hints`). A 1 000 km radius at
+zoom 11 would be ~10 000 tiles (1 GB, 660 Mpx); the wide search instead works
+on coarser tiles, chunk by chunk, and verifies candidates on finer ones.
+
+**Order** (`georef.rs`, `georef/wide_search.rs`, `wide.rs`, `hints.rs`):
+
+1. *Hints* (user, then label, then place hints, each in the order given; at
+   most 8; a hint whose disc an earlier one covers is skipped), each searched
+   like the near area: the zoom-11 coarse search within the hint's radius,
+   then the zoom-13 refinement of its best candidates. The map's coordinate
+   labels become a `label` hint when the grid fit cannot use them: one
+   latitude and one longitude label (their medians), or a corner label
+   holding both; the map centre lies along the offset from that labelled
+   point to the image centre at the unknown scale, so the hint is the disc
+   around that segment (scale range from an OCR'd "1:25 000" and the dpi, or
+   0.4–12 m/px), plus 15 % of the offset for a map that is not north up and 2 km.
+   Labels of one axis alone (a latitude label and the scale, say) put the map
+   centre in a band of latitudes (or longitudes) the same way
+   (`hints::label_band`, `diagnostics.label_band`): with a GPS fix the near
+   disc is skipped when the band misses it, and the wide search only plans
+   the chunks, placements and tiles the band reaches (a strip a few km wide
+   instead of the disc).
+2. *Near*: the disc of `min(search_radius_m, 50 km)` around the fix at zoom 11
+   (up to 50 km this is the whole search), the inner 20 km first: where the
+   map usually is, a third of the cost (the 50 km disc's coarse search takes
+   ~2 s on 64 tiles, the 20 km one ~0.8 s), so a user near the sheet waits no
+   longer than with the old 20 km default; without a confident match there,
+   the whole disc follows.
+3. *Wide* (`search_radius_m` > 50 km): the rest of the disc, north up, in
+   chunks nearest first (`wide::plan_wide`): the coarse tile grid is cut into
+   blocks of `s × s` tiles of placements (where the map centre may lie), each
+   searched on a mosaic of those tiles plus the tiles the map's extent reaches
+   (one ring at zoom 9/10), at most `floor(√max_tiles_per_round)` (3…8) tiles a
+   side: 6 × 6 placements on an 8 × 8 mosaic by default. Chunks are ordered by
+   the ground distance of their nearest point to the fix, so the search grows
+   in rings; tiles a centre in the annulus cannot reach are not fetched. The
+   coarse search of a chunk (`search::Region`: its box, half-open so chunks
+   never share a placement, and the annulus 50 km … R) keeps its six most
+   significant candidates, of which the three with the highest correlation go
+   on. Each is re-checked by a zoom-11 search 4 km around it, scale ±10 %
+   (2–9 tiles); one that stands out locally (re-check peak ratio ≥ 2.2,
+   correlation ≥ 0.2) is refined at zoom 13 and **accepted only when
+   confident** (`refine::confidence` ≥ 0.7, with the re-check peak ratio as
+   search evidence, where the near area accepts from 0.5) and its re-check
+   correlation is ≥ 1.1 × that of every other re-checked candidate ≥ 2 km
+   away. The search stops at the first accepted match. A chunk's tiles are
+   released once no later chunk needs them, re-check tiles once used (the
+   near and hint areas' stay), so memory stays at one chunk's worth however
+   wide the search; one need_dem round fetches a chunk's re-check tiles
+   together with the next chunk's tiles.
+
+Matches below 0.7 from a hint or the near area (accepted from 0.5) wait while
+the remaining areas are searched; the most confident is reported at the end.
+
+**Coarse zoom** (`wide::wide_zoom`): zoom 10 up to 150 km, zoom 9 beyond; finer
+while no scale of the range gives the map a template of 24 cells (a map
+showing less than ~6.6 km on its short side needs zoom 10, less than ~3.3 km
+zoom 11). At zoom 9 the 1:25 000 sheets (6.7 km wide) are just above that
+floor and were found everywhere (below). Scales whose template would be
+smaller than 24 cells at the wide zoom are not searched there
+(`diagnostics.wide.min_scale_m_per_px`).
+
+**Measurements** (`tests/wide_measure.rs`, ignored tests on real Terrarium
+tiles, cached; a 4-core 2.1 GHz Xeon shared with other jobs):
+
+*Tile weights* (60 tiles per zoom spread over 2 300 km around the
+Magaliesberg, land and the sea off Durban): mean 76.8 KB at zoom 8, 68.9 KB at
+9, 45.9 KB at 10, 26.4 KB at 11 (sea tiles are 0.7 KB), 20.0 KB at 12, 15.9 KB at
+13; decoding ~1.0–1.3 ms per tile.
+
+*Direct coarse windows* (the Grootkloof scan, one mosaic, default scale range
+0.4–12 m/px / with the scale prior 1.43–2.65 m/px; truth rank among distinct
+candidates, its correlation and peak ratio):
+
+| zoom | fix (distance) | R km | tiles | search s | truth | NCC | ratio | next NCC | +RSS MB |
+|---|---|---|---|---|---|---|---|---|---|
+| 11 | sheet (0 km) | 50 | 100 | 2.45 / 0.81 | #1 | 0.71 | 2.22 | 0.35 | 273 |
+| 11 | Pretoria (80 km) | 110 | 289 | 11.9 / 3.1 | #1 | 0.71 | 2.15 | 0.42 | 727 |
+| 10 | Pretoria (80 km) | 110 | 81 | 1.67 / 0.75 | #1 | 0.66 | 2.18 | 0.41 | 130 |
+| 9 | Pretoria (80 km) | 110 | 25 | 0.48 / 0.11 | #1 | 0.69 | 1.77 | 0.31 | – |
+| 9 | Polokwane (300 km) | 330 | 132 | 3.2 / 1.4 | #1 | 0.66 | 1.51 | 0.41 | 298 |
+| 9 | Bloemfontein (383 km) | 413 | 196 | 7.9 / 2.9 | #1 | 0.69 | 1.59 | 0.32 | 618 |
+| 9 | Durban (572 km) | 602 | 380 | 20.5 / 9.8 | #1 | 0.71 | 1.11 | 0.48 | 1 379 |
+
+The true location stays the top candidate at every zoom and size, but the
+peak ratio (significance over the best other location) decays with the area
+(2.2 → 1.1), so over a wide area it is no evidence and an un-chunked window
+costs 1.4 GB: hence chunks, and a re-check at zoom 11.
+
+*Candidate checks* (the top ten candidates by correlation of the z10 window
+from Pretoria and the z9 windows from Bloemfontein and Durban, each re-checked
+at zoom 11 and the best five refined at zoom 13; five cases: the Grootkloof
+scan, a synthetic photo of it, the real phone photo of it, Castle Gorge and
+Mhlabatini):
+
+* the truth is the #1 candidate by correlation in all 15 windows (coarse NCC
+  0.52–0.75; the best false 0.29–0.51, the highest over the sea's bathymetry,
+  which zoom 9 has and zoom 11 does not: those re-checks find nothing);
+* re-check: truth NCC 0.45–0.65 at a local peak ratio of **2.56–5.39**; false
+  candidates NCC ≤ 0.36 at **≤ 1.87** (2–9 tiles, 0.02 s each);
+* refinement: the truth fits at 1.000 in every case; false candidates at 0.000
+  for the scans, but photo refinement (homography, more freedom) fits a false
+  candidate on the real photo at **0.635** (1 093 km away, re-check ratio
+  0.83). Accepting a wide match on a refinement alone, or on its margin over
+  junk candidates, would be a confident wrong answer; the re-check ratio
+  separates them.
+
+*The implemented search* (`wide_session`, `wide_session_real_photo`: the
+session API, the Grootkloof scan with its "1:25 000" OCR'd unless noted, and
+the real phone photo flattened by its page corners (photo mode, no OCR);
+tiles through a ~2 MB/s proxy, partly cached; peak RSS of the whole test
+process, which also holds its own copies of the map: 423 MB for a search
+that finds the sheet in the inner 20 km, 563 MB for the full 50 km disc):
+
+| from (distance) | R km | zoom | outcome | rounds | tiles z9/10 + z11 + z13 | MB | total s (core) | peak RSS MB |
+|---|---|---|---|---|---|---|---|---|
+| on the sheet | 50 | 11 | ok, inner 20 km | 3 | 16 + 12 | 0.9 | 1.0 (1.0) | 423 |
+| Rustenburg (26 km) | 50 | 11 | ok, whole disc | 4 | 64 + 28 | 2.9 | 4.2 (3.4) | 563 |
+| Pretoria (80 km) | 120 | 10 | ok, chunk 1 of 4 | 7 | 52 + 57 + 38 | 5.0 | 5.6 (5.4) | 638 |
+| Polokwane (300 km) | 350 | 9 | ok, chunk 3 of 4 | 10 | 100 + 78 + 57 | 9.7 | 7.5 (6.3) | 622 |
+| Bloemfontein (383 km) | 450 | 9 | ok, chunk 3 of 9 | 10 | 149 + 96 + 54 | 13.2 | 9.6 (7.5) | 666 |
+| Durban (572 km) | 650 | 9 | ok, chunk 9 of 15 | 16 | 327 + 162 + 45 | 35.3 | 13.7 (11.4) | 734 |
+| Durban, no scale | 650 | 9 | ok, chunk 9 of 15 | 17 | 353 + 193 + 30 | 38.1 | 25.6 (25.1) | 752 |
+| Windhoek (~1 060 km) | 1 000 | 9 | failed, all 25 chunks | 31 | 675 + 317 + 56 | 55.5 | 34.6 (25.6) | 722 |
+| photo, Bloemfontein | 450 | 9 | ok, chunk 3 of 9 | 10 | 152 + 100 + 51 | 13.4 | 18.4 (16.4) | 648 |
+| photo, Durban | 650 | 9 | ok, chunk 9 of 15 | 16 | 333 + 164 + 34 | 36.1 | 31.1 (26.8) | 691 |
+
+The wide search adds ~100–190 MB over the 50 km near search (one chunk's
+mosaic, its search buffers and the zoom-9 tiles of the next ring), however
+wide; the 1 000 km search that cannot succeed releases its 675 zoom-9 tiles
+as it goes. The photo is accepted at a re-check ratio of 2.76–2.80 (NCC
+margin 1.33–1.99), confidence 1.0, with the same transform as from on the
+sheet. The estimate for these (scale unknown) is conservative: 1 000 km,
+61.4 MB in 29 rounds and ~110 s on an iPhone vs 55.5 MB in 31 rounds and
+25.6 s of core time here with the scale known.
+
+Every scan match is the sheet within 11.6 m (max over the frame). Hermetic tests
+(`tests/wide.rs`) cover the same on fixture tiles and synthetic terrain served
+on demand: a 1:50 000 synthetic sheet 120 km from the fix found by the zoom-10
+chunks (10 rounds, ~14 s), the same sheet 260 km away with R = 200 km an
+honest failure after all six zoom-9 chunks (two false candidates passed the
+re-check gate there, at ratios 2.54 and 2.27, and refined to 0.0: the gate is
+a cost filter, the refinement and the confidence decide), and the same sheet
+150 km away with one latitude label and its scale: the band (4.9 km of
+latitude) misses the near disc, so 9 zoom-9 tiles are planned instead of
+~180, and it is found in 5 rounds (0.9 s).
+
+**Estimate** (`mm_search_estimate`, `wide::estimate`): the plan the search
+would make (hint areas and the near disc at zoom 11, the wide chunks) for a
+typical 300-dpi A3 sheet at 0.4–12 m/px, plus measured allowances for
+candidate checks (12 zoom-11 tiles per chunk, 16 zoom-13 tiles per
+refinement, two refinements per area); bytes from the tile weights above;
+compute from the measured 0.47 s per million mosaic cells over the default
+scale range (0.17 s with `"scale_known": true`, a scale label read) and 0.6 s
+per refinement, times 1.5 for an iPhone; download at 2 MB/s plus 0.5 s per
+round. From Pretoria, scale unknown:
+
+| R km | zoom | tiles | MB | rounds | chunks | ~s (compute + download) |
+|---|---|---|---|---|---|---|
+| 20 | 11 | 67 | 1.5 | 2 | 0 | 5 (3.4 + 1.7) |
+| 50 | 11 | 128 | 2.8 | 3 | 0 | 11 (8.2 + 2.9) |
+| 100 | 10 | 231 | 6.6 | 6 | 2 | 19 (12.6 + 6.3) |
+| 250 | 9 | 261 | 9.2 | 8 | 4 | 23 (14.0 + 8.6) |
+| 500 | 9 | 465 | 21.0 | 13 | 9 | 42 (25.3 + 17.0) |
+| 1 000 | 9 | 1 197 | 64.3 | 29 | 25 | 114 (67.5 + 46.6) |
+| 2 000 | 9 | 4 025 | 230.9 | 92 | 88 | 398 (236.3 + 161.4) |
+
+(For 50 km and more the near disc counts twice: the inner 20 km first, the
+whole disc if the map is not there. A whole search is planned; one that
+finds the map stops early, so these are upper bounds.)
+
+Known limits: the wide search is north up (a rotation sweep costs 36 times
+as much; the hint and near areas honour `allow_rotation`); maps narrower than
+~6.6 km are only found within 150 km (zoom 10) and those under ~3.3 km only in
+the near and hint areas; chunks do not wrap across the antimeridian; the
+estimate assumes a typical sheet (a small-scale map adds margin tiles, a
+scale label makes the search ~3× faster).
 
 ## Dark map
 
@@ -567,16 +808,21 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
   src/page.rs         page (paper sheet) finder for photos: mm_detect_page
   src/dark.rs         dark map: paper grid + flat field, OKLab tone map, 65³ LUT, tile render
   src/labels.rs       coordinate / scale / POI label parsing
+  src/hints.rs        search hints: label hints from coordinate labels, hint_queries
+  src/wide.rs         wide search planning: coarse zoom, chunks, mm_search_estimate
   src/grid.rs         grid-line detection, label↔line association, GCP fit
   src/control_points.rs manual calibration fits
-  src/georef.rs       Session + orchestrator (request → response)
+  src/georef.rs       Session + orchestrator (request → response): hint areas, near area
+  src/georef/wide_search.rs  the wide search: chunks, zoom-11 re-checks, acceptance
   src/ffi.rs          C ABI
   include/mapme_core.h
   tests/              integration tests on fixtures/grootkloof (photo.rs: synthetic
                       photos of the sheet, flattened from imperfect corners;
                       realphoto.rs: the real phone photo of the folded sheet;
                       warp.rs: the warp contract and its accuracy on that photo;
-                      dark.rs: dark map rendering)
+                      dark.rs: dark map rendering; wide.rs: hints, hint_queries,
+                      the chunked wide search on synthetic terrain;
+                      wide_measure.rs: ignored network measurements)
 fixtures/grootkloof/  the real map (PDF + extracted JPEG), DEM tiles, OCR fixture, truth
 ios/                  XcodeGen project (project.yml), app, unit tests, UI tests
 scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
@@ -633,7 +879,12 @@ library card.
 
 * Import + render + tile pyramid for an A3 300-dpi PDF: < 3 s on an A15.
 * Grid georeference (OCR + core): < 3 s. Contour georeference: < 4 s plus DEM
-  download. Photo mode adds the normalisation (~0.1 s for 9 MP) and costlier
+  download (the default 50 km near disc: ~2 s coarse search over 64 zoom-11
+  tiles, 0.8 s with a scale label; the inner 20 km first, so a user near
+  the sheet waits as before). Wide search on the reference box: 6–26 s of
+  core time to find the sheet from up to 650 km, 26 s for a whole 1 000 km
+  search that fails (see *Wide search*), at most one chunk mosaic (≤ 8 × 8
+  tiles) in memory. Photo mode adds the normalisation (~0.1 s for 9 MP) and costlier
   line and mask extraction: ~0.9 s grid and ~2 s contour path on the CI-class
   Linux box (4 cores), < 6 s even when three candidates must be refined. The
   warp adds ~0.5 s of fit, plus the contour products in the grid path (one

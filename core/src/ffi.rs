@@ -233,6 +233,21 @@ pub unsafe extern "C" fn mm_fit_control_points(request_json: *const c_char) -> *
     }
 }
 
+/// Estimate what a search will fetch and how long it takes, before running
+/// it (stateless): `{"radius_m", "gps": {"lat","lon"} | null, "hints": [...]}`
+/// → `{"status":"ok","coarse_zoom","tiles","approx_bytes","approx_seconds",...}`
+/// (see `wide::search_estimate_json`), or a failed response; never NULL.
+///
+/// # Safety
+/// `request_json` must be NULL or a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn mm_search_estimate(request_json: *const c_char) -> *mut c_char {
+    match c_str(request_json, "request_json") {
+        Ok(req) => json_call(|| crate::wide::search_estimate_json(req)),
+        Err(e) => into_c_string(failed_json(&format!("Invalid request: {e}"))),
+    }
+}
+
 /// Find the sheet of paper in a photo (8-bit RGBA, alpha ignored, rows
 /// `bytes_per_row` apart; read during the call, not kept). Returns
 /// `{"status":"ok","quad":[[x,y]×4 TL,TR,BR,BL],"confidence","coverage"}` or

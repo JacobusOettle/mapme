@@ -631,7 +631,7 @@ pub struct PoiLabel {
 
 /// Words that mark map furniture (legend, imprint, projection notes): a label
 /// containing any of them is never a POI.
-const META_WORDS: &[&str] = &[
+pub(crate) const META_WORDS: &[&str] = &[
     "legend",
     "scale",
     "declination",
@@ -671,7 +671,7 @@ const META_WORDS: &[&str] = &[
 
 /// Generic feature words used in legends. A label made only of these (and
 /// connectives) is legend text, e.g. "Trig Beacon", "Non-Perennial River".
-const LEGEND_WORDS: &[&str] = &[
+pub(crate) const LEGEND_WORDS: &[&str] = &[
     "trig",
     "beacon",
     "parking",
@@ -777,12 +777,12 @@ const WATER_WORDS: &[&str] =
 const PEAK_SUFFIXES: &[&str] = &["kop", "kopje", "berg", "piek", "spitz"];
 const WATER_SUFFIXES: &[&str] = &["fontein", "rivier", "spruit", "waterval"];
 
-fn words_of(text: &str) -> Vec<String> {
+pub(crate) fn words_of(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.to_lowercase()).collect()
 }
 
 /// "1428", "1428m", "1428.5 m" → elevation.
-fn parse_height(text: &str) -> Option<f64> {
+pub(crate) fn parse_height(text: &str) -> Option<f64> {
     let t = text.trim();
     let t = t.strip_suffix('m').or_else(|| t.strip_suffix('M')).unwrap_or(t).trim_end();
     let (int, frac) = match t.split_once('.') {
@@ -820,7 +820,7 @@ fn scale_bar_number(text: &str) -> Option<f64> {
 
 /// Labels forming a scale bar: three or more numbers on one baseline in
 /// arithmetic progression ("0 250 500 750 1000 1250 m").
-fn scale_bar_members(obs: &[OcrObservation], th: f64) -> Vec<bool> {
+pub(crate) fn scale_bar_members(obs: &[OcrObservation], th: f64) -> Vec<bool> {
     let mut flag = vec![false; obs.len()];
     let nums: Vec<(usize, f64)> =
         obs.iter().enumerate().filter_map(|(i, o)| Some((i, scale_bar_number(&o.text)?))).collect();
@@ -860,7 +860,7 @@ fn scale_bar_members(obs: &[OcrObservation], th: f64) -> Vec<bool> {
 
 /// Legend columns: three or more short labels sharing a left edge, stacked at
 /// line spacing.
-fn legend_members(obs: &[OcrObservation], th: f64) -> Vec<bool> {
+pub(crate) fn legend_members(obs: &[OcrObservation], th: f64) -> Vec<bool> {
     let mut flag = vec![false; obs.len()];
     let short: Vec<usize> = (0..obs.len())
         .filter(|&i| {
@@ -901,7 +901,7 @@ fn legend_members(obs: &[OcrObservation], th: f64) -> Vec<bool> {
     flag
 }
 
-fn median(mut v: Vec<f64>) -> Option<f64> {
+pub(crate) fn median(mut v: Vec<f64>) -> Option<f64> {
     v.retain(|x| x.is_finite());
     if v.is_empty() {
         return None;
@@ -911,7 +911,7 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
 }
 
 /// Does the text look like part of a coordinate ("4.8'", "18°")?
-fn has_angle_mark(text: &str) -> bool {
+pub(crate) fn has_angle_mark(text: &str) -> bool {
     let c: Vec<char> = text.chars().map(canon_char).collect();
     c.windows(2).any(|w| w[0].is_ascii_digit() && matches!(w[1], DEG | MIN | SEC))
 }
@@ -1061,7 +1061,7 @@ fn drop_truncated_heights(pois: &mut Vec<PoiLabel>) {
 }
 
 /// "5m", "100m", "2km" style measurement tokens.
-fn is_measure(w: &str) -> bool {
+pub(crate) fn is_measure(w: &str) -> bool {
     let t = w.trim_end_matches(|c: char| c.is_alphabetic());
     !t.is_empty() && t.len() < w.len() && t.chars().all(|c| c.is_ascii_digit()) && w.len() - t.len() <= 2
 }

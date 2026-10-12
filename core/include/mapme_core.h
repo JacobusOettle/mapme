@@ -56,9 +56,25 @@ int32_t mm_session_mark_dem_tile_missing(MMSession *session, uint8_t z, uint32_t
  * Run georeferencing (blocking; call off the main thread). Returns a response
  * JSON string, never NULL. Status "need_dem" means add (or mark missing) the
  * listed tiles and call again with the same request; work done so far is
- * cached in the session.
+ * cached in the session, so the search continues where it left off. One
+ * answer asks for at most "max_tiles_per_round" tiles (default 64); a wide
+ * search (search_radius_m beyond 50 km, up to 2 000 km) takes one round per
+ * chunk of the area, nearest first: keep answering until "ok" or "failed"
+ * (the response's "search" object reports the progress), or cancel.
  */
 char *mm_session_georeference(MMSession *session, const char *request_json);
+
+/*
+ * Estimate a search before running it (stateless, fast). Request:
+ *   {"radius_m": 1000000, "gps": {"lat": -25.75, "lon": 28.19} | null,
+ *    "hints": [{"lat","lon","radius_m"}], "max_tiles_per_round": 64, "scale_known": false}
+ * (every field optional; radius clamped to 1 000 ... 2 000 000 m, default 50 000).
+ * Response: {"status":"ok","radius_m","coarse_zoom","tiles","approx_bytes","approx_seconds",
+ *   "approx_compute_seconds","approx_download_seconds","approx_megabytes","rounds","chunks",
+ *   "tiles_by_zoom":[{"z","tiles"}]} for a typical 300-dpi A3 sheet (see docs/ARCHITECTURE.md,
+ * "Wide search"), or {"status":"failed","message"}. Never NULL.
+ */
+char *mm_search_estimate(const char *request_json);
 
 /* Progress of the running georeference call, 0..1. Safe from any thread. */
 float mm_session_progress(const MMSession *session);

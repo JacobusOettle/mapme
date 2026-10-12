@@ -294,7 +294,8 @@ const PERTURBATIONS: [f64; 5] = [0.0, 0.005, -0.005, 0.01, -0.01];
 
 /// A point inside the map (the GPS of a user standing on the sheet).
 const ON_MAP: (f64, f64) = (-25.8405, 27.3920);
-/// About 45 km west of the map, outside the default 20 km search radius.
+/// About 45 km west of the map: outside a 20 km search radius (the `Far`
+/// path asks for 20 km), inside the default 50 km.
 const FAR: (f64, f64) = (-25.8405, 26.9420);
 /// Map centre.
 const CENTER: (f64, f64) = (-25.8499, 27.4000);
@@ -318,7 +319,7 @@ impl Path {
         match self {
             Path::Grid => json!({"gps": gps(CENTER), "ocr": f.ocr(), "photo": true}),
             Path::Contours => json!({"methods": ["contours"], "gps": gps(ON_MAP), "photo": true}),
-            Path::Far => json!({"methods": ["contours"], "gps": gps(FAR), "photo": true}),
+            Path::Far => json!({"methods": ["contours"], "gps": gps(FAR), "photo": true, "search_radius_m": 20000}),
         }
     }
 }
@@ -644,8 +645,8 @@ fn realphoto_contours() {
     });
 }
 
-/// A GPS fix 45 km away: the map is outside the search area, so no
-/// confident answer.
+/// A GPS fix 45 km away with a 20 km search radius: the map is outside the
+/// search area, so no confident answer.
 #[test]
 fn realphoto_far_gps_fails_honestly() {
     let out = run_all(Path::Far, &[0.0, -0.01]);
