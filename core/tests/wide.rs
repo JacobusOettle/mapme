@@ -960,3 +960,41 @@ fn decoy_likeness() {
         eprintln!("[decoy] alpha {a}: hint {:?}, wide {:?}", r[0], r[1]);
     }
 }
+
+/// Svalbard (78°N): the near area searched at zoom 9 and the wide search at
+/// zoom 7 (the zooms with the ground detail of zoom 11 and 9 at low
+/// latitudes) find a sheet 120 km from the fix end to end.
+#[test]
+fn far_north_search_finds_the_sheet() {
+    let _g = serial();
+    let fix = LatLon::new(78.22, 15.65);
+    let at = destination(fix, 100.0, 120_000.0);
+    let out = find_sheet("Svalbard 120 km", fix, at, 200_000.0, 64);
+    let r = out.last();
+    assert_eq!(r["diagnostics"]["selected"]["source"], "wide");
+    assert_eq!(r["diagnostics"]["wide"]["zoom"], 7, "{}", r["diagnostics"]["wide"]);
+    // The near area at zoom 9 (refinements may use zoom 11-13).
+    assert_eq!(out.responses[0]["search"]["coarse_zoom"], 9, "{}", out.responses[0]["search"]);
+    let zooms: std::collections::BTreeSet<u8> = out.served.iter().map(|t| t.z).collect();
+    eprintln!("    zooms served: {zooms:?}, {} tiles", out.served.len());
+    assert!(!zooms.contains(&10), "{zooms:?}");
+    assert!(out.served.len() < 400, "{} tiles", out.served.len());
+}
+
+/// Offline beyond the fixture: every wide tile is marked missing. The search
+/// runs through all chunks without terrain and does not claim "no match
+/// within 300 km": most of the area went unsearched.
+#[test]
+fn offline_wide_search_says_what_was_missing() {
+    let _g = serial();
+    let s = Session::new(map().clone());
+    let req = json!({"gps": gps(LatLon::new(-25.85, 26.85)), "dpi": 300.0, "methods": ["contours"],
+                     "search_radius_m": 300_000.0});
+    let (rs, _) = fixture_loop(&s, &req, 40);
+    let r = rs.last().unwrap();
+    summary("offline wide", &rs, None);
+    assert_eq!(r["status"], "failed");
+    let m = r["message"].as_str().unwrap();
+    assert!(m.starts_with("Terrain for much of the search area couldn't be downloaded ("), "{m}");
+    assert!(!m.contains("No match within"), "{m}");
+}

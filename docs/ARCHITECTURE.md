@@ -384,7 +384,9 @@ image's pixels, like everything else.
   manually." With a labels' band the parenthesis adds "first along 26°51'S,
   printed on the map". Without a fix or hints: "… contour matching needs your
   location or a place to search …"; with no terrain downloaded at all: "Terrain
-  data for the search area couldn't be downloaded …".
+  data for the search area couldn't be downloaded …"; with more tiles
+  missing than searched: "Terrain for much of the search area couldn't be
+  downloaded (90 of 154 tiles), and the rest holds no match. …".
 * `diagnostics.search_areas` lists every hint and near area searched (centre,
   radius, tiles, candidates, outcome), `diagnostics.label_hints` the hints read
   from coordinate labels and `diagnostics.wide` the wide search (zoom, chunks
@@ -669,6 +671,15 @@ tiles instead of ~100) find it in 9 rounds.
   end; at most 205 tiles (51 MB) were held at once.
 * **Hints**: a hint with a 5 000 km radius (searched at 50 km) no longer
   hides the hints after it as "covered"; the radius is clamped first.
+* **Far north, antimeridian, small maps, offline**: a synthetic sheet 120 km
+  from Longyearbyen (78°N) is found with the near disc at zoom 9 and the
+  wide search at zoom 7; a fix at 179.3°E finds a sheet at 179.75°W and plans
+  as many tiles as anywhere else; a 1.5 km map over 1 000 km searches 81
+  tiles (was 18 147 planned) and says it was searched to 50 km; with every
+  wide tile missing the answer says the terrain couldn't be downloaded
+  instead of "no match within 300 km". The author's runs above (Polokwane,
+  Durban with and without the scale, Windhoek, the photo from Durban)
+  reproduce tile for tile.
 
 **Estimate** (`mm_search_estimate`, `wide::estimate`): the plan the search
 would make (hint areas, at most 8 after ordering, and the near disc at zoom

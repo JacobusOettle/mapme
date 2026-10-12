@@ -1868,6 +1868,15 @@ impl<'a> Run<'a> {
                     again with a connection, or calibrate manually."
                 .into();
         }
+        if missing > 0 && missing >= present {
+            // Most of the area went unsearched: say so, not "no match within".
+            return format!(
+                "Terrain for much of the search area couldn't be downloaded ({} of {} tiles), and the rest holds no \
+                 match. Try again with a connection, or calibrate manually.",
+                group_thousands(missing as f64),
+                group_thousands((missing + present) as f64)
+            );
+        }
         let mut what = vec![format!("searched {} terrain tile{}", group_thousands(present as f64), plural(present))];
         if missing > 0 {
             what.push(format!("{} couldn't be downloaded", group_thousands(missing as f64)));
