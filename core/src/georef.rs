@@ -842,7 +842,9 @@ struct Run<'a> {
     hints_tried: usize,
     /// Zoom-11 coarse tiles of the hint areas and the near area (never released).
     pinned: HashSet<TileId>,
-    /// Zoom-13 tiles of the hint and near areas' refinements (never released).
+    /// Zoom-13 tiles of the hint and near areas' refinements and of the checks
+    /// run before the search (labels-only refinement, one-label check): never
+    /// released.
     kept: HashSet<TileId>,
     /// Present and missing coarse tiles of the areas and chunks searched.
     searched_tiles: HashSet<TileId>,
@@ -1307,6 +1309,10 @@ impl<'a> Run<'a> {
         let Some(plan) = fine_plan(&approx, w, h) else {
             return Ok(None);
         };
+        // A one-label check runs again on every call before the contour
+        // search: the wide search must not release its tiles (the app
+        // answers a tile asked for twice as missing).
+        self.kept.extend(plan.tiles.iter().copied());
         self.need(&plan.tiles, "verify", key)?;
         let prod = self.products(key)?;
         let checked = if t.is_affine() {
@@ -1625,6 +1631,8 @@ impl<'a> Run<'a> {
             .filter(|g| g.transform.is_affine())
             .and_then(|g| fine_plan(&g.transform.to_affine(), w, h).map(|p| (g.transform.to_affine(), p, g.rms_m)))
         {
+            // Refined again on every call: kept from the wide search's releases.
+            self.kept.extend(plan.tiles.iter().copied());
             self.need(&plan.tiles, "labels", key)?;
             let prod = self.products(key)?;
             if prod.samples.n_segs < MIN_SEGMENTS {

@@ -65,6 +65,15 @@ order:
    equal spacing and monotonic values. Grid-line intersections become ground
    control points, and an affine (≥3 non-collinear GCPs) is fit, or for
    photos a homography (see *Photo mode*). Typical accuracy is a few metres.
+   Garbled DMS reads (`25°48/00\S`, `2548100s`: marks read as other symbols,
+   as digits or lost) are repaired (`labels::coordinate_readings`); the fit
+   keeps the reading that agrees with the other labels. An axis with a single
+   label is fitted on the other axis' scale (`lone_label`): nothing outvotes
+   a misread there, so with contours requested the terrain under the fit
+   confirms it (the answer) or rules it out (dropped); with nothing to judge
+   by, the contour search runs and the fit is the fallback, flagged for
+   checking (confidence < 0.5). Such a fit, like a labels-only one, must also
+   have the printed scale when the request gives one (dpi and an OCR'd 1:n).
    If labels exist but no lines are found, label centres are used directly as
    a coarse fit, which is then refined with contours when a DEM is available.
 2. **Contour matching against a DEM** (`contour.rs`, `skeleton.rs`,
@@ -403,7 +412,10 @@ image's pixels, like everything else.
 * `pois` are map labels classified as place names, peaks or spot heights, in
   base-image pixels. A spot height with fewer digits than
   nearly all others on the sheet and under half their median is dropped as a
-  misread (e.g. "112" for a "1412" cut by a grid line).
+  misread (e.g. "112" for a "1412" cut by a grid line); so is one more than
+  150 m outside the terrain's elevations around it when the session holds
+  zoom-12/13 tiles under the located map (a peak keeps its name, not the
+  height; `diagnostics.spot_heights_off_dem`).
 * `warp` (photo mode only; absent or `null` otherwise) is a smooth correction
   for paper that does not lie flat (fold creases, curl). No single homography
   fits a folded sheet: on `fixtures/grootkloof/photo` (a phone photo of the
@@ -467,7 +479,9 @@ on coarser tiles, chunk by chunk, and verifies candidates on finer ones.
    like the near area: the zoom-11 coarse search within the hint's radius,
    then the zoom-13 refinement of its best candidates. The map's coordinate
    labels become a `label` hint when the grid fit cannot use them: one
-   latitude and one longitude label (their medians), or a corner label
+   latitude and one longitude label (their medians, read by the grid's
+   parser, `labels::parse_coordinate`, which takes a garbled DMS label when
+   its cheapest readings agree), or a corner label
    holding both; the map centre lies along the offset from that labelled
    point to the image centre at the unknown scale, so the hint is the disc
    around that segment (scale range from an OCR'd "1:25 000" and the dpi, or

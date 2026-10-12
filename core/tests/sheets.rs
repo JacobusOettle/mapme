@@ -116,7 +116,8 @@ fn gps((lat, lon): (f64, f64)) -> Option<GpsFix> {
 }
 
 /// Contour search radius of these tests (the core's default when they were
-/// written); the fixture DEM covers the searches it implies.
+/// written; it is 50 km now): the fixture DEM covers the searches it implies,
+/// and `far` (60 km) stays outside it either way.
 const SEARCH_RADIUS_M: f64 = 20_000.0;
 
 /// What the app sends for a PDF page rendered at 300 dpi.
