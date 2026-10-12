@@ -1,14 +1,20 @@
 # Installing MapMe on your iPhone
 
 There are three ways to get MapMe onto a phone. **A** needs only a free Apple ID
-and a Windows PC or Mac. **B** needs a paid Apple Developer account. **C** needs a
-Mac with Xcode.
+and a Linux, Windows or Mac computer. **B** needs a paid Apple Developer account
+and no computer at all after setup (setup works from Linux too). **C** needs a
+Mac with Xcode. You never need a Mac of your own: GitHub's macOS runners build
+the app on every push, and A or B put that build on your phone.
 
 | | What you need | App lasts | Effort |
 |---|---|---|---|
-| A. Sideload the CI build | free Apple ID, PC or Mac, USB cable | 7 days, then re-sign | 10 min |
-| B. TestFlight | Apple Developer Program ($99/yr) | 90 days per build | 30 min once, then automatic |
+| A. Sideload the CI build | free Apple ID, Linux/Windows/Mac, USB cable | 7 days, then re-sign | 10 min |
+| B. TestFlight | Apple Developer Program ($99/yr) | 90 days per build, updates itself | 30 min once, then automatic |
 | C. Build in Xcode | Mac with Xcode 16+ | 7 days (free) / 1 year (paid) | 15 min |
+
+Renting a cloud Mac does not help with A: a free Apple ID can only sign for a
+phone that is plugged into the computer doing the signing, and cloud Macs are
+rented in 24-hour blocks.
 
 ## A. Sideload the unsigned IPA (free Apple ID)
 
@@ -32,7 +38,30 @@ The repository is private, so sign in to GitHub first.
 * **Command line:**
   `gh release download latest-build -R JacobusOettle/mapme -p MapMe-unsigned.ipa`
 
-### 2. Install it with Sideloadly (Windows or macOS)
+### 2a. Install it from Linux
+
+Two open-source tools sign an IPA with your Apple ID and install it over USB on
+Linux. Both need `usbmuxd` (most distributions have it; otherwise
+`sudo apt install usbmuxd` / `sudo dnf install usbmuxd`; plug the phone in
+*before* starting the tool, because usbmuxd stops when no device is connected).
+
+* **[PlumeImpactor](https://github.com/khcrysalis/PlumeImpactor)** (on
+  Flathub): connect the iPhone, unlock it, tap **Trust**, sign in with your
+  Apple ID, pick `MapMe-unsigned.ipa` and install. On Linux it re-signs
+  automatically when the phone is plugged in (usbmuxd has no Wi-Fi), so plug it
+  in once a week.
+* **[iloader](https://github.com/nab138/iloader)** (packages on its releases
+  page, AUR `iloader-bin`, Fedora COPR, a NixOS flake): sign in, then either
+  import `MapMe-unsigned.ipa` directly, or install **SideStore** first. SideStore
+  re-signs apps on the phone itself, so after this one-time setup you can add
+  MapMe from the IPA in Files and refresh it every 7 days without a computer.
+
+Then trust the developer and turn on Developer Mode (steps 4 and 5 below). These
+are third-party tools that talk to Apple with your Apple ID; consider a
+secondary Apple ID. Logs: iloader keeps them in
+`~/.local/share/me.nabdev.iloader/logs/`.
+
+### 2b. Install it with Sideloadly (Windows or macOS)
 
 1. Install [Sideloadly](https://sideloadly.io). On Windows, also install
    **iTunes and iCloud from apple.com** (not the Microsoft Store versions).
@@ -59,8 +88,9 @@ The repository is private, so sign in to GitHub first.
 
 Apps signed with a free Apple ID stop opening after 7 days. Re-install the same
 way (installing over the existing app keeps your maps and tracks), or let it
-refresh itself: Sideloadly's *auto-refresh* and AltStore's background refresh
-both work while the computer is on the same Wi-Fi. A free Apple ID can have 3
+refresh itself: SideStore refreshes on the phone, PlumeImpactor on Linux when the
+phone is plugged in, and Sideloadly's *auto-refresh* and AltStore's background
+refresh while the computer is on the same Wi-Fi. A free Apple ID can have 3
 sideloaded apps at a time.
 
 ## B. TestFlight (paid Apple Developer account)
@@ -75,7 +105,19 @@ manual run with *publish* ticked is signed and uploaded to TestFlight.
    * **Certificates → +**: an *Apple Distribution* certificate (create the CSR
      with Keychain Access → Certificate Assistant). Install it, then in Keychain
      Access → *My Certificates* right-click it → **Export** as `.p12` with a
-     password.
+     password. **On Linux**, make the CSR and the `.p12` with OpenSSL instead:
+
+     ```sh
+     openssl req -new -newkey rsa:2048 -nodes -keyout distribution.key \
+       -out distribution.csr -subj "/emailAddress=you@example.com/CN=Your Name/C=ZA"
+     # upload distribution.csr, download distribution.cer, then:
+     openssl x509 -inform DER -in distribution.cer -out distribution.pem
+     openssl pkcs12 -export -legacy -inkey distribution.key -in distribution.pem \
+       -out distribution.p12 -passout pass:CHOOSE_A_PASSWORD
+     ```
+
+     (`-legacy` writes the older encryption that every macOS keychain imports;
+     leave it out on OpenSSL 1.x. Keep `distribution.key` private.)
    * **Profiles → +**: *App Store Connect* distribution profile for that App ID
      and certificate. Download the `.mobileprovision`.
 2. In [App Store Connect](https://appstoreconnect.apple.com): **Apps → + New App**
@@ -103,7 +145,8 @@ manual run with *publish* ticked is signed and uploaded to TestFlight.
    tests pass, the job archives, signs, exports and uploads with `xcrun altool`.
    The build number is `<run number>.<attempt>`.
 5. The build appears in App Store Connect → TestFlight after processing (5 to 30
-   minutes). Add yourself under *Internal Testing*, install the **TestFlight**
+   minutes). Everything in B is done in a browser plus the OpenSSL commands
+   above, so it works from Linux. Add yourself under *Internal Testing*, install the **TestFlight**
    app on the iPhone and accept the invite. The app declares no non-exempt
    encryption, so there is no export-compliance question.
 
