@@ -895,15 +895,18 @@ exact lists, checked against the images.
      its guesses) stays only when all its words are known ("PHANL GULLI"
      goes).
 6. *Out of place* (`drop_out_of_place`): names that do not fit the map's
-   lettering. A read with a letter no map holds but by the dozen (the dotless
-   ı of Turkish, the stacked accents of Vietnamese) where few reads hold one
-   (under 15 % of ten or more): "nDệ Dickı", "guide pickı", Vision's reads of
-   the small italic "(guide pickup)" on Gaia map A. On a map whose names start
-   with a capital, a name whose first word is in lower case, with no capital
-   ("uKhahlamba") and no particle before a capitalised word ("de Hoop", "van
-   Reenen's Pass"): pieces of italic lettering ("ance", "ince" of "entrance",
-   "picku", "lain Cave" of "Main Cave" half under the north arrow). On a map in
-   mixed case, three capitals or fewer: amenity icons read as letters ("LAA").
+   lettering. A read with a letter no map holds but by the dozen (the stacked
+   accents of Vietnamese) where few reads hold one (under 15 % of ten or
+   more): "nDệ Dickı" on Gaia map A. A dotless ı of Turkish there is an i that
+   lost its dot (Vision on the italic face): "Ntubenı Pass" is Ntubeni Pass,
+   and "guide pickı", Vision's read of the small italic "(guide pickup)", goes
+   by the next rule. On a map whose names start with a capital, a name whose
+   first word is in lower case, with no capital ("uKhahlamba") and no
+   particles before a capitalised word ("de Hoop", "van Reenen's Pass", "van
+   der Stel Pass", "de la Rey", "an der Isar", "los Glaciares"): pieces of
+   italic lettering ("ance", "ince" of "entrance", "picku", "lain Cave" of
+   "Main Cave" half under the north arrow). On a map in mixed case, three
+   capitals or fewer: amenity icons read as letters ("LAA").
 7. *Pieces and misreads* (`drop_fragments`). A name is a piece of a read next
    to it when that read holds its text (exactly, or within one edit from five
    characters when the boxes overlap: the next line of a wrapped label is
@@ -954,13 +957,23 @@ exact lists, checked against the images.
    letters or more that is no lexicon word and one confusion (≤ 1.25) from
    exactly one feature word (`MENDABLE_FEATURES`: pass, castle, cave, peak,
    mount, bush, ridge, kloof, river, falls, lake, valley, gorge, hill, point,
-   camp, …) becomes it: "Langalibalele Poss", "Giant's POss", "Giant's
-   Costle", "Castie", "Castfe" → "… Pass", "… Castle"; "Poss" alone, "Cove"
-   (a lexicon word), "Red Paint", "Gregory Peck", "Howgill Fells", "Castell y
-   Bere" stay. A feature noun with a "y" behind a proper name lost the "y" to
-   a mark beside it ("Grysbok Bushy" → "Grysbok Bush"; "BIG ROCKY", "Rocky
-   Point" stay). Two spellings a confusion apart of one word in two names
-   ("Dumford", "Durnford") become the likelier printed one. The confusions
+   camp, …) becomes it, where a feature word stands: after the name, or first
+   for a feature that leads names (mount, lake, river, castle: "Costle
+   Gorge"): "Langalibalele Poss", "Giant's POss", "Giant's Costle", "Castie",
+   "Castfe" → "… Pass", "… Castle"; "Poss" alone, "Cove" and "Coves"
+   (lexicon words), "Red Paint", "Gregory Peck", "Howgill Fells", "Castell y
+   Bere", "Hilt Farm", "Poot Kloof", "Volley Point", "Fake Lake" stay ("Loke
+   Point" would become "Lake Point"). A feature noun with a "y" behind a
+   proper name lost the "y" to a mark beside it ("Grysbok Bushy" → "Grysbok
+   Bush"; "BIG ROCKY", "Rocky Point", "Cape Rocky" stay). Two spellings a
+   confusion apart of one word in two names become the likelier printed one
+   where the OCR made that confusion here twice already ("Songebethu" beside
+   "Sangebethu" on a map with "Poss" twice) or ran letters together
+   ("Dumford" beside "Durnford"): villages a letter apart are two places on a
+   map read upright (Marton and Morton, Walton and Watton, Colne and Calne).
+   Words are compared only when one confusion could explain them (at most two
+   glyphs differ, or one place where one word is a glyph longer), so the
+   names of a sheet of 2 000 reads take 0.2 s (`tests/names.rs`). The confusions
    seen mending and dropping misreads tell which glyphs Vision misreads on
    this map; one misread more than once (the italic "a" of "Poss" twice and
    "Costle") makes a name with that glyph in a word outside the lexicon
@@ -1025,8 +1038,14 @@ radius, so the first four decide whether a far map is found:
 2. *Names*: the place, peak and water names of `classify_pois` (so none of
    its pieces, misreads or furniture), in groups: names of several words with
    a feature word a gazetteer files places by (`FEATURE_WORDS`: pass, peak,
-   mount, hut, cave, lodge, hotel, school, falls, kloof, gorge, gully, …) or
-   of a summit with its height ("Giant's Castle" over "10876"); other names
+   mount, hut, cave, lodge, hotel, school, falls, kloof, gorge, gully; pike,
+   fell, gill, hause, beinn, llyn, piz, val, rifugio, …) where it names the
+   place: after the name, or first for one that leads names (mount, lake,
+   cerro, laguna, piz, beinn, …) or before "of" and the like ("Pike of
+   Stickle"); first in a label otherwise it says what a thing is ("Hut
+   Circles", "Mountain Rescue Post" in an OS sheet's small print, asked after
+   "Scafell Pike"). Or of a summit with its height ("Giant's Castle" over
+   "10876"); other names
    of several words; single words; routes ("Oribi Ridge Rte": rte, route,
    trail, track, path); lexicon words with a qualifier, a place name as often
    as a description ("LITTLE ROCK", "GREAT FALLS", "NEW FOREST", "GROOT

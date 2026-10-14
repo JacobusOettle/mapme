@@ -2,6 +2,8 @@
 //! fixture's OCR: Apple Vision's reads (`vision-ocr.json`, iOS 26.2
 //! simulator) and the RapidOCR stand-ins (`ocr.json`).
 
+mod common;
+
 use mapme_core::hints::hint_queries;
 use mapme_core::labels::{classify_pois, OcrObservation, PoiKind};
 use serde_json::Value;
@@ -160,4 +162,49 @@ fn names_of_every_fixture() {
         println!("   heights: {heights:?}");
         assert!(q.len() <= 12, "{label}: {q:?}");
     }
+}
+
+/// A dense sheet read by Apple Vision holds a couple of thousand reads: the names and the hint
+/// queries of one take no longer than the rest of the import.
+#[test]
+fn names_of_a_dense_sheet_are_quick() {
+    let syl = ["ka", "ma", "tho", "ba", "lu", "ngo", "si", "the", "pu", "tso", "le", "ra", "mbu", "ze", "di", "kwa"];
+    let feats = ["Pass", "Peak", "Hut", "Cave", "River", "Kloof", "Valley", "", "", ""];
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut obs = vec![OcrObservation {
+        text: "Gaia Topo (feet): © Gaia GPS, OpenStreetMap".into(),
+        bbox: [100.0, 20.0, 560.0, 28.0],
+        confidence: 1.0,
+    }];
+    for k in 0..2000 {
+        let text = if k % 7 == 0 {
+            format!("{}", 3001 + (next() % 6000) * 2)
+        } else {
+            let n = 2 + next() % 3;
+            let mut w: String = (0..n).map(|_| syl[(next() % syl.len() as u64) as usize]).collect();
+            w[..1].make_ascii_uppercase();
+            match feats[(next() % feats.len() as u64) as usize] {
+                "" => w,
+                f => format!("{w} {f}"),
+            }
+        };
+        let (x, y) = (100.0 + 400.0 * (k % 50) as f64, 100.0 + 120.0 * (k / 50) as f64);
+        obs.push(OcrObservation {
+            text: text.clone(),
+            bbox: [x, y, 15.0 * text.chars().count() as f64, 24.0],
+            confidence: 1.0,
+        });
+    }
+    let t = std::time::Instant::now();
+    let pois = classify_pois(&obs);
+    let q = hint_queries(&obs);
+    let ms = t.elapsed().as_secs_f64() * 1e3;
+    assert!(pois.len() > 1500 && q.len() == 12, "{} {q:?}", pois.len());
+    assert!(ms < common::time_budget_ms(1500.0), "{ms:.0} ms");
 }

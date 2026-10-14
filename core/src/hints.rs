@@ -412,7 +412,65 @@ const FEATURE_WORDS: &[&str] = &[
     "fjell",
     "tind",
     "fjord",
+    // Fells, moors and glens of Britain and Ireland ("Scafell Pike", "Seathwaite Fell", "Esk
+    // Hause", "Grains Gill", "Wasdale Head", "Beinn Eighe", "Bwlch y Groes").
+    "pike",
+    "fell",
+    "fells",
+    "gill",
+    "ghyll",
+    "beck",
+    "force",
+    "hause",
+    "knott",
+    "crags",
+    "edge",
+    "scar",
+    "moor",
+    "head",
+    "beinn",
+    "sgurr",
+    "stob",
+    "meall",
+    "carn",
+    "creag",
+    "coire",
+    "bealach",
+    "lochan",
+    "slieve",
+    "lough",
+    "llyn",
+    "cwm",
+    "moel",
+    "bwlch",
+    "foel",
+    "mynydd",
+    "carnedd",
+    // The Alps ("Piz Bernina", "Val Roseg", "Passo dello Stelvio", "Rifugio Torino").
+    "piz",
+    "val",
+    "passo",
+    "cima",
+    "rifugio",
+    "refuge",
+    "refugio",
+    "cabane",
+    "capanna",
 ];
+/// Feature words that lead a name ("Mount Durnford", "Lake Tahoe", "Cerro Torre", "Piz Bernina",
+/// "Beinn Eighe", "Rifugio Torino"); the others follow it ("Langalibalele Pass", "Bannerman Hut").
+/// One of those first in a label says what a thing is, no name ("Hut Circles", "Mountain Rescue
+/// Post" on an OS sheet), but before "of" and the like ("Pass of Brander", "Pike of Stickle").
+const LEADING_FEATURE_WORDS: &[&str] = &[
+    "mount", "mt", "mont", "monte", "lake", "loch", "lough", "llyn", "ben", "glen", "river", "rio", "río", "lago",
+    "laguna", "lac", "cerro", "paso", "passo", "col", "pic", "pico", "piz", "punta", "pointe", "point", "aiguille",
+    "aguja", "arroyo", "glaciar", "quebrada", "nevado", "volcán", "volcan", "castle", "beinn", "sgurr", "stob",
+    "meall", "carn", "creag", "coire", "bealach", "lochan", "slieve", "cwm", "moel", "bwlch", "foel", "mynydd",
+    "carnedd", "val", "cima", "rifugio", "refuge", "refugio", "cabane", "capanna", "hotel", "camp",
+];
+/// Words that join a feature word to the name after it ("Pass of Brander", "Bealach na Bà").
+const FEATURE_LINKS: &[&str] =
+    &["of", "de", "del", "dello", "della", "di", "da", "du", "des", "do", "dos", "na", "nan", "y", "an", "la"];
 /// Words of a route's name ("Oribi Ridge Rte", "Giant's Cup Trail"): a geocoder rarely knows a
 /// route, asked after the places.
 const ROUTE_WORDS: &[&str] = &["rte", "route", "trail", "track", "path", "footpath", "traverse", "loop"];
@@ -713,7 +771,13 @@ pub fn hint_queries(obs: &[OcrObservation]) -> Vec<String> {
             let n_words = name.split_whitespace().count();
             let words = words_of(&name);
             let lexicon_only = words.iter().all(|w| w.chars().count() <= 2 || lexicon_word(w));
-            let feature = words.iter().any(|w| FEATURE_WORDS.contains(&w.as_str()));
+            // A feature word where it names a place: after the name, or leading it.
+            let feature = words.iter().enumerate().any(|(k, w)| {
+                FEATURE_WORDS.contains(&w.as_str())
+                    && (k > 0
+                        || LEADING_FEATURE_WORDS.contains(&w.as_str())
+                        || words.get(1).is_some_and(|n| FEATURE_LINKS.contains(&n.as_str())))
+            });
             let route = words.iter().any(|w| ROUTE_WORDS.contains(&w.as_str()));
             let main = main_feature(&words);
             let group = if lexicon_only && !main {
@@ -1027,5 +1091,45 @@ mod tests {
             assert!(!q.iter().any(|x| x.contains(bad)), "{bad} in {q:?}");
         }
         assert!(hint_queries(&[]).is_empty());
+    }
+
+    #[test]
+    fn descriptions_in_small_print_come_after_the_names() {
+        // An OS-style sheet: fell names in large letters, the description of what a place is in
+        // small print ("Hut Circles", "Mountain Rescue Post"). A feature word leading a name that
+        // takes none ("Hut Circles") is no sign of a place a geocoder knows; the fells' own words
+        // (Pike, Fell, Gill, Hause) are.
+        let mut obs = vec![ob("Scale 1:25 000", 100.0, 20.0, 300.0, 20.0)];
+        let sized = |t: &str, x: f64, y: f64, h: f64| ob(t, x, y, 0.6 * h * t.chars().count() as f64, h);
+        for (k, (n, h)) in [
+            ("Scafell Pike", 34.0),
+            ("Great Gable", 30.0),
+            ("Great End", 28.0),
+            ("Esk Hause", 24.0),
+            ("Sprinkling Tarn", 22.0),
+            ("Styhead Tarn", 22.0),
+            ("Lingmell", 26.0),
+            ("Seathwaite Fell", 24.0),
+            ("Hut Circles", 18.0),
+            ("Mountain Rescue Post", 18.0),
+            ("Cairn", 16.0),
+            ("Sheepfold", 16.0),
+            ("Wasdale Head", 26.0),
+            ("Grains Gill", 20.0),
+            ("Sty Head", 22.0),
+            ("Field System", 18.0),
+            ("Pike of Stickle", 24.0),
+            ("Cross Dyke", 16.0),
+        ]
+        .iter()
+        .enumerate()
+        {
+            obs.push(sized(n, 100.0 + 900.0 * (k % 5) as f64, 200.0 + 400.0 * (k / 5) as f64, *h));
+        }
+        let q = hint_queries(&obs);
+        assert_eq!(q[0], "Scafell Pike", "{q:?}");
+        for bad in ["Hut Circles", "Mountain Rescue Post"] {
+            assert!(!q[..6].contains(&bad.to_string()), "{bad}: {q:?}");
+        }
     }
 }

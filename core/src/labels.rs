@@ -1177,6 +1177,7 @@ pub(crate) const PLACE_WORDS: &[&str] = &[
     "estate",
     "reserve",
     "cove",
+    "coves",
     "mount",
     "mountain",
     "mountains",
@@ -1371,10 +1372,48 @@ fn glyphs(word: &str) -> Vec<char> {
         .collect()
 }
 
+/// A confusion of `CONFUSIONS` as glyphs: read, printed, cost.
+type ConfusionGlyphs = (Vec<char>, Vec<char>, f64);
+
+/// `CONFUSIONS` as glyphs.
+fn confusion_glyphs() -> &'static [ConfusionGlyphs] {
+    static GLYPHS: std::sync::OnceLock<Vec<ConfusionGlyphs>> = std::sync::OnceLock::new();
+    GLYPHS.get_or_init(|| CONFUSIONS.iter().map(|(r, p, c)| (r.chars().collect(), p.chars().collect(), *c)).collect())
+}
+
 /// The cost of reading `printed` as `read` (both `glyphs`), with the confusions that do it, or
 /// None when no chain of `CONFUSIONS` explains the read (letters dropped, added or swapped).
 fn confusion_cost(read: &[char], printed: &[char]) -> Option<(f64, Vec<Confusion>)> {
+    confusion_cost_within(read, printed, f64::INFINITY)
+}
+
+/// `confusion_cost` when it is `max` at most, else None. Every confusion that changes a word's
+/// length costs 1 or more: no more of them than `max` allows; and for `max` under 1.5 (one
+/// confusion, or two strokes of 0.5) the texts differ in two glyphs at most, or around one place
+/// where one is a glyph longer: checked before the table is filled, a few compares for most
+/// pairs of words (`unify_spellings` compares every word on the sheet with every other).
+fn confusion_cost_within(read: &[char], printed: &[char], max: f64) -> Option<(f64, Vec<Confusion>)> {
     let (n, m) = (read.len(), printed.len());
+    if read == printed {
+        return Some((0.0, Vec::new()));
+    }
+    if n.abs_diff(m) as f64 > max {
+        return None;
+    }
+    if max < 1.5 {
+        let near = if n == m {
+            read.iter().zip(printed).filter(|(a, b)| a != b).count() <= 2
+        } else {
+            let short = n.min(m);
+            let prefix = read.iter().zip(printed).take_while(|(a, b)| a == b).count();
+            let suffix = read.iter().rev().zip(printed.iter().rev()).take_while(|(a, b)| a == b).count();
+            n.abs_diff(m) == 1 && prefix + suffix + 1 >= short
+        };
+        if !near {
+            return None;
+        }
+    }
+    let table = confusion_glyphs();
     let mut cost = vec![vec![f64::INFINITY; m + 1]; n + 1];
     // Where each cell came from: the cell before and the confusion used, if any.
     type Step = Option<(usize, usize, Option<usize>)>;
@@ -1383,16 +1422,15 @@ fn confusion_cost(read: &[char], printed: &[char]) -> Option<(f64, Vec<Confusion
     for i in 0..=n {
         for j in 0..=m {
             let here = cost[i][j];
-            if !here.is_finite() {
+            if !here.is_finite() || here > max {
                 continue;
             }
             if i < n && j < m && read[i] == printed[j] && here < cost[i + 1][j + 1] {
                 cost[i + 1][j + 1] = here;
                 back[i + 1][j + 1] = Some((i, j, None));
             }
-            for (k, (r, p, c)) in CONFUSIONS.iter().enumerate() {
-                let (r, p): (Vec<char>, Vec<char>) = (r.chars().collect(), p.chars().collect());
-                if read[i..].starts_with(&r) && printed[j..].starts_with(&p) {
+            for (k, (r, p, c)) in table.iter().enumerate() {
+                if here + c <= max && read[i..].starts_with(r) && printed[j..].starts_with(p) {
                     let (a, b) = (i + r.len(), j + p.len());
                     if here + c < cost[a][b] {
                         cost[a][b] = here + c;
@@ -1402,7 +1440,7 @@ fn confusion_cost(read: &[char], printed: &[char]) -> Option<(f64, Vec<Confusion
             }
         }
     }
-    if !cost[n][m].is_finite() {
+    if !cost[n][m].is_finite() || cost[n][m] > max {
         return None;
     }
     let mut used = Vec::new();
@@ -1458,6 +1496,10 @@ const MENDABLE_FEATURES: &[&str] = &[
     "waterfall",
 ];
 
+/// Feature words of `MENDABLE_FEATURES` that lead a name ("Mount Durnford", "Lake Tahoe",
+/// "River Cam", "Castle Gorge"): mended as the first word of a name, where the others are not.
+const LEADING_FEATURES: &[&str] = &["mount", "lake", "river", "castle"];
+
 /// Most a feature word read wrongly may cost to mend (`CONFUSIONS`): one confusion, common or
 /// plausible.
 const MEND_MAX_COST: f64 = 1.25;
@@ -1482,11 +1524,12 @@ const Y_ADJECTIVE_STEMS: &[&str] = &["bush", "rock", "hill", "wood", "sand", "gr
 /// Mend the feature word of a name an italic face made the OCR misread ("Langalibalele Poss",
 /// "Giant's Costle", "Giant's POss" → "… Pass", "… Castle"): a word of four letters or more that
 /// is no lexicon word, one confusion (`CONFUSIONS`, at most `MEND_MAX_COST`) away from exactly one
-/// of `MENDABLE_FEATURES`, in a name of two words or more. A name of one word stays ("Poss"
-/// alone may be a name), so do real words a confusion away ("Cove", a lexicon word). A feature
-/// word run into a mark beside it, behind a proper name, loses the "y" that made it an adjective
-/// ("Grysbok Bushy" → "Grysbok Bush"; "BIG ROCKY" stays). Returns the name and the confusions
-/// that mended it.
+/// of `MENDABLE_FEATURES`, in a name of two words or more, not its first word unless the feature
+/// leads names (`LEADING_FEATURES`: "Costle Gorge", not "Hilt Farm"). A name of one word stays
+/// ("Poss" alone may be a name), so do real words a confusion away ("Cove", a lexicon word). A
+/// feature word run into a mark beside it, behind a proper name, loses the "y" that made it an
+/// adjective ("Grysbok Bushy" → "Grysbok Bush"; "BIG ROCKY" stays). Returns the name and the
+/// confusions that mended it.
 pub(crate) fn mend_feature_words(name: &str) -> (String, Vec<Confusion>) {
     let toks: Vec<&str> = name.split_whitespace().collect();
     let mut seen = Vec::new();
@@ -1505,16 +1548,28 @@ pub(crate) fn mend_feature_words(name: &str) -> (String, Vec<Confusion>) {
         let fits: Vec<(&str, f64, Vec<Confusion>)> = MENDABLE_FEATURES
             .iter()
             .filter_map(|f| {
-                let (c, used) = confusion_cost(&read, &f.chars().collect::<Vec<_>>())?;
-                (c > 0.0 && c <= MEND_MAX_COST).then_some((*f, c, used))
+                let (c, used) = confusion_cost_within(&read, &f.chars().collect::<Vec<_>>(), MEND_MAX_COST)?;
+                (c > 0.0).then_some((*f, c, used))
             })
             .collect();
+        // The feature word of a name follows it ("Hilt Farm", "Poot Kloof", "Volley Point" are
+        // names), but for those that lead ("Mount", "Lake", "River", "Castle Gorge"); a word
+        // beside the same feature is a name of its own ("Fake Lake").
+        let next_to = |f: &str| {
+            [k.checked_sub(1), Some(k + 1)]
+                .iter()
+                .flatten()
+                .any(|&j| toks.get(j).is_some_and(|t| t.eq_ignore_ascii_case(f)))
+        };
         if let [(f, _, used)] = fits.as_slice() {
-            out.push(in_case_of(f, t));
-            seen.extend(used.iter().copied());
-            continue;
+            if (k > 0 || LEADING_FEATURES.contains(f)) && !next_to(f) {
+                out.push(in_case_of(f, t));
+                seen.extend(used.iter().copied());
+                continue;
+            }
         }
-        // "Bushy" behind a proper name: the "y" is a mark run into the word.
+        // "Bushy" behind a proper name: the "y" is a mark run into the word. Behind a word that
+        // takes a name after it, it is the name ("Cape Rocky").
         let stem = lower.strip_suffix('y').unwrap_or("");
         let before = k.checked_sub(1).map(|b| toks[b].to_lowercase());
         if k == toks.len() - 1
@@ -1522,7 +1577,7 @@ pub(crate) fn mend_feature_words(name: &str) -> (String, Vec<Confusion>) {
             && lexicon_word(stem)
             && before.is_some_and(|b| {
                 let w = words_of(&b);
-                !w.is_empty() && w.iter().all(|w| !lexicon_word(w))
+                !w.is_empty() && w.iter().all(|w| !lexicon_word(w) && !NAME_AFTER.contains(&w.as_str()))
             })
         {
             out.push(t[..t.len() - 1].to_string());
@@ -2419,22 +2474,26 @@ fn exotic_letter(c: char) -> bool {
     c == 'ı' || ('\u{1E00}'..='\u{1EFF}').contains(&c)
 }
 
-/// Words in front of a name that are written in lower case ("de Hoop", "van Reenen's Pass",
-/// "la Paz").
+/// Words in front of a name that are written in lower case, one or several ("de Hoop", "van
+/// Reenen's Pass", "la Paz", "van der Stel Pass", "de la Rey", "an der Isar", "los Glaciares",
+/// "het Gooi", "die Hel").
 const LOWERCASE_PARTICLES: &[&str] = &[
-    "de", "la", "le", "les", "du", "des", "van", "von", "der", "den", "di", "da", "del", "dos", "das", "do", "of",
-    "the", "op", "ter", "ten", "aan", "am", "an", "im", "zum", "zur", "y", "e", "et", "a", "al", "el", "il", "lo",
+    "de", "la", "le", "les", "du", "des", "van", "von", "der", "den", "di", "da", "del", "della", "dei", "degli",
+    "dos", "das", "do", "of", "the", "op", "ter", "ten", "het", "die", "aan", "am", "an", "im", "in", "auf", "bei",
+    "zu", "zum", "zur", "y", "e", "et", "a", "al", "el", "il", "lo", "los", "las", "au", "aux", "en", "sur", "na",
 ];
 
 /// Names that do not fit the map's lettering: misreads and pieces of its labels.
 ///
 /// * A read with an exotic letter (`exotic_letter`) on a map where few reads hold one (under
-///   15 %, of ten reads or more): "nDệ Dickı", "guide pickı" (a "(guide pickup)" in small
-///   italics) on a map of plain letters. A Turkish or Vietnamese map holds them throughout.
+///   15 %, of ten reads or more): "nDệ Dickı" on a map of plain letters. A Turkish or Vietnamese
+///   map holds them throughout. A dotless i alone is an i that lost its dot (Apple Vision on an
+///   italic face: "Ntubenı Pass" is Ntubeni Pass), mended before the rules below ("guide pickı",
+///   of "(guide pickup)" in small italics, is a piece of lettering by the next one).
 /// * On a map whose names start with a capital (60 %, five at least), a name whose first word
-///   is in lower case (no capital at all: "uKhahlamba" has one) and no particle before a
-///   capitalised word ("de Hoop"): pieces of italic lettering ("ance", "ince" of "entrance",
-///   "picku", "lain Cave" of "Main Cave" half hidden by the north arrow).
+///   is in lower case (no capital at all: "uKhahlamba" has one) and no particles before a
+///   capitalised word ("de Hoop", "van der Stel Pass"): pieces of italic lettering ("ance",
+///   "ince" of "entrance", "picku", "lain Cave" of "Main Cave" half hidden by the north arrow).
 /// * On a map whose names are in mixed case (four at least, three times as many as those in
 ///   capitals), a name of three capitals or fewer: symbols read as letters ("LAA", a row of
 ///   amenity icons on Gaia GPS).
@@ -2443,6 +2502,18 @@ fn drop_out_of_place(merged: &[OcrObservation], verdicts: &mut [Verdict]) {
         merged.iter().filter(|o| o.text.chars().filter(|c| c.is_alphabetic()).count() >= 3).collect();
     let exotic_reads = lettered.iter().filter(|o| o.text.chars().any(exotic_letter)).count();
     let exotic_foreign = lettered.len() >= 10 && (exotic_reads as f64) < 0.15 * lettered.len() as f64;
+    for v in verdicts.iter_mut() {
+        let Verdict::Poi(p) = v else { continue };
+        if p.kind == PoiKind::SpotHeight || !exotic_foreign || !p.name.chars().any(exotic_letter) {
+            continue;
+        }
+        if p.name.chars().all(|c| c == 'ı' || !exotic_letter(c)) {
+            p.name = p.name.replace('ı', "i");
+            p.kind = poi_kind(&words_of(&p.name));
+        } else {
+            *v = Verdict::Junk;
+        }
+    }
     let names: Vec<&PoiLabel> = verdicts
         .iter()
         .filter_map(|v| match v {
@@ -2450,13 +2521,13 @@ fn drop_out_of_place(merged: &[OcrObservation], verdicts: &mut [Verdict]) {
             _ => None,
         })
         .collect();
-    // A first word in lower case, without a capital ("uKhahlamba" has one) and no particle before
-    // a capitalised word ("de Hoop").
+    // A first word in lower case, without a capital ("uKhahlamba" has one), and no particles
+    // before a capitalised word ("de Hoop", "van der Stel Pass").
     let lowercase_start = |name: &str| {
         let toks: Vec<&str> = name.split_whitespace().collect();
         let first = toks.first().copied().unwrap_or("");
-        let particle = LOWERCASE_PARTICLES.contains(&first)
-            && toks.get(1).and_then(|t| t.chars().next()).is_some_and(char::is_uppercase);
+        let after = toks.iter().position(|t| !LOWERCASE_PARTICLES.contains(t)).unwrap_or(toks.len());
+        let particle = after > 0 && toks.get(after).and_then(|t| t.chars().next()).is_some_and(char::is_uppercase);
         first.chars().next().is_some_and(char::is_lowercase) && !first.chars().any(char::is_uppercase) && !particle
     };
     let upper = names.iter().filter(|p| p.name.chars().next().is_some_and(char::is_uppercase)).count();
@@ -2473,10 +2544,7 @@ fn drop_out_of_place(merged: &[OcrObservation], verdicts: &mut [Verdict]) {
         }
         let letters: Vec<char> = p.name.chars().filter(|c| c.is_alphabetic()).collect();
         let symbols = letters.len() <= 3 && letters.iter().all(|c| c.is_uppercase());
-        if (exotic_foreign && p.name.chars().any(exotic_letter))
-            || (capitalised && lowercase_start(&p.name))
-            || (mixed_case && symbols)
-        {
+        if (capitalised && lowercase_start(&p.name)) || (mixed_case && symbols) {
             *v = Verdict::Junk;
         }
     }
@@ -2801,11 +2869,18 @@ pub(crate) fn classify_pois_reads(obs: &[OcrObservation]) -> Vec<PoiRead> {
     out
 }
 
-/// Two spellings a confusion apart of one word in names on the map ("Dumford" in one label,
-/// "Durnford" in another; five letters or more, no lexicon word): the likelier printed one
-/// (`likelier_printed`), or else the one in more names, stands for both.
+/// Two spellings a confusion apart of one word in names on the map (five letters or more, no
+/// lexicon word): the likelier printed one (`likelier_printed`), or else the one in more names,
+/// stands for both, where the confusion is one the OCR made here more than once already (`seen`:
+/// an italic "a" read as "o" in "Poss" and "Costle", so "Songebethu" beside "Sangebethu" is one
+/// name) or letters run together ("Dumford" beside "Durnford": "rn" read as "m"). A glyph read
+/// for another once in a while is no reason: villages a letter apart lie side by side (Marton
+/// and Morton by Gainsborough, Walton and Watton, Halton and Hatton, Colne and Calne).
 fn unify_spellings(verdicts: &mut [Verdict], seen: &mut Vec<Confusion>) {
+    let habit = |c: &Confusion| seen.iter().filter(|s| *s == c).count() >= 2;
+    let run_together = |c: &Confusion| c.0.chars().count() != c.1.chars().count();
     let mut words: Vec<(String, usize)> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for v in verdicts.iter() {
         let Verdict::Poi(p) = v else { continue };
         if p.kind == PoiKind::SpotHeight {
@@ -2813,29 +2888,37 @@ fn unify_spellings(verdicts: &mut [Verdict], seen: &mut Vec<Confusion>) {
         }
         for t in p.name.split_whitespace() {
             if t.chars().count() >= 5 && t.chars().all(char::is_alphabetic) && !lexicon_word(&t.to_lowercase()) {
-                match words.iter_mut().find(|w| w.0 == t) {
-                    Some(w) => w.1 += 1,
-                    None => words.push((t.to_string(), 1)),
+                match index.get(t) {
+                    Some(&k) => words[k].1 += 1,
+                    None => {
+                        index.insert(t.to_string(), words.len());
+                        words.push((t.to_string(), 1));
+                    }
                 }
             }
         }
     }
+    let shapes: Vec<Vec<char>> = words.iter().map(|w| glyphs(&w.0)).collect();
     let mut rename: Vec<(String, String)> = Vec::new();
-    for (a, na) in &words {
-        for (b, nb) in &words {
-            let (ga, gb) = (glyphs(a), glyphs(b));
-            let Some((cost, used)) = confusion_cost(&ga, &gb) else { continue };
+    let mut used_here: Vec<Confusion> = Vec::new();
+    for (i, (a, na)) in words.iter().enumerate() {
+        for (j, (b, nb)) in words.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let Some((cost, used)) = confusion_cost_within(&shapes[i], &shapes[j], MEND_MAX_COST) else { continue };
+            if cost <= 0.0 || !used.iter().all(|c| run_together(c) || habit(c)) {
+                continue;
+            }
             // `a` read for a printed `b`: likelier than the reverse, or `b` in more names.
-            let order = likelier_printed(&gb, &ga);
-            if cost > 0.0
-                && cost <= MEND_MAX_COST
-                && (order == std::cmp::Ordering::Greater || (order == std::cmp::Ordering::Equal && nb > na))
-            {
+            let order = likelier_printed(&shapes[j], &shapes[i]);
+            if order == std::cmp::Ordering::Greater || (order == std::cmp::Ordering::Equal && nb > na) {
                 rename.push((a.clone(), b.clone()));
-                seen.extend(used);
+                used_here.extend(used);
             }
         }
     }
+    seen.extend(used_here);
     if rename.is_empty() {
         return;
     }
@@ -3960,5 +4043,93 @@ mod tests {
         // One misread is no habit of the OCR's.
         obs.remove(2);
         assert!(doubt(&obs).iter().all(|x| !x.1), "{:?}", doubt(&obs));
+    }
+
+    #[test]
+    fn spellings_are_unified_only_where_the_ocr_makes_that_misread() {
+        // Villages a glyph apart are two places on a map read upright: Marton and Morton lie 8 km
+        // apart by Gainsborough, Halton and Hatton, Walton and Watton, Colne and Calne.
+        for (a, b) in [("Marton", "Morton"), ("Walton", "Watton"), ("Halton", "Hatton"), ("Colne", "Calne")] {
+            let names = title_case_map(&[across(a, 300.0, 1300.0), across(&format!("{b} Hall"), 1500.0, 1300.0)]);
+            assert_eq!(names, vec![a.to_string(), format!("{b} Hall")]);
+        }
+        // Where the OCR read an italic "a" as "o" in feature words, a name read with an "o" beside
+        // the same name with an "a" is that name.
+        let names = title_case_map(&[
+            across("Langalibalele Poss", 300.0, 1300.0),
+            across("Bannerman's Poss", 1500.0, 1300.0),
+            across("Songebethu", 300.0, 1600.0),
+            across("Sangebethu Pass", 1500.0, 1600.0),
+        ]);
+        assert_eq!(names, vec!["Langalibalele Pass", "Bannerman's Pass", "Sangebethu", "Sangebethu Pass"]);
+    }
+
+    #[test]
+    fn particles_and_dotless_i_on_a_capitalised_map() {
+        // Lowercase particles, one after another, before a capitalised name: names, not pieces.
+        for name in ["van der Stel Pass", "de la Rey Street", "an der Isar", "los Glaciares", "het Gooi", "die Hel"] {
+            let names = title_case_map(&[across(name, 300.0, 1300.0), across("ance", 2700.0, 1900.0)]);
+            assert_eq!(names, vec![name], "{name}");
+        }
+        // Apple Vision reads an italic i without its dot ("Dickı", "pickı"): on a map of plain
+        // letters a name with one is that name with an i, not a misread to drop. Pieces of small
+        // print stay out.
+        let mut obs: Vec<OcrObservation> = [
+            "Giant's Castle",
+            "Bannerman Hut",
+            "Thaba Putsoa",
+            "Mount Durnford",
+            "Main Cave",
+            "Sangebethu",
+            "Leqheku",
+            "Langalibalele Pass",
+            "Oribi Ridge",
+            "Ntloana",
+            "Bond",
+            "Giant's Pass",
+            "Grysbok Bush",
+            "Kambule Peak",
+            "Bannerman's Pass",
+            "Erskine Ridge",
+            "Katana Pass",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(k, n)| across(n, 300.0 + 400.0 * (k % 6) as f64, 100.0 + 60.0 * (k / 6) as f64))
+        .collect();
+        obs.extend([
+            across("Ntubenı Pass", 300.0, 1300.0),
+            across("Potterıll", 1500.0, 1300.0),
+            across("guide pickı", 300.0, 1600.0),
+            across("nDệ Dickı", 1500.0, 1600.0),
+        ]);
+        assert_eq!(title_case_map(&obs), vec!["Ntubeni Pass", "Potterill"]);
+    }
+
+    #[test]
+    fn real_words_before_the_feature_word_are_no_misreads() {
+        let mend = |n: &str| mend_feature_words(n).0;
+        // The feature word of an English or Afrikaans name comes last; a word in front is the name
+        // ("Hilt Farm", "Poot Kloof"), unless it is a feature that leads ("Mount", "Lake", "River",
+        // "Castle": "Costle Gorge").
+        for name in [
+            "Three Coves",
+            "Smugglers Coves",
+            "Hilt Farm",
+            "Hili Peak",
+            "Poot Kloof",
+            "Volley Point",
+            "Folls Cove",
+            "Fake Lake",
+            "Cape Rocky",
+            "Mount Rocky",
+        ] {
+            assert_eq!(mend(name), name, "{name}");
+        }
+        for (read, name) in
+            [("Costle Gorge", "Castle Gorge"), ("Loke Tahoe", "Lake Tahoe"), ("Mounf Durnford", "Mount Durnford")]
+        {
+            assert_eq!(mend(read), name, "{read}");
+        }
     }
 }
