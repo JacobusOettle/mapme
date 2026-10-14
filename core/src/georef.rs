@@ -40,7 +40,8 @@
 //! `georeference` takes `&self`; `progress` and `cancel` may be called from
 //! other threads while it runs. See docs/ARCHITECTURE.md for the JSON.
 
-use crate::contour::{auto_mask, extract_mask, model_from_rgb, normalize_illumination, photo_mask, ContourColorModel};
+use crate::contour::{normalize_illumination, ContourColorModel};
+use crate::contour_lines::{contour_mask, level_field_cell, level_sampling, scale_samples};
 use crate::control_points::{self, ControlPoint};
 use crate::dem::{merc_to_tile, resolution, tiles_covering, DemMosaic, DemStore, MercBox, TileId};
 use crate::geo::{latlon_to_merc, merc_to_latlon, Affine, Homography, LatLon};
@@ -58,7 +59,7 @@ use crate::refine::{
     confidence, evaluate_prepared, evaluate_prepared_homography, fit_confidence, fit_evidence, fit_quality,
     refine_dem_box, refine_prepared_with, select_refined, PreparedDem, RefineOptions, RefineResult,
 };
-use crate::search::{coarse_search, map_field, required_dem_box, rotation_sweep, Candidate, MapField, SearchParams};
+use crate::search::{coarse_search, map_field_at, required_dem_box, rotation_sweep, Candidate, MapField, SearchParams};
 use crate::skeleton::{contour_samples, default_sampling, ContourSamples};
 use crate::warp::{fit_warp, ContourInput, GridLines, Warp, WarpFit, WarpInput};
 use crate::wide::near_zoom;
@@ -503,6 +504,10 @@ pub struct ContourProducts {
     pub field: MapField,
     /// Milliseconds spent on the mask, the skeleton samples and the field.
     pub timings_ms: [f64; 3],
+    /// Base-image pixels per mask pixel (`contour_lines::estimate_level`).
+    pub level: usize,
+    /// How the mask was made (`contour_lines::contour_mask`).
+    pub extraction: Value,
 }
 
 impl ContourProducts {
@@ -514,28 +519,32 @@ impl ContourProducts {
     /// (`normalize_illumination`) and the mask is `photo_mask`'s.
     pub fn compute_with(img: &Rgb8, contour_rgb: Option<[u8; 3]>, photo: bool) -> ContourProducts {
         let t = Instant::now();
-        let (mask, model) = match (contour_rgb, photo) {
-            (Some(rgb), false) => {
-                let m = model_from_rgb(rgb);
-                (extract_mask(img, &m), m)
-            }
-            (None, false) => auto_mask(img),
-            (Some(rgb), true) => photo_mask(img, Some(&model_from_rgb(rgb))),
-            (None, true) => photo_mask(img, None),
-        };
-        let t_mask = ms_since(t);
         let (min_len, step) = default_sampling(img.w, img.h);
+        let lm = contour_mask(img, contour_rgb, photo, min_len);
+        let t_mask = ms_since(t);
+        let (level, mask) = (lm.level, &lm.mask);
+        let (min_len, step) = level_sampling(min_len, step, level);
         let ((samples, t_skel), (field, t_field)) = rayon::join(
             || {
                 let t = Instant::now();
-                (contour_samples(&mask, min_len, step), ms_since(t))
+                let mut s = contour_samples(mask, min_len, step);
+                scale_samples(&mut s, level);
+                (s, ms_since(t))
             },
             || {
                 let t = Instant::now();
-                (map_field(&mask), ms_since(t))
+                (map_field_at(mask, level_field_cell(img.w, img.h, level), level), ms_since(t))
             },
         );
-        ContourProducts { model, mask_fraction: mask.fraction(), samples, field, timings_ms: [t_mask, t_skel, t_field] }
+        ContourProducts {
+            model: lm.model,
+            mask_fraction: mask.fraction(),
+            samples,
+            field,
+            timings_ms: [t_mask, t_skel, t_field],
+            level,
+            extraction: lm.diag,
+        }
     }
 }
 
@@ -1419,6 +1428,7 @@ impl<'a> Run<'a> {
                 "n_segments": p.samples.n_segs,
                 "n_samples": p.samples.len(),
                 "field_cells": [p.field.w, p.field.h],
+                "extraction": p.extraction,
                 "prep_ms": {"mask": round_dp(p.timings_ms[0], 1), "skeleton": round_dp(p.timings_ms[1], 1),
                             "field": round_dp(p.timings_ms[2], 1)},
             }),

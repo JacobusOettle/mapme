@@ -6,6 +6,7 @@
 //! `docs/ARCHITECTURE.md`.
 
 pub mod contour;
+pub mod contour_lines;
 pub mod control_points;
 pub mod dark;
 pub mod dem;

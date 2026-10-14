@@ -23,6 +23,12 @@ directory is the small committed subset that `core/tests/styles.rs` runs; the fu
 | faded-himalaya | sun-faded, yellowed print | Himalayan foothills | 6 | scan | fails: yellowed paper fills the default model, saturated wins empty |
 | dense-himalaya | dense 1:25 000, 10 m | Himalayan foothills | 3 | scan | located, ~1 m |
 
+Since the contour mask became a line detector on the contour ink at the raster's effective
+resolution (`core/src/contour_lines.rs`, docs/ARCHITECTURE.md *Contour lines of any map style*),
+every case but `sparse-drakensberg` (outside the default scale range) is located from the
+centre: gaia-drakensberg ~7 m (analysed at level 3), bw-tasmania ~9 m and grey-tasmania ~4 m
+(grey/black ink), faded-himalaya ~1 m.
+
 ## Case format (common benchmark format)
 
 Each `<case>/case.json` holds `name`, `image` (`map.jpg`, what the app analyses: a 300 dpi page

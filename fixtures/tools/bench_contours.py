@@ -306,6 +306,11 @@ def run_case(case, variant, opts):
     con = diag.get("contours") or {}
     rec["mask_fraction"] = con.get("mask_fraction")
     rec["model"] = model_name(con.get("model")) if con.get("model") else None
+    ext = con.get("extraction") or {}
+    if ext.get("ink"):
+        # The line extraction's ink model and analysis level (contour_lines.rs).
+        rec["model"] = "%s L%s" % (ext["ink"], ext.get("level", 1))
+        rec["level"] = ext.get("level")
     rec["n_segments"] = con.get("n_segments")
     rec["n_samples"] = con.get("n_samples")
     rec["scale_range"] = diag.get("scale_range")

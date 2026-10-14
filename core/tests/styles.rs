@@ -231,7 +231,6 @@ fn style_cases_are_consistent() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "Gaia-like PDF page (100 ppi raster upsampled x3 bilinear and stretched 1-2 % on A4 at 300 dpi): the 3-4 px wide pale contours mostly survive auto_mask's erosion, so the saturated model wins with a 0.3 % mask: no contours (as on the real Gaia PDFs)"]
 fn gaia_drakensberg_centre() {
     located_from_centre("gaia-drakensberg");
 }
@@ -242,7 +241,7 @@ fn gaia_drakensberg_far() {
 }
 
 #[test]
-#[ignore = "1:250 000 at 30 m/px is outside the default scale range 0.4-12 m/px, and the hypsometric tints put 54 % of the map in the brown colour models"]
+#[ignore = "1:250 000 at 30 m/px is outside the default scale range 0.4-12 m/px"]
 fn sparse_drakensberg_centre() {
     located_from_centre("sparse-drakensberg");
 }
@@ -303,7 +302,6 @@ fn usgs_tasmania_far() {
 }
 
 #[test]
-#[ignore = "black-and-white photocopy: grey contours have no hue, every colour model's mask is empty"]
 fn bw_tasmania_centre() {
     located_from_centre("bw-tasmania");
 }
@@ -314,7 +312,6 @@ fn bw_tasmania_far() {
 }
 
 #[test]
-#[ignore = "thin 1 px grey contours: no hue, every colour model's mask is empty"]
 fn grey_tasmania_centre() {
     located_from_centre("grey-tasmania");
 }
@@ -335,7 +332,6 @@ fn kompass_himalaya_far() {
 }
 
 #[test]
-#[ignore = "faded print: the yellowed paper falls in the default model (15 % mask, a third solid), the saturated model wins with an empty mask"]
 fn faded_himalaya_centre() {
     located_from_centre("faded-himalaya");
 }
