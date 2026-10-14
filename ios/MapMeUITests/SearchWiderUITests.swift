@@ -4,6 +4,9 @@ import XCTest
 /// simulated contour-search miss (`-simulateTerrainMiss`, Debug builds: no OCR, no core run), so
 /// the result screen leads with "Search wider…"; its sheet offers 100, 250, 500, 1 000 km or a
 /// custom distance and shows the core's estimate for the mocked position. Closed with Cancel.
+/// The names on the map are looked up in a fixed table (`-mockPlaces`), not Apple Maps, and the
+/// sheet's list is scrolled to each row it checks: a List only builds the rows on screen, and the
+/// places section above the distances pushes the lower rows off it.
 final class SearchWiderUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = true
@@ -13,7 +16,8 @@ final class SearchWiderUITests: XCTestCase {
     @MainActor
     func testSearchWiderSheet() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-importSample", "-simulateTerrainMiss", "-mockLocation", "-25.8405,27.3920"]
+        app.launchArguments = ["-importSample", "-simulateTerrainMiss", "-mockLocation", "-25.8405,27.3920",
+                               "-mockPlaces", "Magaliesberg=-25.80,27.45;Hartbeespoort=-25.74,27.85"]
         allowLocationAlerts()
         app.launch()
 
@@ -40,10 +44,13 @@ final class SearchWiderUITests: XCTestCase {
         }
         let thousand = app.buttons["radiusOption-1000"]
         if thousand.exists { thousand.tap() }
-        XCTAssertTrue(app.switches["useMapNamesToggle"].exists)
+        let useNames = app.switches["useMapNamesToggle"]
+        scrollSheet(app, toReveal: useNames)
+        XCTAssertTrue(useNames.exists, "no \u{201C}Use names on the map\u{201D} switch")
 
         // The estimate comes from the core (mm_search_estimate) for the mocked position.
         let estimate = app.staticTexts["searchEstimateText"]
+        scrollSheet(app, toReveal: estimate)
         XCTAssertTrue(estimate.waitForExistence(timeout: 5), "no estimate line")
         let deadline = Date().addingTimeInterval(15)
         while Date() < deadline, estimate.label.hasPrefix("Working out") {
@@ -55,6 +62,7 @@ final class SearchWiderUITests: XCTestCase {
 
         // A custom distance brings up the number field.
         let custom = app.buttons["radiusOptionCustom"]
+        scrollSheet(app, toReveal: custom)
         if custom.exists {
             custom.tap()
             XCTAssertTrue(app.textFields["customRadiusField"].waitForExistence(timeout: 5), "no custom distance field")
@@ -118,6 +126,21 @@ final class SearchWiderUITests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Drags the sheet's list up until `element` is on screen (a List builds only the rows it
+    /// shows), at most `maxDrags` times. Drags in the middle of the window: the sheet's list, clear
+    /// of its Start bar and of the screen behind it.
+    @MainActor
+    private func scrollSheet(_ app: XCUIApplication, toReveal element: XCUIElement, maxDrags: Int = 4) {
+        let window = app.windows.firstMatch
+        var drags = 0
+        while !element.exists, drags < maxDrags {
+            let from = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7))
+            let to = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4))
+            from.press(forDuration: 0.05, thenDragTo: to)
+            drags += 1
+        }
+    }
 
     @MainActor
     private func allowLocationAlerts() {
