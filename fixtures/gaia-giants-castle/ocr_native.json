@@ -1,0 +1,285 @@
+{
+ "description": "Stand-in for Apple Vision: RapidOCR (rapidocr_onnxruntime) run by fixtures/tools/ocr_like_app.py on native.png (the embedded raster at its own 1118x791 px, as the app would get it from an import of the PNG) with the app's OCR plan (ios OCRService: upright 1600 px tiles overlapping 15 %, plus clockwise and counter-clockwise passes over the left and right 18 % margin strips; boxes mapped back to native.png pixels, bbox = [x, y, w, h], top-left origin; same text within 20 px deduplicated). Unedited OCR output: labels can be garbled, split or merged, as Vision's can, but not identically.",
+ "observations": [
+  {
+   "text": "Langalibalele",
+   "bbox": [
+    585.0,
+    136.0,
+    76.0,
+    14.0
+   ],
+   "confidence": 0.88641129221235
+  },
+  {
+   "text": "Bannerman's",
+   "bbox": [
+    517.0,
+    6.0,
+    79.0,
+    20.0
+   ],
+   "confidence": 0.8863442192475001
+  },
+  {
+   "text": "Sangebethu",
+   "bbox": [
+    515.0,
+    58.0,
+    53.0,
+    13.0
+   ],
+   "confidence": 0.8799154541709207
+  },
+  {
+   "text": "Grysbok",
+   "bbox": [
+    838.0,
+    177.0,
+    47.0,
+    13.0
+   ],
+   "confidence": 0.8705810755491257
+  },
+  {
+   "text": "Bannerman-",
+   "bbox": [
+    604.0,
+    17.0,
+    73.0,
+    19.0
+   ],
+   "confidence": 0.8545390042391691
+  },
+  {
+   "text": "Ntubeni",
+   "bbox": [
+    656.0,
+    579.0,
+    46.0,
+    14.0
+   ],
+   "confidence": 0.8423749655485153
+  },
+  {
+   "text": "Oribi Ridge Rte",
+   "bbox": [
+    974.0,
+    244.0,
+    29.0,
+    77.0
+   ],
+   "confidence": 0.8371758349239826
+  },
+  {
+   "text": "KaMasihlenga",
+   "bbox": [
+    511.0,
+    708.0,
+    80.0,
+    15.0
+   ],
+   "confidence": 0.8244631794782785
+  },
+  {
+   "text": "-Giant's",
+   "bbox": [
+    719.0,
+    471.0,
+    44.0,
+    13.0
+   ],
+   "confidence": 0.8085329863760207
+  },
+  {
+   "text": "10702",
+   "bbox": [
+    93.0,
+    540.0,
+    24.0,
+    11.0
+   ],
+   "confidence": 0.7928150494893392
+  },
+  {
+   "text": "uKhah",
+   "bbox": [
+    1055.0,
+    750.0,
+    60.0,
+    15.0
+   ],
+   "confidence": 0.7887371083100637
+  },
+  {
+   "text": "10830",
+   "bbox": [
+    527.0,
+    69.0,
+    27.0,
+    11.0
+   ],
+   "confidence": 0.7871459623177847
+  },
+  {
+   "text": "Giant's",
+   "bbox": [
+    798.0,
+    471.0,
+    31.0,
+    13.0
+   ],
+   "confidence": 0.7819382697343826
+  },
+  {
+   "text": "Drak.",
+   "bbox": [
+    1060.0,
+    766.0,
+    49.0,
+    13.0
+   ],
+   "confidence": 0.781440019607544
+  },
+  {
+   "text": "Ts'oana",
+   "bbox": [
+    88.0,
+    530.0,
+    33.0,
+    11.0
+   ],
+   "confidence": 0.7792895287275314
+  },
+  {
+   "text": "Pass",
+   "bbox": [
+    543.0,
+    24.0,
+    29.0,
+    11.0
+   ],
+   "confidence": 0.7662177681922913
+  },
+  {
+   "text": "Pass",
+   "bbox": [
+    608.0,
+    150.0,
+    30.0,
+    11.0
+   ],
+   "confidence": 0.7626157402992249
+  },
+  {
+   "text": "Putsoa.",
+   "bbox": [
+    385.0,
+    298.0,
+    30.0,
+    10.0
+   ],
+   "confidence": 0.7576173916459084
+  },
+  {
+   "text": "Bush",
+   "bbox": [
+    847.0,
+    191.0,
+    29.0,
+    14.0
+   ],
+   "confidence": 0.7511280179023743
+  },
+  {
+   "text": "Pass",
+   "bbox": [
+    666.0,
+    594.0,
+    25.0,
+    11.0
+   ],
+   "confidence": 0.7500368356704712
+  },
+  {
+   "text": "Hut",
+   "bbox": [
+    631.0,
+    31.0,
+    21.0,
+    12.0
+   ],
+   "confidence": 0.748339831829071
+  },
+  {
+   "text": "Castle",
+   "bbox": [
+    800.0,
+    483.0,
+    28.0,
+    11.0
+   ],
+   "confidence": 0.7448007634707859
+  },
+  {
+   "text": "Drake",
+   "bbox": [
+    1058.0,
+    765.0,
+    59.0,
+    17.0
+   ],
+   "confidence": 0.7332685788472494
+  },
+  {
+   "text": "tloang",
+   "bbox": [
+    87.0,
+    518.0,
+    34.0,
+    11.0
+   ],
+   "confidence": 0.7314409443310329
+  },
+  {
+   "text": "631",
+   "bbox": [
+    1023.0,
+    37.0,
+    12.0,
+    8.0
+   ],
+   "confidence": 0.7183520346879959
+  },
+  {
+   "text": "Thaba",
+   "bbox": [
+    384.0,
+    285.0,
+    30.0,
+    14.0
+   ],
+   "confidence": 0.7106137772401174
+  },
+  {
+   "text": "Mtloang-",
+   "bbox": [
+    86.0,
+    519.0,
+    37.0,
+    11.0
+   ],
+   "confidence": 0.6743316186798943
+  },
+  {
+   "text": "189",
+   "bbox": [
+    954.0,
+    6.0,
+    14.0,
+    8.0
+   ],
+   "confidence": 0.5043030977249146
+  }
+ ]
+}

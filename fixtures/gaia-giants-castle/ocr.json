@@ -1,0 +1,645 @@
+{
+ "description": "Stand-in for Apple Vision: RapidOCR (rapidocr_onnxruntime) run by fixtures/tools/ocr_like_app.py on map.jpg with the app's OCR plan (ios OCRService: upright 1600 px tiles overlapping 15 %, plus clockwise and counter-clockwise passes over the left and right 18 % margin strips; boxes mapped back to map.jpg pixels, bbox = [x, y, w, h], top-left origin; same text within 20 px deduplicated). Unedited OCR output: labels can be garbled, split or merged, as Vision's can, but not identically.",
+ "observations": [
+  {
+   "text": "Gaia Topo (feet): @ Gaia GPS, OpenStreetN",
+   "bbox": [
+    102.0,
+    2317.0,
+    527.0,
+    28.0
+   ],
+   "confidence": 0.9187174482004983
+  },
+  {
+   "text": "Declination: -26\u00b0",
+   "bbox": [
+    3192.0,
+    303.0,
+    202.0,
+    31.0
+   ],
+   "confidence": 0.9126763443152109
+  },
+  {
+   "text": "Gaia Topo (feet):  Gaia GPS, OpenStreetMap",
+   "bbox": [
+    105.0,
+    2319.0,
+    561.0,
+    28.0
+   ],
+   "confidence": 0.9088620210802832
+  },
+  {
+   "text": "Web Mercator|EPSG: 3857",
+   "bbox": [
+    3015.0,
+    2364.0,
+    267.0,
+    27.0
+   ],
+   "confidence": 0.9065268188714981
+  },
+  {
+   "text": "Sangebethu",
+   "bbox": [
+    1619.0,
+    250.0,
+    153.0,
+    32.0
+   ],
+   "confidence": 0.8962159210985358
+  },
+  {
+   "text": "Web Mercator |EPSG: 3857",
+   "bbox": [
+    3014.0,
+    2361.0,
+    269.0,
+    30.0
+   ],
+   "confidence": 0.8925093841552735
+  },
+  {
+   "text": "Bannerman's",
+   "bbox": [
+    1637.0,
+    105.0,
+    223.0,
+    32.0
+   ],
+   "confidence": 0.8823970556259155
+  },
+  {
+   "text": "Web Mercator|EPSG:3857",
+   "bbox": [
+    3016.0,
+    2365.0,
+    266.0,
+    24.0
+   ],
+   "confidence": 0.8758436765359796
+  },
+  {
+   "text": "Bannerman",
+   "bbox": [
+    1909.0,
+    138.0,
+    182.0,
+    30.0
+   ],
+   "confidence": 0.8726597428321838
+  },
+  {
+   "text": "Grysbok",
+   "bbox": [
+    2597.0,
+    603.0,
+    141.0,
+    31.0
+   ],
+   "confidence": 0.8623506799340248
+  },
+  {
+   "text": "Langalibalele",
+   "bbox": [
+    1840.0,
+    478.0,
+    219.0,
+    35.0
+   ],
+   "confidence": 0.8598593558583941
+  },
+  {
+   "text": "GAIAGPS",
+   "bbox": [
+    207.0,
+    133.0,
+    248.0,
+    51.0
+   ],
+   "confidence": 0.8553624600172043
+  },
+  {
+   "text": "GAIAGPS",
+   "bbox": [
+    130.0,
+    125.0,
+    326.0,
+    67.0
+   ],
+   "confidence": 0.8526294454932213
+  },
+  {
+   "text": "Legheku",
+   "bbox": [
+    628.0,
+    1586.0,
+    108.0,
+    31.0
+   ],
+   "confidence": 0.8522740229964256
+  },
+  {
+   "text": "Oribi Ridge Rte",
+   "bbox": [
+    3003.0,
+    794.0,
+    89.0,
+    230.0
+   ],
+   "confidence": 0.848345909267664
+  },
+  {
+   "text": "KaMasihlenga",
+   "bbox": [
+    1616.0,
+    2173.0,
+    231.0,
+    38.0
+   ],
+   "confidence": 0.8420645640446589
+  },
+  {
+   "text": "Giant's",
+   "bbox": [
+    2472.0,
+    1466.0,
+    99.0,
+    34.0
+   ],
+   "confidence": 0.8392065837979317
+  },
+  {
+   "text": "Ntubeni",
+   "bbox": [
+    2046.0,
+    1789.0,
+    136.0,
+    37.0
+   ],
+   "confidence": 0.8373734429478645
+  },
+  {
+   "text": "Giant's",
+   "bbox": [
+    2228.0,
+    1472.0,
+    138.0,
+    30.0
+   ],
+   "confidence": 0.8335313573479652
+  },
+  {
+   "text": "Giant",
+   "bbox": [
+    2473.0,
+    1467.0,
+    80.0,
+    34.0
+   ],
+   "confidence": 0.8300740222136179
+  },
+  {
+   "text": "10814",
+   "bbox": [
+    1949.0,
+    1486.0,
+    82.0,
+    33.0
+   ],
+   "confidence": 0.8300592005252838
+  },
+  {
+   "text": "10830",
+   "bbox": [
+    1661.0,
+    282.0,
+    74.0,
+    28.0
+   ],
+   "confidence": 0.8274431029955546
+  },
+  {
+   "text": "10876",
+   "bbox": [
+    2479.0,
+    1539.0,
+    86.0,
+    28.0
+   ],
+   "confidence": 0.8257032831509908
+  },
+  {
+   "text": "OribiRidg",
+   "bbox": [
+    3002.0,
+    880.0,
+    76.0,
+    147.0
+   ],
+   "confidence": 0.8222922027111054
+  },
+  {
+   "text": "10807",
+   "bbox": [
+    1913.0,
+    956.0,
+    84.0,
+    40.0
+   ],
+   "confidence": 0.8136226534843445
+  },
+  {
+   "text": "alibalele",
+   "bbox": [
+    1909.0,
+    480.0,
+    149.0,
+    31.0
+   ],
+   "confidence": 0.8042324244976043
+  },
+  {
+   "text": "Thaba",
+   "bbox": [
+    1227.0,
+    919.0,
+    91.0,
+    35.0
+   ],
+   "confidence": 0.803298662106196
+  },
+  {
+   "text": "Durnford",
+   "bbox": [
+    1894.0,
+    930.0,
+    119.0,
+    34.0
+   ],
+   "confidence": 0.7955899834632874
+  },
+  {
+   "text": "2 mi",
+   "bbox": [
+    3120.0,
+    2327.0,
+    48.0,
+    25.0
+   ],
+   "confidence": 0.789725399017334
+  },
+  {
+   "text": "Bush",
+   "bbox": [
+    2622.0,
+    640.0,
+    89.0,
+    34.0
+   ],
+   "confidence": 0.7892560482025146
+  },
+  {
+   "text": "Onibi Ridge Rte",
+   "bbox": [
+    3003.0,
+    796.0,
+    88.0,
+    231.0
+   ],
+   "confidence": 0.7837522029876709
+  },
+  {
+   "text": "Oribi Ridg",
+   "bbox": [
+    3003.0,
+    880.0,
+    70.0,
+    146.0
+   ],
+   "confidence": 0.7817449786446311
+  },
+  {
+   "text": "Putsoa",
+   "bbox": [
+    1226.0,
+    952.0,
+    96.0,
+    35.0
+   ],
+   "confidence": 0.7795078669275556
+  },
+  {
+   "text": "6316",
+   "bbox": [
+    3146.0,
+    184.0,
+    61.0,
+    29.0
+   ],
+   "confidence": 0.7783791303634644
+  },
+  {
+   "text": "Pass",
+   "bbox": [
+    1708.0,
+    143.0,
+    83.0,
+    34.0
+   ],
+   "confidence": 0.773818063735962
+  },
+  {
+   "text": "Pass",
+   "bbox": [
+    1694.0,
+    2213.0,
+    83.0,
+    31.0
+   ],
+   "confidence": 0.7726982116699219
+  },
+  {
+   "text": "10702",
+   "bbox": [
+    347.0,
+    1670.0,
+    81.0,
+    33.0
+   ],
+   "confidence": 0.7696793874104818
+  },
+  {
+   "text": "-Giant's",
+   "bbox": [
+    2236.0,
+    1475.0,
+    130.0,
+    27.0
+   ],
+   "confidence": 0.7613779770003425
+  },
+  {
+   "text": "Pass",
+   "bbox": [
+    2074.0,
+    1830.0,
+    83.0,
+    36.0
+   ],
+   "confidence": 0.7561596274375916
+  },
+  {
+   "text": "Putsod",
+   "bbox": [
+    1228.0,
+    952.0,
+    93.0,
+    34.0
+   ],
+   "confidence": 0.7561029962130955
+  },
+  {
+   "text": "Thaba-",
+   "bbox": [
+    1227.0,
+    919.0,
+    93.0,
+    35.0
+   ],
+   "confidence": 0.7520299937043872
+  },
+  {
+   "text": "Durford",
+   "bbox": [
+    1895.0,
+    932.0,
+    117.0,
+    30.0
+   ],
+   "confidence": 0.7358424887061119
+  },
+  {
+   "text": "10925",
+   "bbox": [
+    642.0,
+    1613.0,
+    79.0,
+    35.0
+   ],
+   "confidence": 0.72739177942276
+  },
+  {
+   "text": "Hut",
+   "bbox": [
+    1968.0,
+    167.0,
+    64.0,
+    32.0
+   ],
+   "confidence": 0.726585641503334
+  },
+  {
+   "text": "Mount",
+   "bbox": [
+    1909.0,
+    896.0,
+    94.0,
+    35.0
+   ],
+   "confidence": 0.7135528475046158
+  },
+  {
+   "text": "Mtoano-",
+   "bbox": [
+    331.0,
+    1608.0,
+    111.0,
+    35.0
+   ],
+   "confidence": 0.7075797952711582
+  },
+  {
+   "text": "Castie",
+   "bbox": [
+    2479.0,
+    1504.0,
+    74.0,
+    29.0
+   ],
+   "confidence": 0.7063540518283844
+  },
+  {
+   "text": "Coste",
+   "bbox": [
+    2480.0,
+    1505.0,
+    73.0,
+    29.0
+   ],
+   "confidence": 0.7021501262982687
+  },
+  {
+   "text": "ounford",
+   "bbox": [
+    1908.0,
+    934.0,
+    102.0,
+    27.0
+   ],
+   "confidence": 0.7001584433019161
+  },
+  {
+   "text": "Pass",
+   "bbox": [
+    1910.0,
+    518.0,
+    78.0,
+    31.0
+   ],
+   "confidence": 0.6977174639701843
+  },
+  {
+   "text": "Caste",
+   "bbox": [
+    2479.0,
+    1504.0,
+    88.0,
+    31.0
+   ],
+   "confidence": 0.6916433572769165
+  },
+  {
+   "text": "ass",
+   "bbox": [
+    2285.0,
+    1514.0,
+    59.0,
+    24.0
+   ],
+   "confidence": 0.6874804347753525
+  },
+  {
+   "text": "Dunford",
+   "bbox": [
+    1908.0,
+    934.0,
+    101.0,
+    27.0
+   ],
+   "confidence": 0.6864159256219864
+  },
+  {
+   "text": "Pass",
+   "bbox": [
+    2275.0,
+    1510.0,
+    70.0,
+    31.0
+   ],
+   "confidence": 0.6780417919158935
+  },
+  {
+   "text": "tioano",
+   "bbox": [
+    338.0,
+    1612.0,
+    98.0,
+    26.0
+   ],
+   "confidence": 0.6668136204992022
+  },
+  {
+   "text": "6811",
+   "bbox": [
+    3246.0,
+    1233.0,
+    64.0,
+    32.0
+   ],
+   "confidence": 0.6572237312793732
+  },
+  {
+   "text": "681",
+   "bbox": [
+    3251.0,
+    1233.0,
+    39.0,
+    29.0
+   ],
+   "confidence": 0.6493945121765137
+  },
+  {
+   "text": "6373",
+   "bbox": [
+    2941.0,
+    93.0,
+    53.0,
+    22.0
+   ],
+   "confidence": 0.6465746998786926
+  },
+  {
+   "text": "Me",
+   "bbox": [
+    3392.0,
+    494.0,
+    46.0,
+    30.0
+   ],
+   "confidence": 0.6460235317548116
+  },
+  {
+   "text": "Thaba.",
+   "bbox": [
+    1226.0,
+    919.0,
+    92.0,
+    35.0
+   ],
+   "confidence": 0.6379650575774056
+  },
+  {
+   "text": "Poss",
+   "bbox": [
+    1910.0,
+    516.0,
+    78.0,
+    35.0
+   ],
+   "confidence": 0.6365938901901245
+  },
+  {
+   "text": "OUDOAN",
+   "bbox": [
+    334.0,
+    1611.0,
+    106.0,
+    33.0
+   ],
+   "confidence": 0.6013191427503314
+  },
+  {
+   "text": "Ts'oand",
+   "bbox": [
+    339.0,
+    1642.0,
+    100.0,
+    32.0
+   ],
+   "confidence": 0.6011257581412792
+  },
+  {
+   "text": "Ts'oana",
+   "bbox": [
+    336.0,
+    1638.0,
+    103.0,
+    43.0
+   ],
+   "confidence": 0.6007359512150288
+  }
+ ]
+}

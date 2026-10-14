@@ -1,0 +1,375 @@
+{
+ "description": "Stand-in for Apple Vision: RapidOCR (rapidocr_onnxruntime) run by fixtures/tools/ocr_like_app.py on map.jpg with the app's OCR plan (ios OCRService: upright 1600 px tiles overlapping 15 %, plus clockwise and counter-clockwise passes over the left and right 18 % margin strips; boxes mapped back to map.jpg pixels, bbox = [x, y, w, h], top-left origin; same text within 20 px deduplicated). Unedited OCR output: labels can be garbled, split or merged, as Vision's can, but not identically.",
+ "observations": [
+  {
+   "text": "Gaia Topo (feet): @ Gaia GPS, OpenStreetN",
+   "bbox": [
+    101.0,
+    2316.0,
+    528.0,
+    33.0
+   ],
+   "confidence": 0.935861607392629
+  },
+  {
+   "text": "Web Mercator|EPSG:3857",
+   "bbox": [
+    2961.0,
+    2363.0,
+    266.0,
+    25.0
+   ],
+   "confidence": 0.9011204113130984
+  },
+  {
+   "text": "MountDurnford",
+   "bbox": [
+    803.0,
+    1128.0,
+    227.0,
+    32.0
+   ],
+   "confidence": 0.895938685962132
+  },
+  {
+   "text": "Gaia Topo (feet): @ Gaia GPS, OpenStreetMap",
+   "bbox": [
+    105.0,
+    2319.0,
+    562.0,
+    28.0
+   ],
+   "confidence": 0.8925598724321886
+  },
+  {
+   "text": "Web Mercator |EPSG: 3857",
+   "bbox": [
+    2960.0,
+    2364.0,
+    265.0,
+    26.0
+   ],
+   "confidence": 0.8780584108829498
+  },
+  {
+   "text": "Langalibalele",
+   "bbox": [
+    746.0,
+    105.0,
+    231.0,
+    39.0
+   ],
+   "confidence": 0.8761514936174665
+  },
+  {
+   "text": "Declination: -",
+   "bbox": [
+    3194.0,
+    301.0,
+    162.0,
+    33.0
+   ],
+   "confidence": 0.8733486692110698
+  },
+  {
+   "text": "Kambule",
+   "bbox": [
+    972.0,
+    1345.0,
+    128.0,
+    31.0
+   ],
+   "confidence": 0.8669900968670845
+  },
+  {
+   "text": "Declination: -26\u00b0",
+   "bbox": [
+    3195.0,
+    306.0,
+    204.0,
+    27.0
+   ],
+   "confidence": 0.865087048874961
+  },
+  {
+   "text": "entrance",
+   "bbox": [
+    3308.0,
+    286.0,
+    128.0,
+    24.0
+   ],
+   "confidence": 0.8621097935570611
+  },
+  {
+   "text": "Potterill",
+   "bbox": [
+    1050.0,
+    1007.0,
+    110.0,
+    31.0
+   ],
+   "confidence": 0.8599065482616425
+  },
+  {
+   "text": "Declination:-26\u00b0",
+   "bbox": [
+    3189.0,
+    298.0,
+    213.0,
+    49.0
+   ],
+   "confidence": 0.8517840241684633
+  },
+  {
+   "text": "Balele",
+   "bbox": [
+    668.0,
+    983.0,
+    87.0,
+    31.0
+   ],
+   "confidence": 0.8511869651930672
+  },
+  {
+   "text": "Umtshezi",
+   "bbox": [
+    1823.0,
+    2168.0,
+    107.0,
+    146.0
+   ],
+   "confidence": 0.8502534495459663
+  },
+  {
+   "text": "Grysbok",
+   "bbox": [
+    2594.0,
+    415.0,
+    153.0,
+    40.0
+   ],
+   "confidence": 0.8421180844306946
+  },
+  {
+   "text": "Erskine",
+   "bbox": [
+    931.0,
+    575.0,
+    105.0,
+    34.0
+   ],
+   "confidence": 0.8261082395911217
+  },
+  {
+   "text": "GAIAGPS",
+   "bbox": [
+    209.0,
+    128.0,
+    246.0,
+    58.0
+   ],
+   "confidence": 0.8260437846183777
+  },
+  {
+   "text": "10305",
+   "bbox": [
+    1063.0,
+    1040.0,
+    85.0,
+    27.0
+   ],
+   "confidence": 0.8247342904408773
+  },
+  {
+   "text": "Langa-le-",
+   "bbox": [
+    645.0,
+    947.0,
+    126.0,
+    36.0
+   ],
+   "confidence": 0.811518931388855
+  },
+  {
+   "text": "GAIAGPS",
+   "bbox": [
+    137.0,
+    133.0,
+    319.0,
+    53.0
+   ],
+   "confidence": 0.8100438266992569
+  },
+  {
+   "text": "laincave",
+   "bbox": [
+    3305.0,
+    247.0,
+    133.0,
+    27.0
+   ],
+   "confidence": 0.8081329266230265
+  },
+  {
+   "text": "10092",
+   "bbox": [
+    1281.0,
+    1696.0,
+    78.0,
+    28.0
+   ],
+   "confidence": 0.8065773149331411
+  },
+  {
+   "text": "10354",
+   "bbox": [
+    1048.0,
+    901.0,
+    79.0,
+    31.0
+   ],
+   "confidence": 0.7999596496423086
+  },
+  {
+   "text": "Katana",
+   "bbox": [
+    1267.0,
+    1663.0,
+    105.0,
+    34.0
+   ],
+   "confidence": 0.7968501618930272
+  },
+  {
+   "text": "1 mi",
+   "bbox": [
+    3066.0,
+    2329.0,
+    49.0,
+    25.0
+   ],
+   "confidence": 0.7955749273300171
+  },
+  {
+   "text": "Bush",
+   "bbox": [
+    2622.0,
+    458.0,
+    97.0,
+    37.0
+   ],
+   "confidence": 0.7931315779685975
+  },
+  {
+   "text": "Bond",
+   "bbox": [
+    1050.0,
+    872.0,
+    73.0,
+    31.0
+   ],
+   "confidence": 0.7906108260154724
+  },
+  {
+   "text": "10328",
+   "bbox": [
+    954.0,
+    609.0,
+    72.0,
+    29.0
+   ],
+   "confidence": 0.7878935436407725
+  },
+  {
+   "text": "nford",
+   "bbox": [
+    954.0,
+    1126.0,
+    79.0,
+    39.0
+   ],
+   "confidence": 0.76976810892423
+  },
+  {
+   "text": "170348",
+   "bbox": [
+    982.0,
+    1375.0,
+    98.0,
+    32.0
+   ],
+   "confidence": 0.7638031244277954
+  },
+  {
+   "text": "iguiuepicku",
+   "bbox": [
+    3254.0,
+    318.0,
+    185.0,
+    39.0
+   ],
+   "confidence": 0.7622278183698654
+  },
+  {
+   "text": "Pass",
+   "bbox": [
+    817.0,
+    145.0,
+    83.0,
+    39.0
+   ],
+   "confidence": 0.7586509466171265
+  },
+  {
+   "text": "rskine",
+   "bbox": [
+    954.0,
+    574.0,
+    84.0,
+    35.0
+   ],
+   "confidence": 0.7584051319531032
+  },
+  {
+   "text": "nce",
+   "bbox": [
+    3381.0,
+    289.0,
+    51.0,
+    20.0
+   ],
+   "confidence": 0.7439287751913071
+  },
+  {
+   "text": "Cave",
+   "bbox": [
+    3366.0,
+    246.0,
+    64.0,
+    29.0
+   ],
+   "confidence": 0.7236735939979553
+  },
+  {
+   "text": "10807",
+   "bbox": [
+    864.0,
+    1157.0,
+    93.0,
+    35.0
+   ],
+   "confidence": 0.7230618397394816
+  },
+  {
+   "text": "-26\u00b0",
+   "bbox": [
+    3340.0,
+    298.0,
+    60.0,
+    34.0
+   ],
+   "confidence": 0.7135577082633973
+  }
+ ]
+}

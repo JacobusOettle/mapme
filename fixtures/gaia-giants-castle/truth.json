@@ -1,0 +1,183 @@
+{
+ "description": "Gaia GPS PDF export ('Gaia Topo (feet)', 2 mi scale bar), Giant's Castle / Mount Durnford / Thaba-Putsoa, uKhahlamba-Drakensberg (KwaZulu-Natal / Lesotho). Same page layout as fixtures/gaia-langalibalele: ONE north-up Web Mercator RGB raster (native.png, 1118x791) placed with '806.4 0 0 561.6 18. 15.68 cm', so map.jpg (300 dpi) is 1.59 % anisotropic (3.0054 x 2.9583 page px per native px); the legend band covers the bottom 35.5 native rows. Truth measured independently of the MapMe core: native px -> Web Mercator is an isotropic, axis-aligned affine, the consensus (mean scale, mean centre) of three estimates: (1) hillshade_terrarium: the map's hillshade against a Terrarium z13 hillshade (NCC over translation, scale and light; best light from 315 deg, 66 deg up), (2) hillshade_copernicus: the same against Copernicus GLO-30 on a z14 Mercator grid, (3) contour_layer_terrarium: the contour lines alone (160 ft interval), by the phase coherence of the Terrarium elevation at the contour pixels modulo 48.768 m. They agree with the consensus within 0.12-0.35 native px at the truth points (scale spread 0.015 %; the anisotropic fits are square to 0.04 %): the truth is good to about +-0.4 native px (+-9 m). Checks: local translations of 12 windows against each DEM (rms 0.3 px), summit icons against DEM summits, the printed scale bar (implies 22.947 m/px, the truth 22.990: the bar is 0.19 % short).",
+ "projection": "EPSG:3857 (Web Mercator), north up, axis-aligned",
+ "pixel_convention": "continuous pixel coordinates: pixel (i, j) covers [i, i+1) x [j, j+1), its centre is (i + 0.5, j + 0.5); x right, y down (as the core: skeleton points sit at pixel centres +0.5)",
+ "mercator_convention": "X = X0 + sx * x, Y = Y0 - sy * y (Web Mercator metres); pixel_to_mercator is the core's row-major 3x3",
+ "native": {
+  "image": "native.png",
+  "width": 1118,
+  "height": 791,
+  "X0": 3260640.258604098,
+  "Y0": -3407344.235689681,
+  "sx": 26.369172738769368,
+  "sy": 26.369172738769368,
+  "pixel_to_mercator": [26.369172738769368, 0.0, 3260640.258604098, 0.0, -26.369172738769368, -3407344.235689681, 0.0, 0.0, 1.0],
+  "mercator_m_per_px": 26.369172738769368,
+  "ground_m_per_px_at_centre": 22.9897
+ },
+ "page": {
+  "image": "map.jpg",
+  "also": "map_nearest.jpg",
+  "width": 3508,
+  "height": 2480,
+  "dpi": 300,
+  "raster_placement_pt": {
+   "cm": [806.4, 0, 0, 561.6, 18.0, 15.68],
+   "page_size_pt": [841.89, 595.28],
+   "note": "content stream: \"806.4 0 0 561.6 18. 15.68 cm /I0 Do\"; top-down the raster spans x 18..824.4 pt, y 18..579.6 pt"
+  },
+  "raster_placement_px": [75, 75, 3435, 2415],
+  "render_px_per_native_px": [3.005366726296959, 2.9582806573957017],
+  "visible_map_px": [75, 75, 3435, 2310],
+  "X0": 3259982.20648084,
+  "Y0": -3406675.70954749,
+  "sx": 8.774028310102427,
+  "sy": 8.91368189588315,
+  "pixel_to_mercator": [8.774028310102427, 0.0, 3259982.20648084, 0.0, -8.91368189588315, -3406675.70954749, 0.0, 0.0, 1.0],
+  "anisotropy": 1.01592,
+  "ground_m_per_px_at_centre": [7.6496, 7.7713]
+ },
+ "centre_ll": [-29.3267906, 29.4232448],
+ "corners_ll": {
+  "top_left": [-29.248747, 29.29083],
+  "top_right": [-29.248747, 29.55566],
+  "bottom_left": [-29.412099, 29.29083],
+  "bottom_right": [-29.412099, 29.55566]
+ },
+ "contour_interval_ft": 160,
+ "contour_interval_m": 48.768,
+ "contour_rgb": [212, 199, 174],
+ "scale_bar": {
+  "label": "2 mi",
+  "length_pt": 101.1717,
+  "ground_m": 3218.688,
+  "implied_ground_m_per_native_px": 22.9471,
+  "truth_ground_m_per_native_px": 22.9897,
+  "ratio_truth_to_bar": 1.00185
+ },
+ "checks": {
+  "window_residuals_terrarium": {
+   "rms_px": 0.32,
+   "max_px": 0.54,
+   "windows": [
+    {"centre": [139.5, 125.5], "shift": [-0.18, 0.13], "ncc": 0.804},
+    {"centre": [419.0, 125.5], "shift": [0.2, 0.27], "ncc": 0.738},
+    {"centre": [698.5, 125.5], "shift": [0.37, -0.01], "ncc": 0.745},
+    {"centre": [978.0, 125.5], "shift": [-0.21, -0.02], "ncc": 0.637},
+    {"centre": [139.5, 377.0], "shift": [-0.32, -0.05], "ncc": 0.621},
+    {"centre": [419.0, 377.0], "shift": [-0.13, 0.33], "ncc": 0.739},
+    {"centre": [698.5, 377.0], "shift": [0.28, -0.01], "ncc": 0.655},
+    {"centre": [978.0, 377.0], "shift": [-0.35, 0.08], "ncc": 0.835},
+    {"centre": [139.5, 629.0], "shift": [-0.04, -0.15], "ncc": 0.699},
+    {"centre": [419.0, 629.0], "shift": [0.22, 0.04], "ncc": 0.715},
+    {"centre": [698.5, 629.0], "shift": [0.3, 0.45], "ncc": 0.761},
+    {"centre": [978.0, 629.0], "shift": [-0.15, 0.24], "ncc": 0.832}
+   ]
+  },
+  "window_residuals_copernicus": {
+   "rms_px": 0.3,
+   "max_px": 0.45,
+   "windows": [
+    {"centre": [139.5, 125.5], "shift": [-0.3, 0.08], "ncc": 0.785},
+    {"centre": [419.0, 125.5], "shift": [-0.03, 0.12], "ncc": 0.722},
+    {"centre": [698.5, 125.5], "shift": [0.15, 0.07], "ncc": 0.73},
+    {"centre": [978.0, 125.5], "shift": [-0.34, 0.1], "ncc": 0.622},
+    {"centre": [139.5, 377.0], "shift": [-0.4, -0.08], "ncc": 0.61},
+    {"centre": [419.0, 377.0], "shift": [-0.36, 0.27], "ncc": 0.729},
+    {"centre": [698.5, 377.0], "shift": [-0.15, -0.02], "ncc": 0.637},
+    {"centre": [978.0, 377.0], "shift": [-0.34, 0.03], "ncc": 0.813},
+    {"centre": [139.5, 629.0], "shift": [-0.23, -0.16], "ncc": 0.693},
+    {"centre": [419.0, 629.0], "shift": [-0.09, -0.2], "ncc": 0.713},
+    {"centre": [698.5, 629.0], "shift": [-0.12, 0.27], "ncc": 0.741},
+    {"centre": [978.0, 629.0], "shift": [-0.19, 0.18], "ncc": 0.777}
+   ]
+  },
+  "alternative_fits_vs_truth_at_truth_points": {
+   "hillshade_terrarium_anisotropic": {
+    "max_px": 0.23,
+    "rms_px": 0.14
+   },
+   "hillshade_copernicus_anisotropic": {
+    "max_px": 0.23,
+    "rms_px": 0.22
+   },
+   "hillshade_terrarium": {
+    "max_px": 0.12,
+    "rms_px": 0.1,
+    "m_per_px_scale": 26.37079424504171,
+    "aspect_y_over_x": 1.0
+   },
+   "hillshade_copernicus": {
+    "max_px": 0.24,
+    "rms_px": 0.22,
+    "m_per_px_scale": 26.369829647856463,
+    "aspect_y_over_x": 1.0
+   },
+   "contour_layer_terrarium": {
+    "max_px": 0.35,
+    "rms_px": 0.27,
+    "m_per_px_scale": 26.363638606357718,
+    "aspect_y_over_x": 1.00025
+   }
+  },
+  "spot_heights": [
+   {
+    "name": "Ntloana-Ts'oana",
+    "label_ft": 10702,
+    "label_m": 3262.0,
+    "icon_native_px": [104.0, 511.0],
+    "dem_summit_m": 3278.1,
+    "dem_summit_ll": [-29.35566, 29.31569],
+    "icon_minus_summit_px": [-0.9, -6.6]
+   },
+   {
+    "name": "Legheku",
+    "label_ft": 10925,
+    "label_m": 3329.9,
+    "icon_native_px": [201.5, 502.5],
+    "dem_summit_m": 3318.8,
+    "dem_summit_ll": [-29.35282, 29.33869],
+    "icon_minus_summit_px": [-0.5, -1.3]
+   },
+   {
+    "name": "Thaba-Putsoa",
+    "label_ft": null,
+    "label_m": null,
+    "icon_native_px": [399.0, 278.5],
+    "dem_summit_m": 3203.4,
+    "dem_summit_ll": [-29.3065, 29.38547],
+    "icon_minus_summit_px": [-0.5, -1.0]
+   },
+   {
+    "name": "Sangebethu",
+    "label_ft": 10830,
+    "label_m": 3301.0,
+    "icon_native_px": [539.5, 51.5],
+    "dem_summit_m": 3297.6,
+    "dem_summit_ll": [-29.25963, 29.4186],
+    "icon_minus_summit_px": [0.1, -1.2]
+   },
+   {
+    "name": "Mount Durnford",
+    "label_ft": 10807,
+    "label_m": 3294.0,
+    "icon_native_px": [625.0, 270.5],
+    "dem_summit_m": 3295.3,
+    "dem_summit_ll": [-29.30612, 29.43885],
+    "icon_minus_summit_px": [0.1, -7.2]
+   },
+   {
+    "name": "(unnamed, south of Mount Durnford)",
+    "label_ft": 10814,
+    "label_m": 3296.1,
+    "icon_native_px": [637.0, 473.5],
+    "dem_summit_m": 3294.7,
+    "dem_summit_ll": [-29.34593, 29.4416],
+    "icon_minus_summit_px": [0.5, 3.1]
+   }
+  ],
+  "window_residuals_note": "Each of 12 windows (4 x 3 over the map above the legend band; centres in native px) is registered alone against the DEM hillshade, translation only, holding the truth's scale and light: shift = the local offset in native px (0 where the truth fits exactly).",
+  "alternative_fits_note": "Each estimate's displacement from the truth (native px) at the 25 truth points: max and rms. m_per_px_scale is Web Mercator metres per native px.",
+  "spot_heights_note": "Summit icons (template match, centre of the triangle, native px) against the highest Copernicus GLO-30 cell within 210 m: icon_minus_summit_px under the truth, and the DEM summit elevation against the printed spot height (feet). Isolated summits sit within ~1-3 px; icons on the escarpment edge (Erskine, Bond, Potterill, Katana on map A) find a higher cell on the plateau behind them, and Gaia places the same summit's icon differently at different zooms (Mount Durnford: 3 px north of the summit on map A, 7 px on map B), so these check the identification and the scale, not the last pixel."
+ }
+}

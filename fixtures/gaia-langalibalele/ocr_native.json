@@ -1,0 +1,215 @@
+{
+ "description": "Stand-in for Apple Vision: RapidOCR (rapidocr_onnxruntime) run by fixtures/tools/ocr_like_app.py on native.png (the embedded raster at its own 1118x791 px, as the app would get it from an import of the PNG) with the app's OCR plan (ios OCRService: upright 1600 px tiles overlapping 15 %, plus clockwise and counter-clockwise passes over the left and right 18 % margin strips; boxes mapped back to native.png pixels, bbox = [x, y, w, h], top-left origin; same text within 20 px deduplicated). Unedited OCR output: labels can be garbled, split or merged, as Vision's can, but not identically.",
+ "observations": [
+  {
+   "text": "Mount Durnford",
+   "bbox": [
+    242.0,
+    355.0,
+    79.0,
+    14.0
+   ],
+   "confidence": 0.895351932446162
+  },
+  {
+   "text": "entrance",
+   "bbox": [
+    1071.0,
+    71.0,
+    45.0,
+    9.0
+   ],
+   "confidence": 0.8641104764408536
+  },
+  {
+   "text": "Grysbok",
+   "bbox": [
+    837.0,
+    113.0,
+    51.0,
+    19.0
+   ],
+   "confidence": 0.8601999431848526
+  },
+  {
+   "text": "Langalibalel",
+   "bbox": [
+    221.0,
+    10.0,
+    71.0,
+    14.0
+   ],
+   "confidence": 0.8299327217615567
+  },
+  {
+   "text": "10092",
+   "bbox": [
+    402.0,
+    548.0,
+    24.0,
+    10.0
+   ],
+   "confidence": 0.8290528953075409
+  },
+  {
+   "text": "Lango-le-",
+   "bbox": [
+    187.0,
+    293.0,
+    47.0,
+    17.0
+   ],
+   "confidence": 0.8242358028888702
+  },
+  {
+   "text": "Potteril",
+   "bbox": [
+    323.0,
+    313.0,
+    37.0,
+    14.0
+   ],
+   "confidence": 0.8239664236704508
+  },
+  {
+   "text": "(guidepick",
+   "bbox": [
+    1058.0,
+    80.0,
+    59.0,
+    15.0
+   ],
+   "confidence": 0.8215120705691251
+  },
+  {
+   "text": "Balele",
+   "bbox": [
+    197.0,
+    308.0,
+    30.0,
+    10.0
+   ],
+   "confidence": 0.8146257996559143
+  },
+  {
+   "text": "MainCave",
+   "bbox": [
+    1067.0,
+    55.0,
+    50.0,
+    14.0
+   ],
+   "confidence": 0.8003677990701463
+  },
+  {
+   "text": "Thabo-Ntso",
+   "bbox": [
+    170.0,
+    761.0,
+    60.0,
+    19.0
+   ],
+   "confidence": 0.7951696406711232
+  },
+  {
+   "text": "(guidepicki",
+   "bbox": [
+    1059.0,
+    81.0,
+    58.0,
+    13.0
+   ],
+   "confidence": 0.7933795675635338
+  },
+  {
+   "text": "0348",
+   "bbox": [
+    310.0,
+    440.0,
+    22.0,
+    10.0
+   ],
+   "confidence": 0.7898898005485535
+  },
+  {
+   "text": "Bush",
+   "bbox": [
+    846.0,
+    130.0,
+    37.0,
+    13.0
+   ],
+   "confidence": 0.7866453766822815
+  },
+  {
+   "text": "Main",
+   "bbox": [
+    1065.0,
+    57.0,
+    29.0,
+    11.0
+   ],
+   "confidence": 0.7696538090705871
+  },
+  {
+   "text": "Katana",
+   "bbox": [
+    396.0,
+    536.0,
+    36.0,
+    14.0
+   ],
+   "confidence": 0.7651930579117366
+  },
+  {
+   "text": "(guide picku",
+   "bbox": [
+    1057.0,
+    77.0,
+    60.0,
+    20.0
+   ],
+   "confidence": 0.7561748188275558
+  },
+  {
+   "text": "tranc",
+   "bbox": [
+    1086.0,
+    71.0,
+    26.0,
+    7.0
+   ],
+   "confidence": 0.749119887749354
+  },
+  {
+   "text": "10807",
+   "bbox": [
+    187.0,
+    776.0,
+    28.0,
+    11.0
+   ],
+   "confidence": 0.7257310052712759
+  },
+  {
+   "text": "Thaba",
+   "bbox": [
+    172.0,
+    765.0,
+    28.0,
+    12.0
+   ],
+   "confidence": 0.7119697829087576
+  },
+  {
+   "text": "Thabe",
+   "bbox": [
+    174.0,
+    765.0,
+    26.0,
+    11.0
+   ],
+   "confidence": 0.671247253815333
+  }
+ ]
+}
