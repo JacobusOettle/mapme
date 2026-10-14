@@ -695,35 +695,33 @@ pub fn model_bits(img: &Rgb8, lines: &InkLines, models: &[InkModel]) -> Vec<u8> 
     }
     let paper = paper_colour(img);
     let inv_paper = paper.map(|p| 1.0 / p);
-    // Bands of rows; each computes the absorption of its line pixels (plus
-    // INK_RADIUS halo rows on each side) once, then the window averages. The
-    // band buffer is reused, and only its written cells are cleared.
+    // Bands of rows; each computes, for its rows plus INK_RADIUS halo rows on
+    // each side, running sums along x of the depth-weighted absorption,
+    // weight and paper-balanced colour of the line pixels; a window sum is
+    // then two lookups per row. The band buffer is reused.
     const BAND: usize = 32;
-    let init = || (vec![[0f32; 7]; (BAND + 2 * INK_RADIUS) * w], Vec::<usize>::new());
-    bits.par_chunks_mut(w * BAND).enumerate().for_each_init(init, |(acc, touched), (bi, out)| {
+    let stride = w + 1;
+    let init = || vec![[0f32; 7]; (BAND + 2 * INK_RADIUS) * stride];
+    bits.par_chunks_mut(w * BAND).enumerate().for_each_init(init, |pre, (bi, out)| {
         let y0 = bi * BAND;
         let y1 = (y0 + BAND).min(h);
         let (h0, h1) = (y0.saturating_sub(INK_RADIUS), (y1 + INK_RADIUS).min(h));
-        // Depth-weighted absorption, weight and paper-balanced colour per
-        // pixel of the band + halo.
         for y in h0..h1 {
+            let row = &mut pre[(y - h0) * stride..(y - h0 + 1) * stride];
+            let mut run = [0f32; 7];
+            row[0] = run;
             for (x, &d) in lines.depth[y * w..(y + 1) * w].iter().enumerate() {
                 if d > 0 {
                     let a = absorption(img, lines, x, y);
                     let p = &img.data[(y * w + x) * 3..(y * w + x) * 3 + 3];
                     let wt = d as f32;
-                    let i = (y - h0) * w + x;
-                    acc[i] = [
-                        wt * a[0],
-                        wt * a[1],
-                        wt * a[2],
-                        wt,
-                        wt * p[0] as f32 * inv_paper[0],
-                        wt * p[1] as f32 * inv_paper[1],
-                        wt * p[2] as f32 * inv_paper[2],
-                    ];
-                    touched.push(i);
+                    for c in 0..3 {
+                        run[c] += wt * a[c];
+                        run[c + 4] += wt * p[c] as f32 * inv_paper[c];
+                    }
+                    run[3] += wt;
                 }
+                row[x + 1] = run;
             }
         }
         for y in y0..y1 {
@@ -733,13 +731,13 @@ pub fn model_bits(img: &Rgb8, lines: &InkLines, models: &[InkModel]) -> Vec<u8> 
                 if drow[x] == 0 {
                     continue;
                 }
+                let (xa, xb) = (x.saturating_sub(INK_RADIUS), (x + INK_RADIUS + 1).min(w));
                 let mut s = [0f32; 7];
                 for yy in y.saturating_sub(INK_RADIUS)..=(y + INK_RADIUS).min(h - 1) {
-                    let r = &acc[(yy - h0) * w..(yy - h0 + 1) * w];
-                    for v in &r[x.saturating_sub(INK_RADIUS)..=(x + INK_RADIUS).min(w - 1)] {
-                        for c in 0..7 {
-                            s[c] += v[c];
-                        }
+                    let r = &pre[(yy - h0) * stride..(yy - h0 + 1) * stride];
+                    let (lo, hi) = (&r[xa], &r[xb]);
+                    for c in 0..7 {
+                        s[c] += hi[c] - lo[c];
                     }
                 }
                 let inv = 255.0 / s[3];
@@ -763,10 +761,6 @@ pub fn model_bits(img: &Rgb8, lines: &InkLines, models: &[InkModel]) -> Vec<u8> 
                 }
             }
         }
-        for &i in touched.iter() {
-            acc[i] = [0.0; 7];
-        }
-        touched.clear();
     });
     bits
 }

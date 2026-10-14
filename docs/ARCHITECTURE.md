@@ -225,11 +225,17 @@ keep `photo_mask`) instead:
    min(side luminances) − pixel ≥ max(6 levels, 5 % of the side). The deepest offset is
    kept. Area edges, tints and hillshade gradients are darker on one side at most, so they
    never count; dense contours ~2.5 px apart stay separate (the side lands in the gap).
-3. **Ink**: each line pixel's colour divided by its background (per channel, the brighter of
-   the two sides), i.e. the colour the line would have on white paper, averaged over the line
-   pixels of its 3 × 3 neighbourhood weighted by depth. Hillshade, tints and yellowed paper
-   divide out (a Gaia contour (197,185,159) on its green-grey ground has the ink of a tan
-   line); grey and black stay neutral.
+3. **Ink** (`model_bits`): a line over a coloured ground has one of two inks, depending on
+   how the map was made. Printed inks overprint (multiply) what lies under them: the ink is
+   the pixel divided by its background (per channel, the brighter of the two sides), the
+   colour the line would have on white paper, so hillshade and tints divide out (a Gaia
+   contour (197,185,159) on its green-grey ground has the ink of a tan line). Digital maps
+   paint opaque or semi-transparent lines over their tints: the ink is the pixel itself,
+   white-balanced by the map's paper (`paper_colour`, the 98th percentile per channel), so a
+   yellowed print's paper turns white. Both are averaged over the line pixels within 2 px
+   (`INK_RADIUS`, weighted by depth: a faded line's colour is a few levels from grey, about
+   the JPEG noise), and a model takes the pixel when either matches; grey and black stay
+   neutral either way.
 4. **Ink model** (`ink_models`, `select_model`): five warm boxes (brown, tan, orange,
    red-brown, purple-brown: hue 330°–62°) that admit inks from faded (absolute chroma
    (max − min)/255 ≥ 0.015) to strong (≥ 0.10), and neutral (chroma < 0.05, value ≤ 0.93) for
@@ -250,6 +256,18 @@ length and step divided by the level (`level_sampling`), and `scale_samples` map
 box average); the orientation field uses cells of about `field_px_per_cell` base pixels
 (`search::map_field_at`). `diagnostics.contours.extraction` reports the level, thin shares,
 block size, chosen ink and every model's score.
+
+On the contour benchmark (`fixtures/tools/bench_contours.py`: 76 synthetic maps of 14 styles
+plus the 5 real maps; contour path only, default scale range) 65 of 81 maps are located with
+the GPS at their centre (48 with the colour threshold), none of the 81 answers confidently
+from 90–110 km away, and the one confidently wrong and the one confidently off answer are
+gone. Skeleton samples on true contours: 0.97 (0.84), true contour lines sampled: 0.79
+(0.39); photocopies and grey contours 0 → 4 of 4 and 4 of 5, Gaia-like PDF pages 1 → 6 of 9.
+The user's two Gaia GPS exports, as the app renders them, are located within 11/16 m and
+14/17 m (median/max), also blockily rendered (10/15, 14/19 m) and as their native rasters
+(7/11 m). The MCSA sheets stay at 2–7 m. What still fails: maps outside the scale range,
+flat terrain (rejected at the refinement, honestly) and a raster upsampled 3× from dense
+contours already merged into solid areas.
 
 ### Photo mode (`"photo": true`)
 
@@ -1318,7 +1336,16 @@ library card.
 * Grid georeference (OCR + core): < 3 s. Contour georeference: < 4 s plus DEM
   download (the default 50 km near disc: ~2 s coarse search over 64 zoom-11
   tiles, 0.8 s with a scale label; the inner 20 km first, so a user near
-  the sheet waits as before). Wide search on the reference box: 6–26 s of
+  the sheet waits as before). The contour mask (`contour_lines`: level
+  estimate, line detector, ink, model choice) takes ~0.25–0.45 s on a 17 MP
+  300 dpi sheet at level 1 (the colour threshold it replaced: ~0.2–0.3 s;
+  ~0.7–0.9 s against ~0.55 s on one core), while the thinner mask makes the
+  skeleton ~10–20 % cheaper; an A4 page analysed at level 3 takes ~0.15 s for
+  the mask and a fifth of the full-resolution skeleton and field time. On the
+  style corpus a located map costs 0.9–3 s of core time with the GPS at its
+  centre (back to back with the previous mask: −20 % to +45 %, the extra from
+  the mask and from refining the contour samples the old mask missed, up to
+  several times as many). Wide search on the reference box: 6–26 s of
   core time to find the sheet from up to 650 km, 26 s for a whole 1 000 km
   search that fails (see *Wide search*), at most one chunk mosaic (≤ 8 × 8
   tiles) in memory. Photo mode adds the normalisation (~0.1 s for 9 MP) and costlier
