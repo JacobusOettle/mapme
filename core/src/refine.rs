@@ -129,9 +129,20 @@ const GRID_HALF_PX: f64 = 15.0;
 /// Best grid starts polished by LM on the coarsest level.
 const GRID_STARTS: usize = 3;
 /// Samples used on the coarse levels / the finest level: at most this many
-/// (strided subsets).
+/// (strided subsets). The finest level's cost grows with its samples: the
+/// line detector's masks (`contour_lines`) give 300-dpi pages 100-550 k
+/// samples, and refining three wrong candidates at 150 k cost ~1-3 s more in
+/// every search that does not find the map; 60 k place the benchmark's maps
+/// and the MCSA sheets as well.
 const MAX_SAMPLES_COARSE: usize = 20_000;
-const MAX_SAMPLES_FINE: usize = 150_000;
+const MAX_SAMPLES_FINE: usize = 60_000;
+/// …thinned per segment, keeping at least this many of each (all of a
+/// shorter one): no segment drops out of the metrics (`MIN_SEG_SAMPLES`).
+const FINE_MIN_SEG_SAMPLES: usize = 2 * MIN_SEG_SAMPLES;
+/// Photo mode keeps 150 k (strided): its projective stage needs them (a
+/// photo flattened from corners 2.5 % off fitted 690 m off at the edges
+/// with 60 k).
+const MAX_SAMPLES_FINE_PHOTO: usize = 150_000;
 
 /// DEM prepared for refinement: NaN-aware smoothed pyramid (finest first).
 pub struct PreparedDem {
@@ -542,6 +553,27 @@ impl Data {
     }
 
     /// Every `stride`-th sample (same centroid, so parameters carry over).
+    /// Every `stride`-th sample of each segment, at least
+    /// `FINE_MIN_SEG_SAMPLES` of it (segments are contiguous runs).
+    fn thin_segments(&self, stride: usize) -> Data {
+        let (mut xs, mut ys, mut seg) = (Vec::new(), Vec::new(), Vec::new());
+        let mut i = 0;
+        while i < self.xs.len() {
+            let mut j = i + 1;
+            while j < self.xs.len() && self.seg[j] == self.seg[i] {
+                j += 1;
+            }
+            let st = stride.min((j - i) / FINE_MIN_SEG_SAMPLES).max(1);
+            for k in (i..j).step_by(st) {
+                xs.push(self.xs[k]);
+                ys.push(self.ys[k]);
+                seg.push(self.seg[k]);
+            }
+            i = j;
+        }
+        Data { xs, ys, seg, n_segs: self.n_segs, cx: self.cx, cy: self.cy, sn: self.sn }
+    }
+
     fn subset(&self, stride: usize) -> Data {
         let idx = (0..self.xs.len()).step_by(stride.max(1));
         let (mut xs, mut ys, mut seg) = (Vec::new(), Vec::new(), Vec::new());
@@ -656,8 +688,12 @@ pub fn refine_prepared_with(
     opts: &RefineOptions,
 ) -> RefineResult {
     let mut full = Data::new(samples);
-    if full.xs.len() > MAX_SAMPLES_FINE {
-        full = full.subset(full.xs.len().div_ceil(MAX_SAMPLES_FINE));
+    if opts.photo {
+        if full.xs.len() > MAX_SAMPLES_FINE_PHOTO {
+            full = full.subset(full.xs.len().div_ceil(MAX_SAMPLES_FINE_PHOTO));
+        }
+    } else if full.xs.len() > MAX_SAMPLES_FINE {
+        full = full.thin_segments(full.xs.len().div_ceil(MAX_SAMPLES_FINE));
     }
     if samples.pts.is_empty() || dem.levels.is_empty() {
         return metrics(&full, dem, &Fit::Affine(*init), 0, false, false);
@@ -1380,6 +1416,25 @@ mod tests {
         }
         s.n_segs = seg_of_level.len();
         (s, dem)
+    }
+
+    /// The fine level's cap thins each segment by the stride but keeps at
+    /// least `FINE_MIN_SEG_SAMPLES` of it: no segment is lost.
+    #[test]
+    fn thin_segments_keeps_every_segment() {
+        let mut s = ContourSamples::default();
+        for (k, n) in [3usize, 10, 100, 41].into_iter().enumerate() {
+            for i in 0..n {
+                s.pts.push([i as f32, k as f32 * 10.0]);
+                s.seg.push(k as u32);
+            }
+        }
+        s.n_segs = 4;
+        let d = Data::new(&s).thin_segments(5);
+        let count = |k: u32| d.seg.iter().filter(|&&g| g == k).count();
+        assert_eq!([count(0), count(1), count(2), count(3)], [3, 10, 20, 9]);
+        assert!(d.seg.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(d.xs.len(), d.ys.len());
     }
 
     /// Contours across a plane's slope (straight lines of one level): along
