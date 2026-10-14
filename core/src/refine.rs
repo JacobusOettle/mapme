@@ -60,6 +60,14 @@ pub struct RefineResult {
     /// Adjacent contours must differ by one interval, clearly above the DEM
     /// noise; a wrong fit squeezes many lines into little relief (≪ 1).
     pub interval_snr: f64,
+    /// Ground metres per map pixel under `transform` (at the samples'
+    /// centroid) and per cell of the finest DEM level: the scale of the
+    /// noise a right fit leaves (`seg_std_floor_m`).
+    pub px_ground_m: f64,
+    pub dem_cell_m: f64,
+    /// Σ|g·t̂| / Σ|g|: how much the contours run along the DEM's slope
+    /// instead of across it (`gradient_alignment`; NaN without samples).
+    pub gradient_alignment: f64,
 }
 
 /// Soft-L1 loss scale (metres) on the finest level (doubles per level).
@@ -78,6 +86,17 @@ const MAX_LOG_SCALE_CHANGE: f64 = 0.15;
 const AFFINE_MIN_GAIN: f64 = 0.03;
 /// …and its two axis scales differ by less than this ratio.
 const AFFINE_MAX_ANISOTROPY: f64 = 1.08;
+/// A map spanning more than this (ground metres, the samples' diagonal) gets
+/// a projective stage after the affine one: a regional projection (UTM, a
+/// national grid) is no affine image of Web Mercator over tens of km (its
+/// scale changes by tan(lat) / R per metre north: ~1 % over 75 km at 40°,
+/// 100 m at the edges of a 1:250 000 sheet that an affine fit cannot take
+/// out; a homography takes out about half).
+const REGIONAL_SPAN_M: f64 = 40_000.0;
+/// …kept if it lowers the cost by this fraction and its perspective terms
+/// stay this small (the denominator over the samples' extent).
+const REGIONAL_MIN_GAIN: f64 = 0.01;
+const REGIONAL_MAX_PERSPECTIVE: f64 = 0.02;
 /// Photo mode: a flattened photo's aspect ratio is a guess (a document
 /// scanner sizes the output from the quad's edge lengths, ~10 % off at a 15°
 /// camera tilt), so the affine may be this anisotropic…
@@ -105,6 +124,8 @@ const COARSEST_RES_M: f64 = 120.0;
 /// Translation grid (Mercator metres) scanned on the coarsest level.
 const GRID_HALF_M: f64 = 450.0;
 const GRID_STEP_M: f64 = 150.0;
+/// …or this many map pixels, when more (a map at 50 m/px: ±750 m).
+const GRID_HALF_PX: f64 = 15.0;
 /// Best grid starts polished by LM on the coarsest level.
 const GRID_STARTS: usize = 3;
 /// Samples used on the coarse levels / the finest level: at most this many
@@ -657,11 +678,15 @@ pub fn refine_prepared_with(
     let dc = level_data(lvl);
     let mut grid: Vec<(f64, Params)> = Vec::new();
     let n_steps = (GRID_HALF_M / GRID_STEP_M).round() as i32;
+    // The coarse search places a small-scale map to a fraction of its
+    // (coarser) DEM cells: the grid spans `GRID_HALF_PX` of its pixels when
+    // that is more than `GRID_HALF_M`.
+    let step = GRID_STEP_M.max(GRID_HALF_PX * start.p[0].exp() / n_steps.max(1) as f64);
     for iy in -n_steps..=n_steps {
         for ix in -n_steps..=n_steps {
             let mut s = start;
-            s.p[2] += ix as f64 * GRID_STEP_M;
-            s.p[3] += iy as f64 * GRID_STEP_M;
+            s.p[2] += ix as f64 * step;
+            s.p[3] += iy as f64 * step;
             grid.push((evaluate_params(&dc, &dem.levels[lvl], &s, loss(lvl), false).cost, s));
         }
     }
@@ -699,6 +724,7 @@ pub fn refine_prepared_with(
     let ta = aff.to_affine();
     let mut out = par.to_affine();
     let mut is_affine = false;
+    let mut best_cost = sim_cost;
     if aff_cost < sim_cost * (1.0 - AFFINE_MIN_GAIN)
         && anisotropy(&ta) < AFFINE_MAX_ANISOTROPY
         && (ta.mean_scale() / out.mean_scale()).ln().abs() < 0.05
@@ -706,8 +732,34 @@ pub fn refine_prepared_with(
         out = ta;
         is_affine = true;
         converged = aff_conv;
+        best_cost = aff_cost;
+    }
+    // A large map: a little perspective for its projection.
+    let (_, my) = out.apply(full.cx, full.cy);
+    let span_m = 2.0 * full.sn * out.mean_scale() * crate::geo::merc_to_latlon(0.0, my).0.to_radians().cos();
+    if span_m > REGIONAL_SPAN_M {
+        let start = Params::from_affine(&out, Model::Projective, &full);
+        let (proj, proj_cost, it, proj_conv) = lm(&fine_data, fine, start, LOSS_SCALE_M, 25, bounds);
+        iterations += it;
+        if proj_cost < best_cost * (1.0 - REGIONAL_MIN_GAIN) && plausible_regional(&proj, &out) {
+            return metrics(&full, dem, &Fit::Projective(proj.to_homography()), iterations, proj_conv, true);
+        }
     }
     metrics(&full, dem, &Fit::Affine(out), iterations, converged, is_affine)
+}
+
+/// A regional projection's perspective: tiny terms, the local affine part
+/// near-conformal and at the scale of `t`.
+fn plausible_regional(p: &Params, t: &Affine) -> bool {
+    let (g, h) = (p.p[6], p.p[7]);
+    let local = p.to_affine();
+    g.is_finite()
+        && h.is_finite()
+        && g.abs() <= REGIONAL_MAX_PERSPECTIVE
+        && h.abs() <= REGIONAL_MAX_PERSPECTIVE
+        && local.det() * t.det() > 0.0
+        && anisotropy(&local) < AFFINE_MAX_ANISOTROPY
+        && (local.mean_scale() / t.mean_scale()).ln().abs() < 0.05
 }
 
 /// Photo mode: affine from `PHOTO_AFFINE_LEVEL` down, then projective from
@@ -879,6 +931,13 @@ fn metrics(d: &Data, dem: &PreparedDem, fit: &Fit, iterations: usize, converged:
         Fit::Affine(t) => (*t, None),
         Fit::Projective(h) => (h.local_affine(d.cx, d.cy), Some(*h)),
     };
+    // Ground metres per map pixel and per finest DEM cell at the samples' centroid.
+    let cos = {
+        let (_, my) = transform.apply(d.cx, d.cy);
+        crate::geo::merc_to_latlon(0.0, my).0.to_radians().cos()
+    };
+    let px_ground_m = transform.mean_scale() * cos;
+    let dem_cell_m = dem.levels.first().map_or(0.0, |l| l.res * cos);
     let empty = RefineResult {
         transform,
         homography,
@@ -895,6 +954,9 @@ fn metrics(d: &Data, dem: &PreparedDem, fit: &Fit, iterations: usize, converged:
         affine,
         contour_interval_m: 0.0,
         interval_snr: 0.0,
+        px_ground_m,
+        dem_cell_m,
+        gradient_alignment: f64::NAN,
     };
     let Some(fine) = dem.levels.first() else {
         return empty;
@@ -951,6 +1013,7 @@ fn metrics(d: &Data, dem: &PreparedDem, fit: &Fit, iterations: usize, converged:
     let sigma_r = 1.4826 * median(&mut abs_r).unwrap_or(f64::INFINITY);
     let contour_interval_m = interval_estimate(d, &e, &used);
     let interval_snr = if sigma_r > 0.0 { contour_interval_m / sigma_r } else { 0.0 };
+    let gradient_alignment = gradient_alignment(d, fine, &par, &transform, &used);
     RefineResult {
         transform,
         cost_m,
@@ -967,6 +1030,43 @@ fn metrics(d: &Data, dem: &PreparedDem, fit: &Fit, iterations: usize, converged:
         contour_interval_m,
         interval_snr,
         homography,
+        px_ground_m,
+        dem_cell_m,
+        gradient_alignment,
+    }
+}
+
+/// How much the contours cross the terrain's slope under the fit: Σ|g·t̂| /
+/// Σ|g| over the samples (g the DEM gradient, t̂ the contour's direction there,
+/// mapped to Mercator). Contour lines run across the slope: a right fit stays
+/// well under the 2/π ≈ 0.64 of lines lying any which way, and flat ground,
+/// where any placement keeps a line's level, weighs little. Few and short
+/// segments (a sparse mask) can keep their levels on wrong terrain by
+/// lying along gentle slopes; they still cross the steep ones.
+fn gradient_alignment(d: &Data, dem: &DemMosaic, par: &Params, t: &Affine, used: &[usize]) -> f64 {
+    let samp = sample_all(d, dem, par);
+    let (mut along, mut total) = (0.0f64, 0.0f64);
+    for &i in used {
+        let s = d.seg[i];
+        let prev = if i > 0 && d.seg[i - 1] == s { i - 1 } else { i };
+        let next = if i + 1 < d.xs.len() && d.seg[i + 1] == s { i + 1 } else { i };
+        if prev == next {
+            continue;
+        }
+        let (tx, ty) = t.apply_vec(d.xs[next] - d.xs[prev], d.ys[next] - d.ys[prev]);
+        let tn = tx.hypot(ty);
+        let [_, gx, gy, _, _] = samp[i];
+        let gn = gx.hypot(gy);
+        if tn <= 0.0 || !gn.is_finite() {
+            continue;
+        }
+        along += (gx * tx + gy * ty).abs() / tn;
+        total += gn;
+    }
+    if total > 0.0 {
+        along / total
+    } else {
+        f64::NAN
     }
 }
 
@@ -1054,7 +1154,11 @@ fn ramp(x: f64, lo: f64, hi: f64) -> f64 {
 ///
 /// * explained variance: ≥ 0.97 → 1, ≤ 0.80 → 0 (right fits explain ~99.9 %
 ///   of the elevation variation along contours, wrong ones well under 90 %);
-/// * median within-segment std: ≤ 4 m → 1, ≥ 12 m → 0 (DEM noise is ~2–3 m);
+/// * median within-segment std: ≤ s → 1, ≥ 3·s → 0, s = `seg_std_floor_m`:
+///   4 m on zoom-13 tiles (DEM noise is ~2–3 m), more on the coarser tiles
+///   and for the coarser pixels of small-scale maps (a 1:250 000 sheet at
+///   25 m/px fits its true place at 11–25 m on zoom 10, wrong places at
+///   40–80 m);
 /// * contour-interval SNR (neighbouring lines must differ by one interval,
 ///   above the residual noise): ≥ 2.0 → 1, ≤ 1.0 → 0. Grootkloof (5 m
 ///   contours, SRTM) gives 2.8; wrong fits give < 0.8, because they squeeze
@@ -1076,11 +1180,55 @@ pub fn fit_quality(r: &RefineResult) -> f64 {
         return 0.0;
     }
     let ev = ramp(r.explained_variance, 0.80, 0.97);
-    let sd = 1.0 - ramp(r.median_seg_std_m, 4.0, 12.0);
+    let floor = seg_std_floor_m(r);
+    let sd = 1.0 - ramp(r.median_seg_std_m, floor, 3.0 * floor);
     let snr = ramp(r.interval_snr, 1.0, 2.0);
     let interval = ramp(r.contour_interval_m, 0.8, 1.6);
-    (ev * sd * snr * interval).clamp(0.0, 1.0)
+    let across = if r.gradient_alignment.is_finite() {
+        let (good, bad) = alignment_limits(r.n_segments);
+        1.0 - ramp(r.gradient_alignment, good, bad)
+    } else {
+        1.0
+    };
+    (ev * sd * snr * interval * across).clamp(0.0, 1.0)
 }
+
+/// Median within-segment elevation spread (metres) a right fit stays under:
+/// 4 m on zoom-13 tiles (~17–19 m cells), growing with the square root of
+/// the DEM cell (interpolating a coarser DEM across steep ground: 8 m on
+/// zoom 11, 11 m on zoom 10) and with the map's pixel (a line drawn 0.35 px
+/// off on a 1:40 slope: 9 m at 25 m/px, 17.5 m at 50 m/px). 300-dpi sheets
+/// of 1:50 000 and larger refine on zoom 13 at under 12 m/px: 4 m, as always.
+pub fn seg_std_floor_m(r: &RefineResult) -> f64 {
+    let dem = if r.dem_cell_m.is_finite() && r.dem_cell_m > 0.0 {
+        SEG_STD_FLOOR_M * (r.dem_cell_m / ZOOM13_CELL_M).sqrt()
+    } else {
+        0.0
+    };
+    let px = if r.px_ground_m.is_finite() { SEG_STD_PER_PX * r.px_ground_m } else { 0.0 };
+    SEG_STD_FLOOR_M.max(dem).max(px)
+}
+
+/// `gradient_alignment` from which a fit counts as crossing the terrain
+/// (factor 1 → 0 of `fit_quality`), by the number of segments: the fewer,
+/// the more a wrong fit can lay them along the slope. Right fits: 0.11–0.26
+/// on the benchmark's maps and the real sheets whatever their segments
+/// (0.27–0.31 on flat ground, 0.36 for a 1:250 000 sheet of 1 745 segments
+/// on zoom-10 tiles). Wrong fits (the refined candidates of searches 90–110 km
+/// from 76 maps): 0.34 at the least with 15–21 segments (sparse masks on
+/// Gaia-like pages; one fitted its levels at 0.70), 0.46 at the least with
+/// 900 segments or more.
+fn alignment_limits(n_segments: usize) -> (f64, f64) {
+    let t = ((n_segments.max(1) as f64 / 50.0).ln() / (400.0f64 / 50.0).ln()).clamp(0.0, 1.0);
+    let good = 0.26 + t * (0.38 - 0.26);
+    (good, good + 0.07 + t * 0.01)
+}
+
+/// `seg_std_floor_m` on zoom-13 tiles, and their ground cell at the equator.
+const SEG_STD_FLOOR_M: f64 = 4.0;
+const ZOOM13_CELL_M: f64 = 19.1;
+/// …and per ground metre of the map's pixel.
+const SEG_STD_PER_PX: f64 = 0.35;
 
 /// The factors of `fit_confidence` that say how much there was to judge by
 /// (0..1): contour segments that landed on the DEM and the terrain relief
@@ -1232,6 +1380,54 @@ mod tests {
         }
         s.n_segs = seg_of_level.len();
         (s, dem)
+    }
+
+    /// Contours across a plane's slope (straight lines of one level): along
+    /// the slope's contours the alignment is ~0, turned across them ~1; the
+    /// limits depend on the number of segments; the spread a right fit keeps
+    /// grows with the DEM cell and the map pixel.
+    #[test]
+    fn gradient_alignment_and_noise_floor() {
+        use crate::dem::{DemStore, TILE_SIZE};
+        let z = 13u8;
+        let centre = (3.0e6, -2.98e6);
+        let fp = MercBox::around(centre.0, centre.1, 3000.0);
+        let mut store = DemStore::new();
+        for t in crate::dem::tiles_covering(z, &fp) {
+            let b = crate::dem::tile_bounds(t);
+            let res = crate::dem::resolution(z);
+            let e: Vec<f32> = (0..TILE_SIZE * TILE_SIZE)
+                .map(|i| (0.1 * (b.min_x + ((i % TILE_SIZE) as f64 + 0.5) * res - centre.0)) as f32)
+                .collect();
+            store.add_elevations(t, e);
+        }
+        let dem = PreparedDem::new(&store.mosaic(z, &fp));
+        // 30 vertical lines in the image: contours of the plane under `along`.
+        let mut s = ContourSamples::default();
+        for k in 0..30u32 {
+            for y in (0..1000).step_by(4) {
+                s.pts.push([100.0 + 50.0 * k as f32, y as f32]);
+                s.seg.push(k);
+            }
+        }
+        s.n_segs = 30;
+        let along = Affine::pixel_to_merc_similarity(2.0, 0.0, 800.0, 500.0, centre.0, centre.1);
+        let across =
+            Affine::pixel_to_merc_similarity(2.0, std::f64::consts::FRAC_PI_2, 800.0, 500.0, centre.0, centre.1);
+        let a = evaluate_prepared(&s, &dem, &along);
+        let b = evaluate_prepared(&s, &dem, &across);
+        assert!(a.gradient_alignment < 0.02, "{a:?}");
+        assert!(b.gradient_alignment > 0.98, "{b:?}");
+        assert!(a.median_seg_std_m < 0.5 && b.median_seg_std_m > 10.0);
+        // Few segments: stricter limits than many.
+        let (few, many) = (alignment_limits(15), alignment_limits(2000));
+        assert!(few.0 < many.0 && few.1 < many.1 && few.1 <= 0.34 && many.0 >= 0.37, "{few:?} {many:?}");
+        // Zoom 13 at 1.9 m/px: 4 m; zoom 10 at 25 m/px: ~11 m; 50 m/px: 17.5 m.
+        let floor =
+            |cell: f64, px: f64| seg_std_floor_m(&RefineResult { dem_cell_m: cell, px_ground_m: px, ..a.clone() });
+        assert_eq!(floor(17.3, 1.9), 4.0);
+        assert!((floor(133.0, 25.0) - 10.56).abs() < 0.1, "{}", floor(133.0, 25.0));
+        assert!((floor(133.0, 50.0) - 17.5).abs() < 1e-9);
     }
 
     /// Synthetic terrain: contours of a known surface, sampled through a known

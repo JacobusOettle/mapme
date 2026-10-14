@@ -250,8 +250,24 @@ const FFT_CAP: usize = 1024;
 const TEMPLATE_SIGMA: f64 = 0.3;
 /// Gaussian sigma (DEM cells) applied to the DEM orientation field.
 const DEM_SIGMA: f64 = 0.3;
-/// Candidates closer than this (ground metres) are the same location.
+/// Candidates closer than this (ground metres) are the same location…
 pub const DISTINCT_M: f64 = 2000.0;
+/// …or than this fraction of the map's short side, for maps showing a large
+/// area: their correlation peaks are wider than 2 km (a 3 500 × 2 500 px
+/// export at 50 m/px is searched on ~1 km cells), and a peak's own shoulder
+/// must not count as another place. A 1:25 000 sheet (6.7 km) keeps 2 km.
+pub const DISTINCT_FRACTION: f64 = 0.08;
+
+/// Ground distance (metres) under which two placements of a map of
+/// `img_w` × `img_h` px at `scale_m_per_px` are the same location.
+pub fn distinct_m(scale_m_per_px: f64, img_w: usize, img_h: usize) -> f64 {
+    let side = img_w.min(img_h) as f64 * scale_m_per_px;
+    if side.is_finite() {
+        DISTINCT_M.max(DISTINCT_FRACTION * side)
+    } else {
+        DISTINCT_M
+    }
+}
 /// Peaks kept per (template, rotation) after non-maximum suppression.
 const PEAKS_PER_TEMPLATE: usize = 6;
 /// Placements whose template window has less valid DEM than this are skipped.
@@ -307,6 +323,13 @@ fn merc_per_ground(p: &SearchParams) -> f64 {
 /// With a `region` (a wide-search chunk): its box plus the map's extent and
 /// the margin, uncapped (the chunk planner keeps chunks small).
 pub fn required_dem_box(params: &SearchParams, img_w: usize, img_h: usize) -> MercBox {
+    required_dem_box_capped(params, img_w, img_h, MAX_BOX_HALF_M)
+}
+
+/// `required_dem_box` with another cap on the half-size (ground metres):
+/// a search on coarser tiles (a scale band of small-scale maps) affords a
+/// proportionally larger box for the same number of cells.
+pub fn required_dem_box_capped(params: &SearchParams, img_w: usize, img_h: usize, max_half_m: f64) -> MercBox {
     let k = merc_per_ground(params);
     let (hx, hy) = map_half_extent(params, img_w, img_h);
     let margin = 500.0 * k;
@@ -320,7 +343,7 @@ pub fn required_dem_box(params: &SearchParams, img_w: usize, img_h: usize) -> Me
         };
     }
     let r = params.search_radius_m.max(0.0) * k;
-    let cap = MAX_BOX_HALF_M * k;
+    let cap = max_half_m * k;
     let (cx, cy) = params.center_merc;
     let half_x = (r + hx + margin).min(cap);
     let half_y = (r + hy + margin).min(cap);
@@ -1189,7 +1212,8 @@ fn search_peaks_with(
             continue;
         }
         let grid = grid_field(ldem, gx0, gy0, gw, gh);
-        let rad_cells = DISTINCT_M * kmg / res;
+        // Peaks of one template closer than the distinct distance are one place.
+        let rad_cells = |s_merc: f64| distinct_m(s_merc / kmg, img_w, img_h) * kmg / res;
         let layout = tile_layout(fw, fh, (max_w, max_h));
         // With several rotations, transform each template once per level
         // (within a memory budget) instead of once per rotation.
@@ -1213,7 +1237,7 @@ fn search_peaks_with(
                     let cached = hats.as_ref().map(|h| h[ti].as_slice());
                     let (pw, ph, ncc) = correlate(t, cached, &frame, &layout, rc);
                     let (mu, sd) = surface_stats(&ncc);
-                    let out: Vec<Peak> = find_peaks(&ncc, pw, ph, PEAKS_PER_TEMPLATE, rad_cells)
+                    let out: Vec<Peak> = find_peaks(&ncc, pw, ph, PEAKS_PER_TEMPLATE, rad_cells(t.s_merc))
                         .into_iter()
                         .map(|(score, fx, fy)| {
                             let (lx, ly) = frame.to_level(fx + t.cx, fy + t.cy);
@@ -1252,7 +1276,7 @@ fn ground_dist(a: (f64, f64), b: (f64, f64)) -> f64 {
     ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt() * lat.to_radians().cos()
 }
 
-/// Distinct candidates (≥ `DISTINCT_M` apart), most significant first, with
+/// Distinct candidates (≥ `distinct_m` apart), most significant first, with
 /// peak ratios and a parabolic scale refinement from the neighbouring scales.
 ///
 /// Peaks are ranked by significance z = (NCC − mean)/std of their own
@@ -1262,6 +1286,13 @@ fn ground_dist(a: (f64, f64), b: (f64, f64)) -> f64 {
 fn select_candidates(peaks: &[Peak], img_w: usize, img_h: usize, params: &SearchParams) -> Vec<Candidate> {
     let mut order: Vec<usize> = (0..peaks.len()).collect();
     order.sort_by(|&a, &b| peaks[b].z().partial_cmp(&peaks[a].z()).unwrap_or(std::cmp::Ordering::Equal));
+    // Two peaks are distinct places when apart by the distinct distance of
+    // the larger of their maps' extents (`distinct_m`).
+    let distinct = |p: &Peak| {
+        let (lat, _) = merc_to_latlon(p.mx, p.my);
+        distinct_m(p.s_merc * lat.to_radians().cos(), img_w, img_h)
+    };
+    let apart = |a: &Peak, b: &Peak| ground_dist((a.mx, a.my), (b.mx, b.my)) >= distinct(a).max(distinct(b));
     let mut chosen: Vec<usize> = Vec::new();
     for &i in &order {
         if chosen.len() >= params.top_k.max(1) {
@@ -1270,8 +1301,7 @@ fn select_candidates(peaks: &[Peak], img_w: usize, img_h: usize, params: &Search
         if peaks[i].score < MIN_CANDIDATE_NCC {
             continue;
         }
-        let p = (peaks[i].mx, peaks[i].my);
-        if chosen.iter().all(|&j| ground_dist(p, (peaks[j].mx, peaks[j].my)) >= DISTINCT_M) {
+        if chosen.iter().all(|&j| apart(&peaks[i], &peaks[j])) {
             chosen.push(i);
         }
     }
@@ -1280,8 +1310,7 @@ fn select_candidates(peaks: &[Peak], img_w: usize, img_h: usize, params: &Search
         .map(|i| {
             let pk = &peaks[i];
             let here = (pk.mx, pk.my);
-            let other =
-                order.iter().map(|&j| &peaks[j]).find(|q| ground_dist(here, (q.mx, q.my)) >= DISTINCT_M).map(|q| q.z());
+            let other = order.iter().map(|&j| &peaks[j]).find(|q| apart(pk, q)).map(|q| q.z());
             let peak_ratio = match other {
                 Some(o) => pk.z().max(0.0) / o.max(MIN_RATIO_DENOM),
                 None => 1.0,
@@ -1294,7 +1323,7 @@ fn select_candidates(peaks: &[Peak], img_w: usize, img_h: usize, params: &Search
                     .filter(|q| {
                         q.scale_idx == scale_idx
                             && q.rot_idx == pk.rot_idx
-                            && ground_dist(here, (q.mx, q.my)) < 0.5 * DISTINCT_M
+                            && ground_dist(here, (q.mx, q.my)) < 0.5 * distinct(pk)
                     })
                     .map(|q| q.score)
                     .fold(None, |a: Option<f32>, s| Some(a.map_or(s, |a| a.max(s))))

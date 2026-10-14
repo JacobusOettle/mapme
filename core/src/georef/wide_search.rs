@@ -24,8 +24,8 @@
 //! never accept a wide match.
 
 use super::*;
-use crate::search::{map_half_extent, min_searchable_scale, Region, DISTINCT_M};
-use crate::wide::{near_zoom, plan_wide, wide_reach, WidePlan};
+use crate::search::{distinct_m, map_half_extent, min_searchable_scale, Region};
+use crate::wide::{merge_plans, plan_wide, recheck_zoom, wide_band_reach, WidePlan};
 
 /// Candidates a chunk's coarse search returns (by significance) and of
 /// those kept (by correlation) for re-checking.
@@ -50,8 +50,8 @@ pub(crate) struct WideKey {
     origin: [i64; 2],
     radius_m: i64,
     near_m: i64,
-    zoom: u8,
-    scale: [u64; 2],
+    /// Per scale band: its wide zoom and scale range (bits).
+    bands: Vec<(u8, [u64; 2])>,
     max_tiles: usize,
     /// The band from coordinate labels (Mercator box bits), if any.
     band: Option<[u64; 4]>,
@@ -98,13 +98,13 @@ impl Run<'_> {
         &mut self,
         prod: &ContourProducts,
         gps: LatLon,
-        scale: (f64, f64),
+        bands: &[ScaleBand],
     ) -> Step<Option<Box<GeorefResponse>>> {
         let (w, h) = self.size();
         let key = self.contour_key();
         let near = NEAR_RADIUS_M.min(self.radius_m);
         let origin = latlon_to_merc(gps.lat, gps.lon);
-        let Some((wkey, plan, base)) = self.wide_setup(gps, scale) else { return Ok(None) };
+        let Some((wkey, plan, bases)) = self.wide_setup(gps, bands) else { return Ok(None) };
         let (zoom, radius) = (plan.zoom, wkey.radius_m as f64);
         let n = plan.chunks.len();
         let min_scale = min_searchable_scale(w, h, crate::dem::resolution(zoom), gps.lat);
@@ -118,7 +118,8 @@ impl Run<'_> {
                 Some(r) => r,
                 None => {
                     self.need(&plan.chunks[ci].tiles, "wide", key)?;
-                    self.search_chunk(prod, &wkey, &plan, ci, &base, origin, near)?
+                    let base = &bases[plan.chunks[ci].scale_band.min(bases.len() - 1)];
+                    self.search_chunk(prod, &wkey, &plan, ci, base, origin, near)?
                 }
             };
             self.searched_tiles.extend(res.present.iter().copied());
@@ -138,6 +139,7 @@ impl Run<'_> {
                 "wide".into(),
                 json!({
                     "zoom": zoom,
+                    "zooms": wkey.bands.iter().map(|b| b.0).collect::<Vec<u8>>(),
                     "chunks": n,
                     "chunks_searched": ci + 1,
                     "band_chunks": plan.band_chunks,
@@ -158,50 +160,69 @@ impl Run<'_> {
     }
 
     /// The wide search's key, plan (cached in the session) and the coarse
-    /// search parameters its chunks share; None when the map is too small
-    /// to be searched beyond the near disc (`wide_reach`). The plan covers
-    /// the radius the map's size allows (`wide_limit`).
-    fn wide_setup(&mut self, gps: LatLon, scale: (f64, f64)) -> Option<(WideKey, Arc<WidePlan>, SearchParams)> {
+    /// search parameters of each scale band's chunks; None when the map is
+    /// too small to be searched beyond the near disc (`wide_reach`). The
+    /// plan covers the radius the map's size allows (`wide_limit`, from the
+    /// first band: coarser bands' maps cover more ground and reach as far).
+    /// The bands' chunks are searched in one sweep, nearest first
+    /// (`wide::merge_plans`).
+    fn wide_setup(&mut self, gps: LatLon, bands: &[ScaleBand]) -> Option<(WideKey, Arc<WidePlan>, Vec<SearchParams>)> {
         let (w, h) = self.size();
         let near = NEAR_RADIUS_M.min(self.radius_m);
-        let reach = wide_reach(self.radius_m, scale.1, w, h, gps.lat);
-        self.wide_limit = match reach {
+        let reaches: Vec<Option<(u8, f64)>> =
+            bands.iter().map(|b| wide_band_reach(self.radius_m, b, w, h, gps.lat)).collect();
+        let first = reaches.first().copied().flatten();
+        self.wide_limit = match first {
             Some((_, r)) if r < self.radius_m => Some(r),
             Some(_) => None,
             None => Some(near),
         };
-        let (zoom, reach_m) = reach?;
+        let (_, reach_m) = first?;
         let origin = latlon_to_merc(gps.lat, gps.lon);
-        let base = SearchParams {
-            center_merc: origin,
-            search_radius_m: reach_m,
-            scale_min: scale.0,
-            scale_max: scale.1,
-            // North up: a rotation sweep would cost 36 times as much.
-            rotations_deg: vec![0.0],
-            top_k: CHUNK_TOP_K,
-            region: None,
-        };
+        let mut bases = Vec::new();
+        let mut wide_bands = Vec::new();
+        for (band, reach) in bands.iter().zip(&reaches) {
+            let Some((zoom, r)) = *reach else { continue };
+            bases.push(SearchParams {
+                center_merc: origin,
+                search_radius_m: r,
+                scale_min: band.lo,
+                scale_max: band.hi,
+                // North up: a rotation sweep would cost 36 times as much.
+                rotations_deg: vec![0.0],
+                top_k: CHUNK_TOP_K,
+                region: None,
+            });
+            wide_bands.push((zoom, [band.lo.to_bits(), band.hi.to_bits()]));
+        }
         let wkey = WideKey {
             contour: self.contour_key(),
             origin: [origin.0.round() as i64, origin.1.round() as i64],
             radius_m: reach_m.round() as i64,
             near_m: near.round() as i64,
-            zoom,
-            scale: [scale.0.to_bits(), scale.1.to_bits()],
+            bands: wide_bands.clone(),
             max_tiles: self.max_tiles,
             band: self.band_merc().map(|b| [b.min_x, b.min_y, b.max_x, b.max_y].map(f64::to_bits)),
         };
         let (max_tiles, band) = (self.max_tiles, self.band_merc());
-        let plan = self
-            .wide_plan(&wkey, || plan_wide(origin, reach_m, near, zoom, map_half_extent(&base, w, h), max_tiles, band));
-        Some((wkey, plan, base))
+        let plan = self.wide_plan(&wkey, || {
+            let plans = bases
+                .iter()
+                .zip(&wide_bands)
+                .map(|(base, &(zoom, _))| {
+                    let half = map_half_extent(base, w, h);
+                    plan_wide(origin, base.search_radius_m, near, zoom, half, max_tiles, band)
+                })
+                .collect();
+            merge_plans(plans)
+        });
+        Some((wkey, plan, bases))
     }
 
     /// Plan the wide search before the hint and near areas run, so the
     /// progress counts its tiles from the first call.
-    pub(super) fn plan_wide_progress(&mut self, gps: LatLon, scale: (f64, f64)) {
-        if let Some((wkey, plan, _)) = self.wide_setup(gps, scale) {
+    pub(super) fn plan_wide_progress(&mut self, gps: LatLon, bands: &[ScaleBand]) {
+        if let Some((wkey, plan, _)) = self.wide_setup(gps, bands) {
             self.wide_counts(&wkey, &plan);
         }
     }
@@ -260,7 +281,7 @@ impl Run<'_> {
             Vec::new()
         } else {
             let t = Instant::now();
-            let dem = lock(&self.s.dem).mosaic(plan.zoom, &chunk.mosaic);
+            let dem = lock(&self.s.dem).mosaic(chunk.zoom, &chunk.mosaic);
             self.time("wide_dem", t);
             let b = chunk.placement;
             let params = SearchParams {
@@ -309,10 +330,12 @@ impl Run<'_> {
         Ok(res)
     }
 
-    /// Zoom-11 re-check parameters for a coarse candidate.
-    fn recheck_params(&self, c: &Candidate) -> SearchParams {
+    /// Re-check parameters for a coarse candidate, with the DEM box and zoom
+    /// of the re-check: zoom 11 for the near zoom's band, one zoom finer than
+    /// its own band for a small-scale map (`wide::recheck_zoom`).
+    fn recheck_params(&self, c: &Candidate) -> (SearchParams, MercBox, u8) {
         let (w, h) = self.size();
-        SearchParams {
+        let p = SearchParams {
             center_merc: c.center_merc(w, h),
             search_radius_m: RECHECK_RADIUS_M,
             scale_min: c.scale_m_per_px / RECHECK_SCALE_TOL,
@@ -320,7 +343,12 @@ impl Run<'_> {
             rotations_deg: vec![c.rotation_deg],
             top_k: 1,
             region: None,
-        }
+        };
+        let lat = merc_to_latlon(p.center_merc.0, p.center_merc.1).0;
+        let z = recheck_zoom(c.scale_m_per_px, w, h, lat);
+        let band = ScaleBand { zoom: z, lo: p.scale_min, hi: p.scale_max };
+        let b = required_dem_box_capped(&p, w, h, band.max_box_half_m(lat));
+        (p, b, z)
     }
 
     /// The zoom-11 re-check of one candidate (cached): its best peak 4 km
@@ -333,9 +361,7 @@ impl Run<'_> {
             return Ok(r);
         }
         let (w, h) = self.size();
-        let p = self.recheck_params(c);
-        let b = required_dem_box(&p, w, h);
-        let z = near_zoom(merc_to_latlon(p.center_merc.0, p.center_merc.1).0);
+        let (p, b, z) = self.recheck_params(c);
         self.need(&tiles_covering(z, &b), "recheck", self.contour_key())?;
         let t = Instant::now();
         let dem = lock(&self.s.dem).mosaic(z, &b);
@@ -386,15 +412,14 @@ impl Run<'_> {
     ) -> Step<Option<Box<GeorefResponse>>> {
         let (w, h) = self.size();
         let key = self.contour_key();
-        let zoom = wkey.zoom;
-        // 1. Zoom-11 re-checks (coarser far north or south: `near_zoom`).
+        let zoom = wkey.bands.first().map_or(crate::wide::NEAR_ZOOM, |b| b.0);
+        // 1. Zoom-11 re-checks (coarser far north or south: `near_zoom`, and
+        //    for small-scale maps: `wide::recheck_zoom`).
         let plans: Vec<(Candidate, SearchParams, MercBox, u8)> = res
             .cands
             .iter()
             .map(|c| {
-                let p = self.recheck_params(c);
-                let b = required_dem_box(&p, w, h);
-                let z = near_zoom(merc_to_latlon(p.center_merc.0, p.center_merc.1).0);
+                let (p, b, z) = self.recheck_params(c);
                 (c.clone(), p, b, z)
             })
             .collect();
@@ -443,17 +468,20 @@ impl Run<'_> {
         }
         // 2. Refine those that stand out, best first.
         strong.sort_by(|a, b| b.score.total_cmp(&a.score));
+        // Candidates apart by the distinct distance of the larger map extent.
+        let apart = |a: &Candidate, b: &Candidate| {
+            cand_dist_m(a, b, w, h) >= distinct_m(a.scale_m_per_px.max(b.scale_m_per_px), w, h)
+        };
         let mut distinct: Vec<Candidate> = Vec::new();
         for c in strong {
-            if distinct.iter().all(|d| cand_dist_m(d, &c, w, h) >= DISTINCT_M) {
+            if distinct.iter().all(|d| apart(d, &c)) {
                 distinct.push(c);
             }
         }
         let pool = self.wide_pool(wkey, ci);
         for g in distinct {
             self.check_cancel()?;
-            let other =
-                pool.iter().filter(|p| cand_dist_m(p, &g, w, h) >= DISTINCT_M).map(|p| p.score).fold(0.0f32, f32::max);
+            let other = pool.iter().filter(|p| apart(p, &g)).map(|p| p.score).fold(0.0f32, f32::max);
             let margin = g.score / other.max(0.05);
             let Some(fp) = fine_plan(&g.transform, w, h) else { continue };
             let rk = self.recheck_key(&g);

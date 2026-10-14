@@ -3,8 +3,8 @@
 //! ```text
 //! cargo run --release --example georef_cli -- <image.jpg|png> [--gps lat,lon] [--ocr ocr.json]
 //!     [--dem-dir dir] [--dpi N] [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b]
-//!     [--rotate] [--verify] [--photo] [--hint lat,lon[,radius_m]]... [--max-tiles N]
-//!     [--dump-mask out.png] [--missing-out tiles.txt]
+//!     [--rotate] [--verify] [--photo] [--hint lat,lon[,radius_m][,name]]... [--max-tiles N]
+//!     [--dump-mask out.png] [--missing-out tiles.txt] [--fit-check a,b,c,d,e,f]
 //! ```
 //!
 //! Runs the same request / `need_dem` loop as the app: tiles are read from
@@ -19,14 +19,25 @@
 //! the colour mask (the same choice of model, recomputed here), 0 off it.
 //! `--missing-out` appends every tile the core asked for that is not in
 //! `--dem-dir` (`z x y` per line) to a file, so a benchmark can fetch them.
+//!
+//! `--fit-check a,b,c,d,e,f` (a pixel → Mercator affine, e.g. a case's
+//! truth) georeferences nothing: it prints the fit of that transform to the
+//! contours on the fine DEM the session would use (the refinement's metrics
+//! and confidence factors), then the refinement from it and from it shifted
+//! by 300 m, 1 km and 2.8 km, with how far each moved the image corners.
 
 use mapme_core::contour::normalize_illumination;
 use mapme_core::contour_lines::contour_mask;
-use mapme_core::dem::TileId;
+use mapme_core::dem::{tiles_covering, DemStore, TileId};
+use mapme_core::geo::{merc_to_latlon, Affine};
 use mapme_core::georef::{ContourProducts, GeorefRequest, GpsFix, Session, Status};
 use mapme_core::hints::{HintSource, SearchHint, DEFAULT_HINT_RADIUS_M};
 use mapme_core::image::Rgb8;
 use mapme_core::labels::OcrObservation;
+use mapme_core::refine::{
+    evaluate_prepared, fit_confidence, fit_evidence, fit_quality, refine_dem_box, refine_prepared_with, PreparedDem,
+    RefineOptions, RefineResult,
+};
 use mapme_core::skeleton::default_sampling;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -34,7 +45,8 @@ use std::time::Instant;
 
 const USAGE: &str = "usage: georef_cli <image.jpg|png> [--gps lat,lon] [--ocr ocr.json] [--dem-dir dir] [--dpi N] \
                      [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b] [--rotate] [--verify] [--photo] \
-                     [--hint lat,lon[,radius_m]]... [--max-tiles N] [--dump-mask out.png] [--missing-out tiles.txt]";
+                     [--hint lat,lon[,radius_m][,name]]... [--max-tiles N] [--dump-mask out.png] [--missing-out tiles.txt] \
+                     [--fit-check a,b,c,d,e,f]";
 
 /// Most `need_dem` rounds before giving up (a 2 000 km wide search takes ~100).
 const MAX_ROUNDS: usize = 300;
@@ -71,6 +83,7 @@ fn run() -> Result<bool, String> {
     let mut dem_dir: Option<PathBuf> = None;
     let mut dump_mask: Option<PathBuf> = None;
     let mut missing_out: Option<PathBuf> = None;
+    let mut fit_check: Option<Vec<f64>> = None;
     let mut req = GeorefRequest::default();
     while let Some(a) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -94,15 +107,25 @@ fn run() -> Result<bool, String> {
             "--verify" => req.verify = true,
             "--photo" => req.photo = true,
             "--hint" => {
+                // lat,lon[,radius_m][,name]: with a name, a place named on the map that the app
+                // geocoded (source "place"); without one, an area the user picked.
                 let s = value("--hint")?;
-                let n = s.split(',').count();
-                let v = numbers(&s, n.clamp(2, 3), "--hint")?;
+                let parts: Vec<&str> = s.splitn(4, ',').map(str::trim).collect();
+                let (nums, name): (Vec<&str>, Option<String>) = match parts.as_slice() {
+                    [a, b] => (vec![a, b], None),
+                    [a, b, c] if c.parse::<f64>().is_ok() => (vec![a, b, c], None),
+                    [a, b, c] => (vec![a, b], Some(c.to_string())),
+                    [a, b, c, d] if c.parse::<f64>().is_ok() => (vec![a, b, c], Some(d.to_string())),
+                    [a, b, c, d] => (vec![a, b], Some(format!("{c},{d}"))),
+                    _ => return Err("--hint: expected lat,lon[,radius_m][,name]".into()),
+                };
+                let v = numbers(&nums.join(","), nums.len(), "--hint")?;
                 req.hints.push(SearchHint {
                     lat: v[0],
                     lon: v[1],
                     radius_m: v.get(2).copied().unwrap_or(DEFAULT_HINT_RADIUS_M),
-                    source: HintSource::User,
-                    name: None,
+                    source: if name.is_some() { HintSource::Place } else { HintSource::User },
+                    name,
                 });
             }
             "--max-tiles" => {
@@ -110,6 +133,7 @@ fn run() -> Result<bool, String> {
             }
             "--dump-mask" => dump_mask = Some(PathBuf::from(value("--dump-mask")?)),
             "--missing-out" => missing_out = Some(PathBuf::from(value("--missing-out")?)),
+            "--fit-check" => fit_check = Some(numbers(&value("--fit-check")?, 6, "--fit-check")?),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(true);
@@ -129,6 +153,10 @@ fn run() -> Result<bool, String> {
     eprintln!("loaded {} ({}x{}) in {:.0} ms", image.display(), img.w, img.h, t.elapsed().as_secs_f64() * 1e3);
     if let Some(path) = &dump_mask {
         dump_contours(&img, &req, path)?;
+    }
+    if let Some(m) = fit_check {
+        let t = Affine { a: m[0], b: m[1], c: m[2], d: m[3], e: m[4], f: m[5] };
+        return check_fit(&img, &req, dem_dir.as_deref(), &t);
     }
     let session = Session::new(img);
     let mut missing_tiles: Vec<TileId> = Vec::new();
@@ -181,6 +209,82 @@ fn run() -> Result<bool, String> {
         eprintln!("  added {added} tile(s), {missing} missing");
     }
     Err(format!("still need DEM tiles after {MAX_ROUNDS} rounds"))
+}
+
+/// `--fit-check`: the fit of `t` on the fine DEM (zoom 13, coarser while the
+/// map would need more than 36 tiles, as the session plans it), and the
+/// refinements from `t` and from `t` shifted.
+fn check_fit(img: &Rgb8, req: &GeorefRequest, dem_dir: Option<&Path>, t: &Affine) -> Result<bool, String> {
+    let dir = dem_dir.ok_or("--fit-check needs --dem-dir")?;
+    let src = if req.photo { normalize_illumination(img) } else { img.clone() };
+    let prod = ContourProducts::compute_with(&src, req.contour_rgb, req.photo);
+    let (w, h) = (img.w, img.h);
+    let bbox = refine_dem_box(t, w, h);
+    let mut zoom = 13u8;
+    while zoom > 6 && tiles_covering(zoom, &bbox).len() > 36 {
+        zoom -= 1;
+    }
+    let mut store = DemStore::new();
+    let tiles = tiles_covering(zoom, &bbox);
+    let mut missing = 0;
+    for &tile in &tiles {
+        match std::fs::read(tile_path(dir, tile)) {
+            Ok(png) => store.add_png(tile, &png)?,
+            Err(_) => missing += 1,
+        }
+    }
+    let dem = store.mosaic(zoom, &bbox);
+    let prep = PreparedDem::new_cropped(&dem, &bbox);
+    let (_, cy) = t.apply(w as f64 / 2.0, h as f64 / 2.0);
+    let cos = merc_to_latlon(0.0, cy).0.to_radians().cos();
+    eprintln!(
+        "fit check: {} segments, {} samples, mask {:.4}; zoom {zoom}, {} tiles ({missing} missing); {:.3} m/px",
+        prod.samples.n_segs,
+        prod.samples.len(),
+        prod.mask_fraction,
+        tiles.len(),
+        t.mean_scale() * cos
+    );
+    let show = |what: &str, r: &RefineResult| {
+        // Largest corner displacement from `t` (ground metres).
+        let corners = [(0.0, 0.0), (w as f64, 0.0), (w as f64, h as f64), (0.0, h as f64)];
+        let off = corners
+            .iter()
+            .map(|&(x, y)| {
+                let (p, q) = (t.apply(x, y), r.transform.apply(x, y));
+                (p.0 - q.0).hypot(p.1 - q.1) * cos
+            })
+            .fold(0.0, f64::max);
+        println!(
+            "{what:>16}: fit {:.3} (quality {:.3}, evidence {:.3}) seg std {:.2} m, cost {:.2}, inliers {:.2}, \
+             expl {:.4}, interval {:.1} m snr {:.2}, align {:.3}, relief {:.0} m, cover {:.2}, {} segs, affine {}, \
+             corners {:.0} m",
+            fit_confidence(r),
+            fit_quality(r),
+            fit_evidence(r),
+            r.median_seg_std_m,
+            r.cost_m,
+            r.inlier_fraction,
+            r.explained_variance,
+            r.contour_interval_m,
+            r.interval_snr,
+            r.gradient_alignment,
+            r.relief_m,
+            r.dem_coverage,
+            r.n_segments,
+            r.affine,
+            off
+        );
+    };
+    show("given", &evaluate_prepared(&prod.samples, &prep, t));
+    let opts = RefineOptions { photo: req.photo };
+    for (dx, dy) in [(0.0, 0.0), (300.0, 0.0), (0.0, -1000.0), (2000.0, 2000.0)] {
+        let k = 1.0 / cos;
+        let start = Affine { c: t.c + dx * k, f: t.f + dy * k, ..*t };
+        let r = refine_prepared_with(&prod.samples, &prep, &start, &opts);
+        show(&format!("from {dx:+.0},{dy:+.0} m"), &r);
+    }
+    Ok(true)
 }
 
 /// Appends `z x y` lines for the tiles the core asked for that were not in the DEM directory.

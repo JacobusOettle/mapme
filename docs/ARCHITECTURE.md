@@ -46,7 +46,12 @@ of interest.
   tiling in Web Mercator. Zoom 11 (≈76 m Mercator px) is used for the coarse
   search within 50 km of the GPS fix and around hints, zoom 10 (≈153 m) and
   zoom 9 (≈306 m) for the wide search beyond (see *Wide search*), and zoom 13
-  (≈19 m) for refinement and verification. Mercator cells shrink on the
+  (≈19 m) for refinement and verification. Small-scale maps (over 12 m/px)
+  are searched on zooms 8–10 instead (*Scale bands*) and refined on zoom
+  12–10 (a refinement takes at most 36 tiles; a finer zoom does not help a
+  generalised small-scale map: on zoom-11 tiles a 1:250 000 sheet at 50 m/px
+  fits worse than on zoom 10, its lines crossing detail it leaves out).
+  Mercator cells shrink on the
   ground by cos(latitude), so past 60° each coarse zoom is one coarser (two
   past 75.5°, three past 82.8°: `wide::zoom_at_latitude`), keeping the
   ground detail and the tile count of the low latitudes.
@@ -112,11 +117,144 @@ order:
    * *Confidence*: coarse peak ratio (best vs best distinct location) +
      refined robust cost + inlier fraction. If the map is not in the search
      area, the result is a low score and `failed` status, never a confident
-     wrong answer.
+     wrong answer. See *Any map: scales, priors, units* for what keeps this
+     true beyond 1:25 000 sheets.
 3. **Manual control points** (`control_points.rs`): the user taps matching
    points on the map and on an Apple satellite map (or "I'm here" at their
    GPS position). 2 points give a similarity, 3 an affine, 4+ an affine
    (homography for photos).
+
+### Any map: scales, priors, units
+
+The pipeline was first tuned on 1:25 000 sheets at 300 dpi (1.9 m/px, 5 m
+contours, refined on zoom 13). Maps from elsewhere (Gaia GPS exports,
+1:250 000 sheets, screenshots, the raster of a PDF imported as an image)
+differ in scale, contour interval, units and furniture:
+
+* **Scale bands** (`wide::scale_bands`, `wide::default_scale_range`). Without
+  a scale prior the search covers 0.4–50 m/px, up to the scale at which the
+  image's long side would show 150 km (`MAX_MAP_EXTENT_M`: 30 m/px for a
+  4 960 px A3 page). Scales up to 12 m/px (`FINE_MAX_SCALE`) are searched as
+  before on zoom-11 tiles, and first; the rest is a band of its own on the
+  coarsest zoom (at most three coarser) on which the band's smallest scale
+  keeps a template of 64 cells (`band_zoom`: zoom 10 for a 1 118 × 791 px
+  export, 9 or 8 for a 300-dpi page): on zoom 11 those templates would be
+  searched on a 4–16× downsampled mosaic anyway, and the mosaic holding such
+  a map would be hundreds of tiles. The coarse band's DEM box may hold as many
+  cells as zoom 11's (`ScaleBand::max_box_half_m`: 240 km on zoom 9). Each
+  hint area and the near disc search the fine band (inner 20 km, then 50 km),
+  then the coarse band over the whole disc; a coarse band refines only
+  candidates whose peak ratio reaches 1.15 (true small-scale matches peak at
+  3–8: refining three wrong ones costs ~2 s in every search the map is not
+  in). A coarse candidate is re-checked one zoom finer than its band
+  (`wide::recheck_zoom`). The wide search plans each band (`wide_band_reach`:
+  the fine band on zoom 9/10 as before, the coarse one up to two zooms
+  coarser) and merges their chunks into one sweep, nearest first
+  (`wide::merge_plans`: tiles are released after their last use in the merged
+  order, so bands sharing a zoom never ask for a released tile).
+  `diagnostics.search_areas[].band` is `{zoom, min, max}`,
+  `diagnostics.wide.zooms` the bands' wide zooms. At the fine end a map's
+  template must keep 24 cells on zoom 11: 0.64 m/px for a 300-dpi page
+  (1:7 600), 1.4 m/px for a 1 170 px phone screenshot; finer scales of the
+  default range are skipped there. A scale prior wholly finer than that (a
+  1:5 000 plan at 300 dpi) is searched on the zoom that reaches it (12 or 13),
+  in a box of as many cells (±30 km, ±15 km).
+* **Distinct places** (`search::distinct_m`): candidates closer than
+  max(2 km, 8 % of the map's short side) are one place. A 1:25 000 sheet
+  keeps 2 km; a large-area export's correlation peaks are wider than that,
+  and a peak's own shoulder must not count as the runner-up.
+* **Refining small-scale maps**: the translation grid on the coarsest DEM
+  level spans ±max(450 m, 15 map pixels). `refine::seg_std_floor_m` is the
+  within-segment spread a right fit stays under: 4 m on zoom 13 as always,
+  × √(cell / 19.1 m) on coarser tiles, or 0.35 × the map's pixel, whichever
+  is largest; the fit-quality factor runs from it (1) to three times it
+  (0). A 1:250 000 sheet at 25 m/px fits its true place at 11–25 m on zoom
+  10 and wrong places at 40–80 m; with the fixed 4–12 m it was never
+  accepted. Zoom 10 it stays: on zoom-11 tiles a generalised 1:250 000
+  sheet at 50 m/px fits worse (its lines cross detail it leaves out:
+  gradient alignment 0.42 instead of 0.36, fit 0.31 instead of 0.82).
+* **Regional projections**: a map in UTM or a national grid is no affine
+  image of Web Mercator once it spans tens of km (Mercator's scale grows by
+  tan(lat) / R per metre north: 1 % over 75 km at 40°). The best affine fit
+  of the 1:250 000 Rockies sheet (2 000 × 1 500 px at 50 m/px, UTM) to its
+  truth is 104 m off (median; 200 m at the edges), a homography 53 m. A
+  map whose samples span more than 40 km (ground diagonal) therefore gets a
+  projective stage after the affine one (`refine::REGIONAL_SPAN_M`), kept
+  if it lowers the cost by 1 % with perspective terms ≤ 0.02 over the
+  samples' extent and a near-conformal local part: that sheet 118 → 59 m,
+  a 1:100 000 Norway sheet at 20 m/px 41 → 29 m; Web Mercator exports
+  (OpenTopoMap at 20 m/px) keep their affine fit.
+* **Gradient alignment** (`RefineResult::gradient_alignment`, Σ|g·t̂| / Σ|g|
+  over the samples, g the DEM gradient, t̂ the contour's direction mapped to
+  the ground): contour lines run across the slope, so right fits stay low
+  (0.11–0.26 on every benchmark map and real sheet, 0.27–0.31 on flat ground,
+  0.36 for a 1:250 000 sheet on zoom-10 tiles) while lines lying any which way
+  give 2/π ≈ 0.64. A wrong fit that keeps its levels (few or short segments
+  laid along gentle slopes: a sparse mask) still crosses the steep slopes:
+  0.34 at the least with 15–21 segments, 0.46 with 900 or more.
+  `fit_quality` multiplies by 1 − ramp(alignment, a, a + 0.07…0.08), a =
+  0.26 up to 50 segments … 0.38 from 400 (`alignment_limits`). The far runs
+  of the benchmark (76 maps, 90–110 km away) refined 21 wrong candidates to a
+  fit of 0.3–1.0 without it (a Gaia page at 1.0 for a place 44 km off, at the
+  wrong scale); with it, none of the 482 wrong candidates the far runs of
+  the 76 maps and 6 Gaia cases refine (65 maps have contours to refine)
+  fits above 0 (alignment 0.336 at the least).
+* **Scale priors**. A printed ratio ("1:25 000") with the request's dpi, as
+  before: ±25 %, a constraint (`scale_range.source` "scale_label"). A scale
+  bar (`scalebar.rs`), with or without a dpi: a row of tick labels ("0",
+  "1", "2 km": pixels per unit by least squares; or just "0" and "2 km" at
+  the bar's two ends, within 1.5 text heights of one baseline), else a round
+  distance with its unit ("1 mi", "2 km", "500 ft", "0.5 mi") and the bar
+  line measured beside it in the image (the longest dark horizontal run
+  within 2.5 text heights of the label, under it or reaching to within 1.5
+  text heights of it, 3–60 text heights long and thin; a bar with end ticks
+  is measured between the ticks' centres). Tick labels come first: beside
+  "2 km" at the end of a bar of alternating blocks the line is one block
+  (four synthetic sheets read 7–11× too coarse that way). It gives ground
+  m/px ±15 % (`diagnostics.scale_bar`, source "scale_bar"), a prior, not a
+  constraint: hint and near areas search its band first (the inner 20 km,
+  then 50 km), then the default bands over the whole disc at once; the wide
+  search (costly) its range alone. Of the 76 benchmark maps 57 have a bar
+  read, all 57 within 15 % (the 19 others: no bar, or labels OCR misses).
+  The Gaia pages: "1 mi" over 532 px → 3.025 m/px (truth 3.029 across ×
+  3.077 down), "2 mi" over 421.5 px → 7.636 m/px (7.650 × 7.771). Photos
+  and exported rasters with a bar get a prior too. North-up notes ("Web
+  Mercator", "EPSG: 3857") change nothing: the search is north up unless
+  `allow_rotation`.
+* **Refinements reused**: a candidate whose start lies within 100 m
+  (Mercator, at every image corner) or two map pixels of one refined before
+  on the same DEM takes that result (the whole near disc finding the inner
+  disc's peaks again, the default range after a scale bar's band).
+* **Units** (`labels::height_unit`). Heights are in feet when the map says so
+  ("Gaia Topo (feet)", "CONTOUR INTERVAL 40 FEET", "Elevations in feet"),
+  when most of its heights have five digits (two or more: no metre height
+  does), or, nothing said, when the terrain agrees: once the session holds
+  the zoom-12/13 tiles under the located map, spot heights read as metres
+  that fit it as feet (two or more, over twice as many as fit as metres) are
+  converted. A height in feet has 3–5 digits (≤ 29 100 ft) and no leading
+  zero; a five-digit one is no UTM easting (a grid value is round). POIs keep
+  the printed text ("10876") with `elevation_m` in metres (3 315.0), and the
+  spot-height check against the DEM compares metres. The refinement assumes
+  no interval, it measures it (`contour_interval_m`: 24.0 m on the 80 ft Gaia
+  map, 48.3 m on the 160 ft one, 92–100 m on 1:250 000 sheets).
+
+Measured on the contour benchmark (`fixtures/tools/bench_contours.py`: the
+76 synthetic maps and the 5 real ones, GPS at the centre / 10–25 km off /
+~100 km away), against the search as it was (HEAD 5c5702e): located at the
+centre 48 → 51 of 81 (by true m/px: under 3: 3 → 3, 3–6: 26 → 26, 6–12:
+15 → 15, 12–25: 4 → 5 plus 2 within 100 m, 25–50: 0 → 2), the same from
+the offset fix; confident wrong answers 1 → 0 (a Gaia-like page placed
+820 m off at confidence 0.5 now fails); from ~100 km nothing is located,
+before or after. The user's Gaia rasters: the 9.1 m/px one located before
+and after (7.7 m), the 23 m/px one now (12.3 m), both from 450 km through
+a geocoded place name (`tests/gaia.rs`); the 300-dpi pages still find no
+contours (extraction). Time, the two builds alternating on 20 maps (one
+process at a time, same machine load): searches that find the map 1.25 →
+0.86 s median (38.1 → 22.8 s in all: the scale bar's band first, the
+small-scale maps now found at once instead of failing); searches that
+cannot (the fix 100 km away) 3.74 → 3.76 s median, 85.9 → 97.1 s in all
+(+13 %: the coarse band, and the default range after a scale bar's band),
+8.7 → 10.9 s at most.
 
 ### Grid labels as a phone reads them
 
@@ -625,9 +763,15 @@ exact lists, checked against the images.
    (`LEGEND_WORDS`, also cut short or run together with their capitals:
    "Non-Peren", "PerennialRiver"; a one-word name such as "Lakeview" or
    "PARKVIEW" is a name). Legend words with a number are a numbered place
-   ("CAMP 2", "HUT 4"; "2 km" is not).
+   ("CAMP 2", "HUT 4"; "2 km" is not). Credits, attribution and projection
+   notes of map apps and tile services (`labels::credit_text`: "Gaia Topo
+   (feet): © Gaia GPS, OpenStreetMap", the "GAIAGPS" logo, "Web Mercator |
+   EPSG: 3857", "© Mapbox", "OpenStreetN" cut short) are furniture too, and
+   never a hint query.
 3. *Spot heights*: three or four digits, not a multiple of 50 (contour
-   labels), −400…8 850 m, also with the triangle read beside it ("1501 A",
+   labels), −400…8 850 m; on a map in feet (`labels::height_unit`, see *Any
+   map*) three to five digits, up to 29 100 ft, converted to metres at the
+   end (the printed text stays the name); also with the triangle read beside it ("1501 A",
    "▲ 1720"; an "A" in front is a road's: "A 470"). A height with fewer digits than nearly all others and under
    half their median is a misread ("112" for a "1412" a grid line cuts); so is
    a three-digit one well under a sheet of four-digit heights in one thousand
@@ -697,6 +841,28 @@ exact lists, checked against the images.
    apart from its feature word ("HLOBANE" of HLOBANE KLOOF) and two names
    printed side by side along a border, whose boxes overlap
    ("KWAZULU-NATAL", "LESOTHO").
+8. *Wrapped labels* (`join_stacked`). Screen maps wrap names over lines,
+   centred ("Giant's" / "Castle", "Thaba-" / "Putsoa", "Bannerman" / "Hut"
+   on Gaia GPS): lines across the map of about the same letter height (within
+   0.7×), centred on each other within 0.6 letter heights, the lower one
+   starting at most 0.6 letter heights under the upper one, are one name, when
+   one of them is a single word (or the upper ends with a hyphen, which joins
+   without a space) and they share no word ("NORTH PEAK" over "SOUTH PEAK",
+   "RAND WATER BOX 1" over "… 2" stay two). The lower line may be legend
+   words ("Hut", "Cave"). A height centred under the name gives it its
+   elevation and makes it a peak. Words a read ran together are split at a
+   capital when one is a feature word ("MountDurnford" → "Mount Durnford";
+   not "KaMasihlenga", "uKhahlamba").
+
+On the RapidOCR stand-ins of the Gaia pages the POIs are "Mount Durnford"
+(peak, 3 294 m, printed 10807), "Langalibalele Pass", "Grysbok Bush",
+"Bannerman Hut", "Ntubeni Pass", "Giant's Castie" (a misread; peak, 3 315 m)
+…, the heights in feet as metres; the hint queries start "Mount Durnford",
+"Grysbok Bush", "Langalibalele Pass" (map A) and "Bannerman Hut",
+"Bannerman's Pass", "KaMasihlenga Pass", "Grysbok Bush", "Ntubeni Pass",
+"Langalibalele Pass" (map B); before, "Gaia GPS", "Gaia Topo Gaia GPS",
+"OpenStreetMap" and "Web Mercator" led both, "Web Mercator|EPSG:3857" was a
+place and the heights (10807 → 10 807 m) were dropped or kept in feet.
 
 On Vision's reads this leaves 54 POIs on Grootkloof (56 before), 53 on Castle
 Gorge (57) and the same 33 on Mhlabatini; on the RapidOCR stand-ins no name
@@ -774,7 +940,8 @@ on coarser tiles, chunk by chunk, and verifies candidates on finer ones.
    holding both; the map centre lies along the offset from that labelled
    point to the image centre at the unknown scale, so the hint is the disc
    around that segment (scale range from an OCR'd "1:25 000" and the dpi, or
-   0.4–12 m/px), plus 15 % of the offset for a map that is not north up and 2 km.
+   0.4–12 m/px: a map with coordinate labels is no small-scale overview),
+   plus 15 % of the offset for a map that is not north up and 2 km.
    Labels of one axis alone (a latitude label and the scale, say) put the map
    centre in a band of latitudes (or longitudes) the same way
    (`hints::label_band`, `diagnostics.label_band`): the wide search takes the
@@ -837,7 +1004,12 @@ searched farther than 50 km away."; `search.searched_radius_m` stops there).
 At zoom 9 the 1:25 000 sheets (6.7 km wide) are just above that floor and
 were found everywhere (below). Scales whose template would be smaller than
 24 cells at the wide zoom are not searched there
-(`diagnostics.wide.min_scale_m_per_px`).
+(`diagnostics.wide.min_scale_m_per_px`). These rules are the near zoom's
+scale band's (up to 12 m/px); a small-scale band (*Any map*) is planned the
+same way from its own scales and map extent, up to two zooms coarser
+(`wide::wide_band_reach`: zoom 7 for a 300-dpi page at 12–30 m/px), and its
+chunks are searched in the same sweep, nearest first (`wide::merge_plans`).
+The measurements below are of the near zoom's band alone.
 
 **Measurements** (`tests/wide_measure.rs`, ignored tests on real Terrarium
 tiles, cached; a 4-core 2.1 GHz Xeon shared with other jobs):
@@ -987,23 +1159,31 @@ tiles instead of ~100) find it in 9 rounds.
 **Estimate** (`mm_search_estimate`, `wide::estimate`): the plan the search
 would make (hint areas, at most 8 after ordering, and the near disc at zoom
 11, the wide chunks; zooms for latitude) for a
-typical 300-dpi A3 sheet at 0.4–12 m/px, plus measured allowances for
+typical 300-dpi A3 sheet over its default scale range (0.4–30 m/px: the
+fine band to 12 m/px on zoom 11, the coarse band on zoom 8 near and in hint
+areas, on zoom 7 in the wide search), plus measured allowances for
 candidate checks (12 zoom-11 tiles per chunk, 16 zoom-13 tiles per
-refinement, two refinements per area); bytes from the tile weights above;
-compute from the measured 0.47 s per million mosaic cells over the default
-scale range (0.17 s with `"scale_known": true`, a scale label read) and 0.6 s
-per refinement, times 1.5 for an iPhone; download at 2 MB/s plus 0.5 s per
-round. From Pretoria, scale unknown:
+refinement, two refinements per area and band); bytes from the tile weights
+above; compute from the measured 0.47 s per million mosaic cells over the
+fine band (0.17 s with `"scale_known": true`, a scale label read; the coarse
+band's mosaics are small) and 0.6 s per refinement, times 1.5 for an iPhone;
+download at 2 MB/s plus 0.5 s per round. From Pretoria, scale unknown (in
+brackets: the fine band alone, as before the coarse band):
 
 | R km | zoom | tiles | MB | rounds | chunks | ~s (compute + download) |
 |---|---|---|---|---|---|---|
-| 20 | 11 | 67 | 1.8 | 2 | 0 | 5 (3.4 + 1.9) |
-| 50 | 11 | 128 | 3.5 | 3 | 0 | 11 (8.2 + 3.2) |
-| 100 | 10 | 231 | 7.5 | 6 | 2 | 19 (12.6 + 6.7) |
-| 250 | 9 | 261 | 11.3 | 8 | 4 | 24 (14.0 + 9.7) |
-| 500 | 9 | 465 | 25.7 | 13 | 9 | 45 (25.3 + 19.3) |
-| 1 000 | 9 | 1 197 | 78.8 | 29 | 25 | 121 (67.5 + 53.9) |
-| 2 000 | 9 | 4 025 | 282.9 | 92 | 88 | 424 (236.3 + 187.5) |
+| 20 | 11 | 103 (67) | 3.0 (1.8) | 4 (2) | 0 | 9 (5.3 + 3.5) (5) |
+| 50 | 11 | 164 (128) | 4.6 (3.5) | 5 (3) | 0 | 15 (10.0 + 4.8) (11) |
+| 100 | 10 | 292 (231) | 10.0 (7.5) | 9 (6) | 3 (2) | 24 (14.6 + 9.5) (19) |
+| 250 | 9 | 321 (261) | 13.7 (11.3) | 11 (8) | 5 (4) | 28 (16.0 + 12.4) (24) |
+| 500 | 9 | 539 (465) | 29.2 (25.7) | 16 (13) | 10 (9) | 50 (27.5 + 22.6) (45) |
+| 1 000 | 9 | 1 344 (1 197) | 86.2 (78.8) | 35 (29) | 29 (25) | 131 (70.6 + 60.6) (121) |
+| 2 000 | 9 | 4 379 (4 025) | 303.6 (282.9) | 103 (92) | 97 (88) | 446 (242.5 + 203.3) (424) |
+
+The coarse band adds few tiles (4 at zoom 8 near, 12–210 at zoom 7 in the
+wide sweep) but its refinements (zoom 13 under each candidate, counted for
+every area) and rounds; a coarse band refines only peaks of ratio 1.15 and
+more, so most searches stay near the bracketed figures.
 
 (For 50 km and more the near disc counts twice: the inner 20 km first, the
 whole disc if the map is not there. A whole search is planned; one that

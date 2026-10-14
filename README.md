@@ -133,6 +133,12 @@ cd core
 cargo test --release                       # unit + integration tests on the Grootkloof fixture
 cargo run --release --example georef_cli -- ../fixtures/grootkloof/map.jpg \
     --gps -25.75,27.45 --dem-dir ../fixtures/grootkloof/dem --dpi 300 [--ocr ../fixtures/grootkloof/ocr.json]
+# a map far from the GPS fix, found through a place named on it (what "Search wider" does)
+cargo run --release --example georef_cli -- ../fixtures/gaia-giants-castle/native.png \
+    --gps -25.83,27.5 --radius-m 2000000 --dem-dir ../fixtures/gaia-giants-castle/dem \
+    --ocr ../fixtures/gaia-giants-castle/ocr_native.json --hint "-29.35,29.483,Giant's Castle"
+# how well a known transform fits the contours (e.g. a fixture's truth)
+cargo run --release --example georef_cli -- <image> --dem-dir <dir> --fit-check a,b,c,d,e,f
 
 # Swift syntax check without Xcode (tree-sitter in a venv)
 python3 -m venv .venv && .venv/bin/pip install tree-sitter==0.26.0 tree-sitter-swift==0.7.4
