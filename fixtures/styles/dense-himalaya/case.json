@@ -1,0 +1,250 @@
+{
+ "name": "dense-himalaya",
+ "image": "map.jpg",
+ "gps": [
+  30.42000000000001,
+  78.12
+ ],
+ "truth_points": [
+  {
+   "x": 136.67,
+   "y": 168.0,
+   "lat": 30.4377932,
+   "lon": 78.0983895
+  },
+  {
+   "x": 475.84,
+   "y": 168.0,
+   "lat": 30.4380272,
+   "lon": 78.1089262
+  },
+  {
+   "x": 815.0,
+   "y": 168.0,
+   "lat": 30.4382604,
+   "lon": 78.119463
+  },
+  {
+   "x": 1154.16,
+   "y": 168.0,
+   "lat": 30.4384927,
+   "lon": 78.13
+  },
+  {
+   "x": 1493.33,
+   "y": 168.0,
+   "lat": 30.4387242,
+   "lon": 78.1405371
+  },
+  {
+   "x": 136.67,
+   "y": 505.5,
+   "lat": 30.4286632,
+   "lon": 78.09866
+  },
+  {
+   "x": 475.84,
+   "y": 505.5,
+   "lat": 30.4288971,
+   "lon": 78.1091957
+  },
+  {
+   "x": 815.0,
+   "y": 505.5,
+   "lat": 30.4291302,
+   "lon": 78.1197316
+  },
+  {
+   "x": 1154.16,
+   "y": 505.5,
+   "lat": 30.4293624,
+   "lon": 78.1302676
+  },
+  {
+   "x": 1493.33,
+   "y": 505.5,
+   "lat": 30.4295938,
+   "lon": 78.1408037
+  },
+  {
+   "x": 136.67,
+   "y": 843.0,
+   "lat": 30.4195332,
+   "lon": 78.0989304
+  },
+  {
+   "x": 475.84,
+   "y": 843.0,
+   "lat": 30.419767,
+   "lon": 78.1094651
+  },
+  {
+   "x": 815.0,
+   "y": 843.0,
+   "lat": 30.42,
+   "lon": 78.12
+  },
+  {
+   "x": 1154.16,
+   "y": 843.0,
+   "lat": 30.4202321,
+   "lon": 78.130535
+  },
+  {
+   "x": 1493.33,
+   "y": 843.0,
+   "lat": 30.4204634,
+   "lon": 78.1410701
+  },
+  {
+   "x": 136.67,
+   "y": 1180.5,
+   "lat": 30.4104031,
+   "lon": 78.0992006
+  },
+  {
+   "x": 475.84,
+   "y": 1180.5,
+   "lat": 30.4106369,
+   "lon": 78.1097344
+  },
+  {
+   "x": 815.0,
+   "y": 1180.5,
+   "lat": 30.4108698,
+   "lon": 78.1202683
+  },
+  {
+   "x": 1154.16,
+   "y": 1180.5,
+   "lat": 30.4111019,
+   "lon": 78.1308023
+  },
+  {
+   "x": 1493.33,
+   "y": 1180.5,
+   "lat": 30.4113331,
+   "lon": 78.1413365
+  },
+  {
+   "x": 136.67,
+   "y": 1518.0,
+   "lat": 30.4012731,
+   "lon": 78.0994707
+  },
+  {
+   "x": 475.84,
+   "y": 1518.0,
+   "lat": 30.4015067,
+   "lon": 78.1100035
+  },
+  {
+   "x": 815.0,
+   "y": 1518.0,
+   "lat": 30.4017396,
+   "lon": 78.1205365
+  },
+  {
+   "x": 1154.16,
+   "y": 1518.0,
+   "lat": 30.4019715,
+   "lon": 78.1310695
+  },
+  {
+   "x": 1493.33,
+   "y": 1518.0,
+   "lat": 30.4022027,
+   "lon": 78.1416027
+  }
+ ],
+ "dem_dir": "../dem/himalaya_foothills",
+ "ocr": "ocr.json",
+ "dpi": null,
+ "m_per_px": 2.9929,
+ "m_per_px_xy": [
+  2.9858,
+  3.0
+ ],
+ "contour_interval_m": 10.0,
+ "style": "dense",
+ "tags": [
+  "dense",
+  "himalaya_foothills",
+  "proj-utm",
+  "units-m",
+  "mpp-3-6",
+  "upsample-none",
+  "page-scan",
+  "rotated",
+  "effect-scan"
+ ],
+ "notes": "Synthetic (fixtures/tools/synth_topo.py): dense 1:25 000 sheet, 10 m interval; region himalaya_foothills (Garhwal foothills near Mussoorie, 500-2300 m). Contours from Terrarium z14, generalised, survey offsets and drafting warp 1.7 px; scan.",
+ "contour_mask": "contour_mask.png",
+ "contour_rgb": [
+  193,
+  160,
+  120
+ ],
+ "region": "himalaya_foothills",
+ "rotation_deg": 358.541,
+ "projection": "utm",
+ "image_size": [
+  1630,
+  1807
+ ],
+ "map_frame_px": [
+  61.3,
+  93,
+  1568.7,
+  1593
+ ],
+ "anisotropy": 0.00475,
+ "relief_m": 998.7,
+ "dem_source_zoom": 14,
+ "scale_denominator": 25000,
+ "contour_units": "m",
+ "n_contour_lines": 382,
+ "grid": {
+  "kind": "utm",
+  "step_m": 1000
+ },
+ "generator": {
+  "spec": {
+   "name": "dense-himalaya",
+   "style": "dense",
+   "region": "himalaya_foothills",
+   "mpp": 3.0,
+   "size": [
+    1500,
+    1500
+   ],
+   "upsample": 1,
+   "upsample_mode": "bilinear",
+   "skew": 0.0,
+   "jpeg_q": 80
+  },
+  "seed": 3674120952,
+  "native_size": [
+   1500,
+   1500
+  ],
+  "native_m_per_px": 3.0,
+  "ppi": 211.7
+ },
+ "gps_variants": {
+  "centre": [
+   30.42000000000001,
+   78.12
+  ],
+  "offset": [
+   30.521942648820563,
+   78.14718563638748
+  ],
+  "far": [
+   31.042615418482104,
+   78.87135780951317
+  ],
+  "offset_km": 11.6,
+  "far_km": 99.7
+ }
+}

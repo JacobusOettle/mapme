@@ -1,0 +1,245 @@
+{
+ "name": "bw-tasmania",
+ "image": "map.jpg",
+ "gps": [
+  -41.65999999999999,
+  145.95
+ ],
+ "truth_points": [
+  {
+   "x": 153.0,
+   "y": 125.45,
+   "lat": -41.6280074,
+   "lon": 145.9083954
+  },
+  {
+   "x": 445.53,
+   "y": 135.66,
+   "lat": -41.6282054,
+   "lon": 145.929454
+  },
+  {
+   "x": 738.07,
+   "y": 145.88,
+   "lat": -41.6283996,
+   "lon": 145.950513
+  },
+  {
+   "x": 1030.6,
+   "y": 156.09,
+   "lat": -41.62859,
+   "lon": 145.9715721
+  },
+  {
+   "x": 1323.13,
+   "y": 166.31,
+   "lat": -41.6287765,
+   "lon": 145.9926314
+  },
+  {
+   "x": 142.79,
+   "y": 417.77,
+   "lat": -41.6438074,
+   "lon": 145.9081287
+  },
+  {
+   "x": 435.33,
+   "y": 427.98,
+   "lat": -41.6440055,
+   "lon": 145.9291925
+  },
+  {
+   "x": 727.86,
+   "y": 438.2,
+   "lat": -41.6441998,
+   "lon": 145.9502566
+  },
+  {
+   "x": 1020.39,
+   "y": 448.41,
+   "lat": -41.6443903,
+   "lon": 145.9713208
+  },
+  {
+   "x": 1312.93,
+   "y": 458.63,
+   "lat": -41.6445769,
+   "lon": 145.9923853
+  },
+  {
+   "x": 132.59,
+   "y": 710.09,
+   "lat": -41.6596073,
+   "lon": 145.9078618
+  },
+  {
+   "x": 425.12,
+   "y": 720.3,
+   "lat": -41.6598056,
+   "lon": 145.9289308
+  },
+  {
+   "x": 717.65,
+   "y": 730.52,
+   "lat": -41.66,
+   "lon": 145.95
+  },
+  {
+   "x": 1010.19,
+   "y": 740.74,
+   "lat": -41.6601906,
+   "lon": 145.9710694
+  },
+  {
+   "x": 1302.72,
+   "y": 750.95,
+   "lat": -41.6603773,
+   "lon": 145.992139
+  },
+  {
+   "x": 122.38,
+   "y": 1002.41,
+   "lat": -41.6754072,
+   "lon": 145.9075947
+  },
+  {
+   "x": 414.91,
+   "y": 1012.63,
+   "lat": -41.6756056,
+   "lon": 145.9286689
+  },
+  {
+   "x": 707.44,
+   "y": 1022.84,
+   "lat": -41.6758001,
+   "lon": 145.9497432
+  },
+  {
+   "x": 999.98,
+   "y": 1033.06,
+   "lat": -41.6759908,
+   "lon": 145.9708178
+  },
+  {
+   "x": 1292.51,
+   "y": 1043.27,
+   "lat": -41.6761776,
+   "lon": 145.9918925
+  },
+  {
+   "x": 112.17,
+   "y": 1294.73,
+   "lat": -41.691207,
+   "lon": 145.9073274
+  },
+  {
+   "x": 404.7,
+   "y": 1304.95,
+   "lat": -41.6914055,
+   "lon": 145.9284067
+  },
+  {
+   "x": 697.24,
+   "y": 1315.16,
+   "lat": -41.6916002,
+   "lon": 145.9494862
+  },
+  {
+   "x": 989.77,
+   "y": 1325.38,
+   "lat": -41.691791,
+   "lon": 145.9705659
+  },
+  {
+   "x": 1282.3,
+   "y": 1335.59,
+   "lat": -41.6919779,
+   "lon": 145.9916458
+  }
+ ],
+ "dem_dir": "../dem/tasmania",
+ "ocr": "ocr.json",
+ "dpi": null,
+ "m_per_px": 5.9974,
+ "m_per_px_xy": [
+  5.9948,
+  6.0
+ ],
+ "contour_interval_m": 20,
+ "style": "bw_photocopy",
+ "tags": [
+  "bw_photocopy",
+  "tasmania",
+  "proj-utm",
+  "units-m",
+  "mpp-6-12",
+  "upsample-none",
+  "page-scan",
+  "rotated",
+  "effect-photocopy"
+ ],
+ "notes": "Synthetic (fixtures/tools/synth_topo.py): black-and-white photocopy of a USGS-like sheet, toner noise, skew; region tasmania (Cradle Mountain, 700-1550 m, lakes). Contours from Terrarium z14, generalised, survey offsets and drafting warp 1.6 px; scan.",
+ "contour_mask": "contour_mask.png",
+ "contour_rgb": [
+  163,
+  162,
+  160
+ ],
+ "region": "tasmania",
+ "rotation_deg": 2.698,
+ "projection": "utm",
+ "image_size": [
+  1433,
+  1527
+ ],
+ "map_frame_px": null,
+ "anisotropy": 0.00087,
+ "relief_m": 660.8,
+ "dem_source_zoom": 14,
+ "scale_denominator": 25000,
+ "contour_units": "m",
+ "n_contour_lines": 254,
+ "grid": {
+  "kind": "utm",
+  "step_m": 1000
+ },
+ "generator": {
+  "spec": {
+   "name": "bw-tasmania",
+   "style": "bw_photocopy",
+   "region": "tasmania",
+   "mpp": 6.0,
+   "size": [
+    1300,
+    1300
+   ],
+   "upsample": 1,
+   "upsample_mode": "bilinear",
+   "skew": 2.0,
+   "jpeg_q": 80
+  },
+  "seed": 1013524470,
+  "native_size": [
+   1300,
+   1300
+  ],
+  "native_m_per_px": 6.0,
+  "ppi": 105.8
+ },
+ "gps_variants": {
+  "centre": [
+   -41.65999999999999,
+   145.95
+  ],
+  "offset": [
+   -41.54832216794382,
+   146.08376342008492
+  ],
+  "far": [
+   -40.680714048930554,
+   146.06253842847556
+  ],
+  "offset_km": 16.7,
+  "far_km": 109.2
+ }
+}

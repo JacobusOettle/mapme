@@ -1,0 +1,250 @@
+{
+ "name": "swiss-patagonia",
+ "image": "map.jpg",
+ "gps": [
+  -49.3,
+  -72.98
+ ],
+ "truth_points": [
+  {
+   "x": 121.0,
+   "y": 117.0,
+   "lat": -49.2688311,
+   "lon": -73.0505504
+  },
+  {
+   "x": 436.0,
+   "y": 117.0,
+   "lat": -49.2682417,
+   "lon": -73.0159356
+  },
+  {
+   "x": 751.0,
+   "y": 117.0,
+   "lat": -49.2676419,
+   "lon": -72.9813219
+  },
+  {
+   "x": 1066.0,
+   "y": 117.0,
+   "lat": -49.2670317,
+   "lon": -72.9467094
+  },
+  {
+   "x": 1381.0,
+   "y": 117.0,
+   "lat": -49.2664112,
+   "lon": -72.912098
+  },
+  {
+   "x": 121.0,
+   "y": 342.0,
+   "lat": -49.2850109,
+   "lon": -73.0499123
+  },
+  {
+   "x": 436.0,
+   "y": 342.0,
+   "lat": -49.2844211,
+   "lon": -73.0152862
+  },
+  {
+   "x": 751.0,
+   "y": 342.0,
+   "lat": -49.283821,
+   "lon": -72.9806612
+  },
+  {
+   "x": 1066.0,
+   "y": 342.0,
+   "lat": -49.2832104,
+   "lon": -72.9460374
+  },
+  {
+   "x": 1381.0,
+   "y": 342.0,
+   "lat": -49.2825896,
+   "lon": -72.9114148
+  },
+  {
+   "x": 121.0,
+   "y": 567.0,
+   "lat": -49.3011906,
+   "lon": -73.0492737
+  },
+  {
+   "x": 436.0,
+   "y": 567.0,
+   "lat": -49.3006005,
+   "lon": -73.0146363
+  },
+  {
+   "x": 751.0,
+   "y": 567.0,
+   "lat": -49.3,
+   "lon": -72.98
+  },
+  {
+   "x": 1066.0,
+   "y": 567.0,
+   "lat": -49.2993891,
+   "lon": -72.9453649
+  },
+  {
+   "x": 1381.0,
+   "y": 567.0,
+   "lat": -49.2987679,
+   "lon": -72.9107309
+  },
+  {
+   "x": 121.0,
+   "y": 792.0,
+   "lat": -49.3173703,
+   "lon": -73.0486346
+  },
+  {
+   "x": 436.0,
+   "y": 792.0,
+   "lat": -49.3167798,
+   "lon": -73.0139858
+  },
+  {
+   "x": 751.0,
+   "y": 792.0,
+   "lat": -49.316179,
+   "lon": -72.9793382
+  },
+  {
+   "x": 1066.0,
+   "y": 792.0,
+   "lat": -49.3155678,
+   "lon": -72.9446917
+  },
+  {
+   "x": 1381.0,
+   "y": 792.0,
+   "lat": -49.3149462,
+   "lon": -72.9100464
+  },
+  {
+   "x": 121.0,
+   "y": 1017.0,
+   "lat": -49.3335499,
+   "lon": -73.0479948
+  },
+  {
+   "x": 436.0,
+   "y": 1017.0,
+   "lat": -49.3329591,
+   "lon": -73.0133347
+  },
+  {
+   "x": 751.0,
+   "y": 1017.0,
+   "lat": -49.3323579,
+   "lon": -72.9786757
+  },
+  {
+   "x": 1066.0,
+   "y": 1017.0,
+   "lat": -49.3317464,
+   "lon": -72.9440179
+  },
+  {
+   "x": 1381.0,
+   "y": 1017.0,
+   "lat": -49.3311244,
+   "lon": -72.9093613
+  }
+ ],
+ "dem_dir": "../dem/patagonia",
+ "ocr": "ocr.json",
+ "dpi": null,
+ "m_per_px": 8.0003,
+ "m_per_px_xy": [
+  8.0006,
+  8.0
+ ],
+ "contour_interval_m": 50,
+ "style": "swiss",
+ "tags": [
+  "swiss",
+  "patagonia",
+  "proj-utm",
+  "units-m",
+  "mpp-6-12",
+  "upsample-none",
+  "page-scan",
+  "rotated",
+  "effect-scan"
+ ],
+ "notes": "Synthetic (fixtures/tools/synth_topo.py): Swiss-like: brown contours, rock drawing without contours, blue glacier contours, relief shading; region patagonia (Fitz Roy massif, 300-3400 m, glaciers and lakes). Contours from Terrarium z14, generalised, survey offsets and drafting warp 1.6 px; scan.",
+ "contour_mask": "contour_mask.png",
+ "contour_rgb": [
+  183,
+  148,
+  112
+ ],
+ "region": "patagonia",
+ "rotation_deg": 358.468,
+ "projection": "utm",
+ "image_size": [
+  1502,
+  1224
+ ],
+ "map_frame_px": [
+  51.0,
+  67,
+  1451.0,
+  1067
+ ],
+ "anisotropy": -8e-05,
+ "relief_m": 2127.8,
+ "dem_source_zoom": 14,
+ "scale_denominator": 50000,
+ "contour_units": "m",
+ "n_contour_lines": 155,
+ "grid": {
+  "kind": "utm",
+  "step_m": 1000
+ },
+ "generator": {
+  "spec": {
+   "name": "swiss-patagonia",
+   "style": "swiss",
+   "region": "patagonia",
+   "mpp": 8.0,
+   "size": [
+    1400,
+    1000
+   ],
+   "upsample": 1,
+   "upsample_mode": "bilinear",
+   "skew": 0.0,
+   "jpeg_q": 82
+  },
+  "seed": 3376875932,
+  "native_size": [
+   1400,
+   1000
+  ],
+  "native_m_per_px": 8.0,
+  "ppi": 158.8
+ },
+ "gps_variants": {
+  "centre": [
+   -49.3,
+   -72.98
+  ],
+  "offset": [
+   -49.44053645940795,
+   -72.70350594631914
+  ],
+  "far": [
+   -48.568997505719565,
+   -73.58921878653412
+  ],
+  "offset_km": 25.4,
+  "far_km": 92.7
+ }
+}

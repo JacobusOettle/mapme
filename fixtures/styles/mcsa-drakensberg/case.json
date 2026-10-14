@@ -1,0 +1,249 @@
+{
+ "name": "mcsa-drakensberg",
+ "image": "map.jpg",
+ "gps": [
+  -29.27,
+  29.47
+ ],
+ "truth_points": [
+  {
+   "x": 104.08,
+   "y": 146.0,
+   "lat": -29.2457004,
+   "lon": 29.4477178
+  },
+  {
+   "x": 374.29,
+   "y": 146.0,
+   "lat": -29.2457004,
+   "lon": 29.4588589
+  },
+  {
+   "x": 644.5,
+   "y": 146.0,
+   "lat": -29.2457004,
+   "lon": 29.47
+  },
+  {
+   "x": 914.71,
+   "y": 146.0,
+   "lat": -29.2457004,
+   "lon": 29.4811411
+  },
+  {
+   "x": 1184.92,
+   "y": 146.0,
+   "lat": -29.2457004,
+   "lon": 29.4922822
+  },
+  {
+   "x": 104.08,
+   "y": 483.5,
+   "lat": -29.2578509,
+   "lon": 29.4477178
+  },
+  {
+   "x": 374.29,
+   "y": 483.5,
+   "lat": -29.2578509,
+   "lon": 29.4588589
+  },
+  {
+   "x": 644.5,
+   "y": 483.5,
+   "lat": -29.2578509,
+   "lon": 29.47
+  },
+  {
+   "x": 914.71,
+   "y": 483.5,
+   "lat": -29.2578509,
+   "lon": 29.4811411
+  },
+  {
+   "x": 1184.92,
+   "y": 483.5,
+   "lat": -29.2578509,
+   "lon": 29.4922822
+  },
+  {
+   "x": 104.08,
+   "y": 821.0,
+   "lat": -29.27,
+   "lon": 29.4477178
+  },
+  {
+   "x": 374.29,
+   "y": 821.0,
+   "lat": -29.27,
+   "lon": 29.4588589
+  },
+  {
+   "x": 644.5,
+   "y": 821.0,
+   "lat": -29.27,
+   "lon": 29.47
+  },
+  {
+   "x": 914.71,
+   "y": 821.0,
+   "lat": -29.27,
+   "lon": 29.4811411
+  },
+  {
+   "x": 1184.92,
+   "y": 821.0,
+   "lat": -29.27,
+   "lon": 29.4922822
+  },
+  {
+   "x": 104.08,
+   "y": 1158.5,
+   "lat": -29.2821476,
+   "lon": 29.4477178
+  },
+  {
+   "x": 374.29,
+   "y": 1158.5,
+   "lat": -29.2821476,
+   "lon": 29.4588589
+  },
+  {
+   "x": 644.5,
+   "y": 1158.5,
+   "lat": -29.2821476,
+   "lon": 29.47
+  },
+  {
+   "x": 914.71,
+   "y": 1158.5,
+   "lat": -29.2821476,
+   "lon": 29.4811411
+  },
+  {
+   "x": 1184.92,
+   "y": 1158.5,
+   "lat": -29.2821476,
+   "lon": 29.4922822
+  },
+  {
+   "x": 104.08,
+   "y": 1496.0,
+   "lat": -29.2942938,
+   "lon": 29.4477178
+  },
+  {
+   "x": 374.29,
+   "y": 1496.0,
+   "lat": -29.2942938,
+   "lon": 29.4588589
+  },
+  {
+   "x": 644.5,
+   "y": 1496.0,
+   "lat": -29.2942938,
+   "lon": 29.47
+  },
+  {
+   "x": 914.71,
+   "y": 1496.0,
+   "lat": -29.2942938,
+   "lon": 29.4811411
+  },
+  {
+   "x": 1184.92,
+   "y": 1496.0,
+   "lat": -29.2942938,
+   "lon": 29.4922822
+  }
+ ],
+ "dem_dir": "../dem/drakensberg",
+ "ocr": "ocr.json",
+ "dpi": null,
+ "m_per_px": 3.9984,
+ "m_per_px_xy": [
+  3.9967,
+  4.0
+ ],
+ "contour_interval_m": 20.0,
+ "style": "mcsa",
+ "tags": [
+  "mcsa",
+  "drakensberg",
+  "proj-merc",
+  "units-m",
+  "mpp-3-6",
+  "upsample-none",
+  "page-scan"
+ ],
+ "notes": "Synthetic (fixtures/tools/synth_topo.py): MCSA Magaliesberg-like: muted purple-brown contours on white, black graticule, grey roads; region drakensberg (uKhahlamba-Drakensberg escarpment, 1400-3400 m). Contours from Terrarium z14, generalised, survey offsets and drafting warp 1.2 px; scan.",
+ "contour_mask": "contour_mask.png",
+ "contour_rgb": [
+  175,
+  158,
+  149
+ ],
+ "region": "drakensberg",
+ "rotation_deg": 0.0,
+ "projection": "merc",
+ "image_size": [
+  1289,
+  1726
+ ],
+ "map_frame_px": [
+  44.0,
+  71,
+  1245.0,
+  1571
+ ],
+ "anisotropy": 0.00082,
+ "relief_m": 923.4,
+ "dem_source_zoom": 14,
+ "scale_denominator": 25000,
+ "contour_units": "m",
+ "n_contour_lines": 151,
+ "grid": {
+  "kind": "graticule",
+  "step_min": 1.0
+ },
+ "generator": {
+  "spec": {
+   "name": "mcsa-drakensberg",
+   "style": "mcsa",
+   "region": "drakensberg",
+   "mpp": 4.0,
+   "size": [
+    1200,
+    1500
+   ],
+   "upsample": 1,
+   "upsample_mode": "bilinear",
+   "skew": 0.0,
+   "page": "scan",
+   "jpeg_q": 80
+  },
+  "seed": 3690203736,
+  "native_size": [
+   1200,
+   1500
+  ],
+  "native_m_per_px": 4.0,
+  "ppi": 138.5
+ },
+ "gps_variants": {
+  "centre": [
+   -29.27,
+   29.47
+  ],
+  "offset": [
+   -29.412853618726807,
+   29.337819030432758
+  ],
+  "far": [
+   -28.874791929356828,
+   28.595150030313413
+  ],
+  "offset_km": 20.4,
+  "far_km": 95.8
+ }
+}

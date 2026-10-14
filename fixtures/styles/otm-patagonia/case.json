@@ -1,0 +1,245 @@
+{
+ "name": "otm-patagonia",
+ "image": "map.jpg",
+ "gps": [
+  -49.3,
+  -72.98
+ ],
+ "truth_points": [
+  {
+   "x": 60.0,
+   "y": 45.0,
+   "lat": -49.2636245,
+   "lon": -73.0543489
+  },
+  {
+   "x": 330.0,
+   "y": 45.0,
+   "lat": -49.2636245,
+   "lon": -73.0171744
+  },
+  {
+   "x": 600.0,
+   "y": 45.0,
+   "lat": -49.2636245,
+   "lon": -72.98
+  },
+  {
+   "x": 870.0,
+   "y": 45.0,
+   "lat": -49.2636245,
+   "lon": -72.9428256
+  },
+  {
+   "x": 1140.0,
+   "y": 45.0,
+   "lat": -49.2636245,
+   "lon": -72.9056511
+  },
+  {
+   "x": 60.0,
+   "y": 247.5,
+   "lat": -49.2818156,
+   "lon": -73.0543489
+  },
+  {
+   "x": 330.0,
+   "y": 247.5,
+   "lat": -49.2818156,
+   "lon": -73.0171744
+  },
+  {
+   "x": 600.0,
+   "y": 247.5,
+   "lat": -49.2818156,
+   "lon": -72.98
+  },
+  {
+   "x": 870.0,
+   "y": 247.5,
+   "lat": -49.2818156,
+   "lon": -72.9428256
+  },
+  {
+   "x": 1140.0,
+   "y": 247.5,
+   "lat": -49.2818156,
+   "lon": -72.9056511
+  },
+  {
+   "x": 60.0,
+   "y": 450.0,
+   "lat": -49.3,
+   "lon": -73.0543489
+  },
+  {
+   "x": 330.0,
+   "y": 450.0,
+   "lat": -49.3,
+   "lon": -73.0171744
+  },
+  {
+   "x": 600.0,
+   "y": 450.0,
+   "lat": -49.3,
+   "lon": -72.98
+  },
+  {
+   "x": 870.0,
+   "y": 450.0,
+   "lat": -49.3,
+   "lon": -72.9428256
+  },
+  {
+   "x": 1140.0,
+   "y": 450.0,
+   "lat": -49.3,
+   "lon": -72.9056511
+  },
+  {
+   "x": 60.0,
+   "y": 652.5,
+   "lat": -49.3181777,
+   "lon": -73.0543489
+  },
+  {
+   "x": 330.0,
+   "y": 652.5,
+   "lat": -49.3181777,
+   "lon": -73.0171744
+  },
+  {
+   "x": 600.0,
+   "y": 652.5,
+   "lat": -49.3181777,
+   "lon": -72.98
+  },
+  {
+   "x": 870.0,
+   "y": 652.5,
+   "lat": -49.3181777,
+   "lon": -72.9428256
+  },
+  {
+   "x": 1140.0,
+   "y": 652.5,
+   "lat": -49.3181777,
+   "lon": -72.9056511
+  },
+  {
+   "x": 60.0,
+   "y": 855.0,
+   "lat": -49.3363487,
+   "lon": -73.0543489
+  },
+  {
+   "x": 330.0,
+   "y": 855.0,
+   "lat": -49.3363487,
+   "lon": -73.0171744
+  },
+  {
+   "x": 600.0,
+   "y": 855.0,
+   "lat": -49.3363487,
+   "lon": -72.98
+  },
+  {
+   "x": 870.0,
+   "y": 855.0,
+   "lat": -49.3363487,
+   "lon": -72.9428256
+  },
+  {
+   "x": 1140.0,
+   "y": 855.0,
+   "lat": -49.3363487,
+   "lon": -72.9056511
+  }
+ ],
+ "dem_dir": "../dem/patagonia",
+ "ocr": "ocr.json",
+ "dpi": null,
+ "m_per_px": 10.0,
+ "m_per_px_xy": [
+  10.0,
+  10.0
+ ],
+ "contour_interval_m": 50,
+ "style": "opentopo",
+ "tags": [
+  "opentopo",
+  "patagonia",
+  "proj-merc",
+  "units-m",
+  "mpp-6-12",
+  "upsample-none",
+  "page-screen"
+ ],
+ "notes": "Synthetic (fixtures/tools/synth_topo.py): OpenTopoMap-like screenshot: brown contours, strong hillshade, forest green, roads; region patagonia (Fitz Roy massif, 300-3400 m, glaciers and lakes). Contours from Terrarium z14, generalised, survey offsets and drafting warp 1.6 px; screen.",
+ "contour_mask": "contour_mask.png",
+ "contour_rgb": [
+  166,
+  125,
+  90
+ ],
+ "region": "patagonia",
+ "rotation_deg": 0.0,
+ "projection": "merc",
+ "image_size": [
+  1200,
+  900
+ ],
+ "map_frame_px": [
+  0,
+  0,
+  1200,
+  900
+ ],
+ "anisotropy": 0.0,
+ "relief_m": 2133.0,
+ "dem_source_zoom": 14,
+ "scale_denominator": null,
+ "contour_units": "m",
+ "n_contour_lines": 163,
+ "grid": null,
+ "generator": {
+  "spec": {
+   "name": "otm-patagonia",
+   "style": "opentopo",
+   "region": "patagonia",
+   "mpp": 10.0,
+   "size": [
+    1200,
+    900
+   ],
+   "upsample": 1,
+   "upsample_mode": "bilinear",
+   "skew": 0.0,
+   "jpeg_q": 82
+  },
+  "seed": 2060816217,
+  "native_size": [
+   1200,
+   900
+  ],
+  "native_m_per_px": 10.0,
+  "ppi": 110
+ },
+ "gps_variants": {
+  "centre": [
+   -49.3,
+   -72.98
+  ],
+  "offset": [
+   -49.53682474214036,
+   -73.07752059443513
+  ],
+  "far": [
+   -49.63027192676342,
+   -74.33638171401812
+  ],
+  "offset_km": 27.3,
+  "far_km": 105.0
+ }
+}

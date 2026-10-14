@@ -1,0 +1,246 @@
+{
+ "name": "kompass-himalaya",
+ "image": "map.jpg",
+ "gps": [
+  30.42000000000001,
+  78.12
+ ],
+ "truth_points": [
+  {
+   "x": 493.0,
+   "y": 265.0,
+   "lat": 30.4531178,
+   "lon": 78.063472
+  },
+  {
+   "x": 1123.0,
+   "y": 265.0,
+   "lat": 30.4537401,
+   "lon": 78.0912302
+  },
+  {
+   "x": 1753.0,
+   "y": 265.0,
+   "lat": 30.4543565,
+   "lon": 78.1189893
+  },
+  {
+   "x": 2383.0,
+   "y": 265.0,
+   "lat": 30.454967,
+   "lon": 78.1467493
+  },
+  {
+   "x": 3013.0,
+   "y": 265.0,
+   "lat": 30.4555716,
+   "lon": 78.1745101
+  },
+  {
+   "x": 493.0,
+   "y": 715.0,
+   "lat": 30.4359404,
+   "lon": 78.0639873
+  },
+  {
+   "x": 1123.0,
+   "y": 715.0,
+   "lat": 30.4365623,
+   "lon": 78.0917406
+  },
+  {
+   "x": 1753.0,
+   "y": 715.0,
+   "lat": 30.4371783,
+   "lon": 78.1194949
+  },
+  {
+   "x": 2383.0,
+   "y": 715.0,
+   "lat": 30.4377884,
+   "lon": 78.14725
+  },
+  {
+   "x": 3013.0,
+   "y": 715.0,
+   "lat": 30.4383926,
+   "lon": 78.1750059
+  },
+  {
+   "x": 493.0,
+   "y": 1165.0,
+   "lat": 30.418763,
+   "lon": 78.0645021
+  },
+  {
+   "x": 1123.0,
+   "y": 1165.0,
+   "lat": 30.4193844,
+   "lon": 78.0922506
+  },
+  {
+   "x": 1753.0,
+   "y": 1165.0,
+   "lat": 30.42,
+   "lon": 78.12
+  },
+  {
+   "x": 2383.0,
+   "y": 1165.0,
+   "lat": 30.4206097,
+   "lon": 78.1477502
+  },
+  {
+   "x": 3013.0,
+   "y": 1165.0,
+   "lat": 30.4212135,
+   "lon": 78.1755013
+  },
+  {
+   "x": 493.0,
+   "y": 1615.0,
+   "lat": 30.4015855,
+   "lon": 78.0650165
+  },
+  {
+   "x": 1123.0,
+   "y": 1615.0,
+   "lat": 30.4022065,
+   "lon": 78.0927601
+  },
+  {
+   "x": 1753.0,
+   "y": 1615.0,
+   "lat": 30.4028217,
+   "lon": 78.1205047
+  },
+  {
+   "x": 2383.0,
+   "y": 1615.0,
+   "lat": 30.4034309,
+   "lon": 78.1482501
+  },
+  {
+   "x": 3013.0,
+   "y": 1615.0,
+   "lat": 30.4040343,
+   "lon": 78.1759963
+  },
+  {
+   "x": 493.0,
+   "y": 2065.0,
+   "lat": 30.384408,
+   "lon": 78.0655304
+  },
+  {
+   "x": 1123.0,
+   "y": 2065.0,
+   "lat": 30.3850286,
+   "lon": 78.0932692
+  },
+  {
+   "x": 1753.0,
+   "y": 2065.0,
+   "lat": 30.3856433,
+   "lon": 78.1210089
+  },
+  {
+   "x": 2383.0,
+   "y": 2065.0,
+   "lat": 30.3862521,
+   "lon": 78.1487495
+  },
+  {
+   "x": 3013.0,
+   "y": 2065.0,
+   "lat": 30.3868551,
+   "lon": 78.1764909
+  }
+ ],
+ "dem_dir": "../dem/himalaya_foothills",
+ "ocr": "ocr.json",
+ "dpi": 300.0,
+ "m_per_px": 4.2333,
+ "m_per_px_xy": [
+  4.2333,
+  4.2333
+ ],
+ "contour_interval_m": 50,
+ "style": "kompass",
+ "tags": [
+  "kompass",
+  "himalaya_foothills",
+  "proj-utm",
+  "units-m",
+  "mpp-3-6",
+  "upsample-x2-nearest",
+  "page-pdf",
+  "rotated"
+ ],
+ "notes": "Synthetic (fixtures/tools/synth_topo.py): Kompass-like tourist PDF: pale contours under bold red trails; region himalaya_foothills (Garhwal foothills near Mussoorie, 500-2300 m). Contours from Terrarium z14, generalised, survey offsets and drafting warp 1.5 px; page render x2 nearest of a 150 ppi raster.",
+ "contour_mask": "contour_mask.png",
+ "contour_rgb": [
+  205,
+  172,
+  136
+ ],
+ "region": "himalaya_foothills",
+ "rotation_deg": 358.541,
+ "projection": "utm",
+ "image_size": [
+  3507,
+  2481
+ ],
+ "map_frame_px": [
+  353,
+  165,
+  3153,
+  2165
+ ],
+ "anisotropy": 0.0,
+ "relief_m": 1497.5,
+ "dem_source_zoom": 14,
+ "scale_denominator": 50000,
+ "contour_units": "m",
+ "n_contour_lines": 173,
+ "grid": null,
+ "generator": {
+  "spec": {
+   "name": "kompass-himalaya",
+   "style": "kompass",
+   "region": "himalaya_foothills",
+   "mpp": 4.0,
+   "size": [
+    2800,
+    2000
+   ],
+   "upsample": 2,
+   "upsample_mode": "nearest",
+   "skew": 0.0,
+   "jpeg_q": 80
+  },
+  "seed": 2514068205,
+  "native_size": [
+   1400,
+   1000
+  ],
+  "native_m_per_px": 8.4667,
+  "ppi": 150.0
+ },
+ "gps_variants": {
+  "centre": [
+   30.42000000000001,
+   78.12
+  ],
+  "offset": [
+   30.4736887590818,
+   78.41339947476771
+  ],
+  "far": [
+   31.173110854057512,
+   77.48236931968825
+  ],
+  "offset_km": 28.8,
+  "far_km": 103.4
+ }
+}

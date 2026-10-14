@@ -1,0 +1,250 @@
+{
+ "name": "sparse-drakensberg",
+ "image": "map.jpg",
+ "gps": [
+  -29.27,
+  29.47
+ ],
+ "truth_points": [
+  {
+   "x": 101.55,
+   "y": 115.5,
+   "lat": -29.1811586,
+   "lon": 29.3290422
+  },
+  {
+   "x": 327.77,
+   "y": 115.5,
+   "lat": -29.1799332,
+   "lon": 29.3984274
+  },
+  {
+   "x": 554.0,
+   "y": 115.5,
+   "lat": -29.1786718,
+   "lon": 29.4678083
+  },
+  {
+   "x": 780.23,
+   "y": 115.5,
+   "lat": -29.1773745,
+   "lon": 29.5371846
+  },
+  {
+   "x": 1006.45,
+   "y": 115.5,
+   "lat": -29.1760413,
+   "lon": 29.6065564
+  },
+  {
+   "x": 101.55,
+   "y": 284.25,
+   "lat": -29.2268276,
+   "lon": 29.3300754
+  },
+  {
+   "x": 327.77,
+   "y": 284.25,
+   "lat": -29.2255998,
+   "lon": 29.3994913
+  },
+  {
+   "x": 554.0,
+   "y": 284.25,
+   "lat": -29.2243361,
+   "lon": 29.4689029
+  },
+  {
+   "x": 780.23,
+   "y": 284.25,
+   "lat": -29.2230364,
+   "lon": 29.5383099
+  },
+  {
+   "x": 1006.45,
+   "y": 284.25,
+   "lat": -29.2217007,
+   "lon": 29.6077124
+  },
+  {
+   "x": 101.55,
+   "y": 453.0,
+   "lat": -29.2724961,
+   "lon": 29.3311109
+  },
+  {
+   "x": 327.77,
+   "y": 453.0,
+   "lat": -29.2712661,
+   "lon": 29.4005577
+  },
+  {
+   "x": 554.0,
+   "y": 453.0,
+   "lat": -29.27,
+   "lon": 29.47
+  },
+  {
+   "x": 780.23,
+   "y": 453.0,
+   "lat": -29.2686979,
+   "lon": 29.5394378
+  },
+  {
+   "x": 1006.45,
+   "y": 453.0,
+   "lat": -29.2673598,
+   "lon": 29.608871
+  },
+  {
+   "x": 101.55,
+   "y": 621.75,
+   "lat": -29.3181644,
+   "lon": 29.3321489
+  },
+  {
+   "x": 327.77,
+   "y": 621.75,
+   "lat": -29.316932,
+   "lon": 29.4016265
+  },
+  {
+   "x": 554.0,
+   "y": 621.75,
+   "lat": -29.3156636,
+   "lon": 29.4710997
+  },
+  {
+   "x": 780.23,
+   "y": 621.75,
+   "lat": -29.314359,
+   "lon": 29.5405683
+  },
+  {
+   "x": 1006.45,
+   "y": 621.75,
+   "lat": -29.3130184,
+   "lon": 29.6100323
+  },
+  {
+   "x": 101.55,
+   "y": 790.5,
+   "lat": -29.3638323,
+   "lon": 29.3331893
+  },
+  {
+   "x": 327.77,
+   "y": 790.5,
+   "lat": -29.3625976,
+   "lon": 29.4026978
+  },
+  {
+   "x": 554.0,
+   "y": 790.5,
+   "lat": -29.3613268,
+   "lon": 29.4722019
+  },
+  {
+   "x": 780.23,
+   "y": 790.5,
+   "lat": -29.3600199,
+   "lon": 29.5417015
+  },
+  {
+   "x": 1006.45,
+   "y": 790.5,
+   "lat": -29.3586767,
+   "lon": 29.6111964
+  }
+ ],
+ "dem_dir": "../dem/drakensberg",
+ "ocr": "ocr.json",
+ "dpi": null,
+ "m_per_px": 29.9228,
+ "m_per_px_xy": [
+  29.8457,
+  30.0
+ ],
+ "contour_interval_m": 100.0,
+ "style": "sparse",
+ "tags": [
+  "sparse",
+  "drakensberg",
+  "proj-utm",
+  "units-m",
+  "mpp-25-inf",
+  "upsample-none",
+  "page-scan",
+  "rotated",
+  "effect-scan"
+ ],
+ "notes": "Synthetic (fixtures/tools/synth_topo.py): small-scale 1:100 000-1:250 000 map, 100 m interval over hypsometric tints; region drakensberg (uKhahlamba-Drakensberg escarpment, 1400-3400 m). Contours from Terrarium z12, generalised, survey offsets and drafting warp 1.8 px; scan.",
+ "contour_mask": "contour_mask.png",
+ "contour_rgb": [
+  175,
+  136,
+  101
+ ],
+ "region": "drakensberg",
+ "rotation_deg": 358.792,
+ "projection": "utm",
+ "image_size": [
+  1108,
+  1019
+ ],
+ "map_frame_px": [
+  51.3,
+  78,
+  1056.7,
+  828
+ ],
+ "anisotropy": 0.00517,
+ "relief_m": 1952.9,
+ "dem_source_zoom": 12,
+ "scale_denominator": 250000,
+ "contour_units": "m",
+ "n_contour_lines": 113,
+ "grid": {
+  "kind": "utm",
+  "step_m": 5000
+ },
+ "generator": {
+  "spec": {
+   "name": "sparse-drakensberg",
+   "style": "sparse",
+   "region": "drakensberg",
+   "mpp": 30.0,
+   "size": [
+    1000,
+    750
+   ],
+   "upsample": 1,
+   "upsample_mode": "bilinear",
+   "skew": 0.0,
+   "jpeg_q": 82
+  },
+  "seed": 4041779945,
+  "native_size": [
+   1000,
+   750
+  ],
+  "native_m_per_px": 30.0,
+  "ppi": 211.7
+ },
+ "gps_variants": {
+  "centre": [
+   -29.27,
+   29.47
+  ],
+  "offset": [
+   -29.536228310754456,
+   29.48595475080551
+  ],
+  "far": [
+   -28.50651785421693,
+   29.103350412708973
+  ],
+  "offset_km": 29.6,
+  "far_km": 91.9
+ }
+}

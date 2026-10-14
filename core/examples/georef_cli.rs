@@ -4,6 +4,7 @@
 //! cargo run --release --example georef_cli -- <image.jpg|png> [--gps lat,lon] [--ocr ocr.json]
 //!     [--dem-dir dir] [--dpi N] [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b]
 //!     [--rotate] [--verify] [--photo] [--hint lat,lon[,radius_m]]... [--max-tiles N]
+//!     [--dump-mask out.png] [--missing-out tiles.txt]
 //! ```
 //!
 //! Runs the same request / `need_dem` loop as the app: tiles are read from
@@ -11,9 +12,17 @@
 //! absent. Prints the final response JSON on stdout and a per-round log on
 //! stderr. `--ocr` takes a JSON array of observations or an object with an
 //! `observations` array (fixtures/grootkloof/ocr.json).
+//!
+//! `--dump-mask` writes the contour extraction of the request as a grey PNG of
+//! the image's size: 255 at the skeleton samples the session matches (computed
+//! by `ContourProducts::compute_with`, as the session does), 128 elsewhere on
+//! the colour mask (the same choice of model, recomputed here), 0 off it.
+//! `--missing-out` appends every tile the core asked for that is not in
+//! `--dem-dir` (`z x y` per line) to a file, so a benchmark can fetch them.
 
+use mapme_core::contour::{auto_mask, extract_mask, model_from_rgb, normalize_illumination, photo_mask};
 use mapme_core::dem::TileId;
-use mapme_core::georef::{GeorefRequest, GpsFix, Session, Status};
+use mapme_core::georef::{ContourProducts, GeorefRequest, GpsFix, Session, Status};
 use mapme_core::hints::{HintSource, SearchHint, DEFAULT_HINT_RADIUS_M};
 use mapme_core::image::Rgb8;
 use mapme_core::labels::OcrObservation;
@@ -23,7 +32,7 @@ use std::time::Instant;
 
 const USAGE: &str = "usage: georef_cli <image.jpg|png> [--gps lat,lon] [--ocr ocr.json] [--dem-dir dir] [--dpi N] \
                      [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b] [--rotate] [--verify] [--photo] \
-                     [--hint lat,lon[,radius_m]]... [--max-tiles N]";
+                     [--hint lat,lon[,radius_m]]... [--max-tiles N] [--dump-mask out.png] [--missing-out tiles.txt]";
 
 /// Most `need_dem` rounds before giving up (a 2 000 km wide search takes ~100).
 const MAX_ROUNDS: usize = 300;
@@ -58,6 +67,8 @@ fn run() -> Result<bool, String> {
     let mut args = std::env::args().skip(1);
     let mut image: Option<PathBuf> = None;
     let mut dem_dir: Option<PathBuf> = None;
+    let mut dump_mask: Option<PathBuf> = None;
+    let mut missing_out: Option<PathBuf> = None;
     let mut req = GeorefRequest::default();
     while let Some(a) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -95,6 +106,8 @@ fn run() -> Result<bool, String> {
             "--max-tiles" => {
                 req.max_tiles_per_round = value("--max-tiles")?.parse().map_err(|e| format!("--max-tiles: {e}"))?
             }
+            "--dump-mask" => dump_mask = Some(PathBuf::from(value("--dump-mask")?)),
+            "--missing-out" => missing_out = Some(PathBuf::from(value("--missing-out")?)),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(true);
@@ -112,7 +125,11 @@ fn run() -> Result<bool, String> {
     let t = Instant::now();
     let img = load_image(&image)?;
     eprintln!("loaded {} ({}x{}) in {:.0} ms", image.display(), img.w, img.h, t.elapsed().as_secs_f64() * 1e3);
+    if let Some(path) = &dump_mask {
+        dump_contours(&img, &req, path)?;
+    }
     let session = Session::new(img);
+    let mut missing_tiles: Vec<TileId> = Vec::new();
 
     let mut core_ms = 0.0;
     for round in 1..=MAX_ROUNDS {
@@ -136,6 +153,9 @@ fn run() -> Result<bool, String> {
         }
         if resp.status != Status::NeedDem {
             eprintln!("core time {core_ms:.0} ms over {round} call(s)");
+            if let Some(path) = &missing_out {
+                write_missing(path, &missing_tiles)?;
+            }
             println!("{}", serde_json::to_string_pretty(&resp).map_err(|e| e.to_string())?);
             return Ok(resp.status == Status::Ok);
         }
@@ -151,6 +171,7 @@ fn run() -> Result<bool, String> {
                 },
                 None => {
                     session.mark_dem_tile_missing(t)?;
+                    missing_tiles.push(t);
                     missing += 1;
                 }
             }
@@ -158,6 +179,55 @@ fn run() -> Result<bool, String> {
         eprintln!("  added {added} tile(s), {missing} missing");
     }
     Err(format!("still need DEM tiles after {MAX_ROUNDS} rounds"))
+}
+
+/// Appends `z x y` lines for the tiles the core asked for that were not in the DEM directory.
+fn write_missing(path: &Path, tiles: &[TileId]) -> Result<(), String> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    for t in tiles {
+        writeln!(f, "{} {} {}", t.z, t.x, t.y).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// The contour extraction of `req` on `img` as a grey PNG: 255 at the skeleton samples the
+/// session matches, 128 elsewhere on the colour mask, 0 off it.
+fn dump_contours(img: &Rgb8, req: &GeorefRequest, path: &Path) -> Result<(), String> {
+    let t = Instant::now();
+    let src = if req.photo { normalize_illumination(img) } else { img.clone() };
+    let mask = match (req.contour_rgb, req.photo) {
+        (Some(rgb), false) => extract_mask(&src, &model_from_rgb(rgb)),
+        (None, false) => auto_mask(&src).0,
+        (rgb, true) => photo_mask(&src, rgb.map(model_from_rgb).as_ref()).0,
+    };
+    let prod = ContourProducts::compute_with(&src, req.contour_rgb, req.photo);
+    let mut px: Vec<u8> = mask.data.iter().map(|&m| if m != 0 { 128 } else { 0 }).collect();
+    for p in &prod.samples.pts {
+        let (x, y) = (p[0].floor() as usize, p[1].floor() as usize);
+        if x < img.w && y < img.h {
+            px[y * img.w + x] = 255;
+        }
+    }
+    let file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), img.w as u32, img.h as u32);
+    enc.set_color(png::ColorType::Grayscale);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut wr = enc.write_header().map_err(|e| e.to_string())?;
+    wr.write_image_data(&px).map_err(|e| e.to_string())?;
+    eprintln!(
+        "dumped contour mask to {} (mask fraction {:.4}, {} samples in {} segments, {:.0} ms)",
+        path.display(),
+        prod.mask_fraction,
+        prod.samples.len(),
+        prod.samples.n_segs,
+        t.elapsed().as_secs_f64() * 1e3
+    );
+    Ok(())
 }
 
 fn tile_path(dir: &Path, t: TileId) -> PathBuf {

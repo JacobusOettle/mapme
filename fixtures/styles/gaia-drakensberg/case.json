@@ -1,0 +1,245 @@
+{
+ "name": "gaia-drakensberg",
+ "image": "map.jpg",
+ "gps": [
+  -29.27,
+  29.47
+ ],
+ "truth_points": [
+  {
+   "x": 288.7,
+   "y": 153.0,
+   "lat": -29.2368296,
+   "lon": 29.4163833
+  },
+  {
+   "x": 1020.85,
+   "y": 153.0,
+   "lat": -29.2368296,
+   "lon": 29.4431917
+  },
+  {
+   "x": 1753.0,
+   "y": 153.0,
+   "lat": -29.2368296,
+   "lon": 29.47
+  },
+  {
+   "x": 2485.15,
+   "y": 153.0,
+   "lat": -29.2368296,
+   "lon": 29.4968083
+  },
+  {
+   "x": 3217.3,
+   "y": 153.0,
+   "lat": -29.2368296,
+   "lon": 29.5236167
+  },
+  {
+   "x": 288.7,
+   "y": 679.5,
+   "lat": -29.2534161,
+   "lon": 29.4163833
+  },
+  {
+   "x": 1020.85,
+   "y": 679.5,
+   "lat": -29.2534161,
+   "lon": 29.4431917
+  },
+  {
+   "x": 1753.0,
+   "y": 679.5,
+   "lat": -29.2534161,
+   "lon": 29.47
+  },
+  {
+   "x": 2485.15,
+   "y": 679.5,
+   "lat": -29.2534161,
+   "lon": 29.4968083
+  },
+  {
+   "x": 3217.3,
+   "y": 679.5,
+   "lat": -29.2534161,
+   "lon": 29.5236167
+  },
+  {
+   "x": 288.7,
+   "y": 1206.0,
+   "lat": -29.27,
+   "lon": 29.4163833
+  },
+  {
+   "x": 1020.85,
+   "y": 1206.0,
+   "lat": -29.27,
+   "lon": 29.4431917
+  },
+  {
+   "x": 1753.0,
+   "y": 1206.0,
+   "lat": -29.27,
+   "lon": 29.47
+  },
+  {
+   "x": 2485.15,
+   "y": 1206.0,
+   "lat": -29.27,
+   "lon": 29.4968083
+  },
+  {
+   "x": 3217.3,
+   "y": 1206.0,
+   "lat": -29.27,
+   "lon": 29.5236167
+  },
+  {
+   "x": 288.7,
+   "y": 1732.5,
+   "lat": -29.2865812,
+   "lon": 29.4163833
+  },
+  {
+   "x": 1020.85,
+   "y": 1732.5,
+   "lat": -29.2865812,
+   "lon": 29.4431917
+  },
+  {
+   "x": 1753.0,
+   "y": 1732.5,
+   "lat": -29.2865812,
+   "lon": 29.47
+  },
+  {
+   "x": 2485.15,
+   "y": 1732.5,
+   "lat": -29.2865812,
+   "lon": 29.4968083
+  },
+  {
+   "x": 3217.3,
+   "y": 1732.5,
+   "lat": -29.2865812,
+   "lon": 29.5236167
+  },
+  {
+   "x": 288.7,
+   "y": 2259.0,
+   "lat": -29.3031596,
+   "lon": 29.4163833
+  },
+  {
+   "x": 1020.85,
+   "y": 2259.0,
+   "lat": -29.3031596,
+   "lon": 29.4431917
+  },
+  {
+   "x": 1753.0,
+   "y": 2259.0,
+   "lat": -29.3031596,
+   "lon": 29.47
+  },
+  {
+   "x": 2485.15,
+   "y": 2259.0,
+   "lat": -29.3031596,
+   "lon": 29.4968083
+  },
+  {
+   "x": 3217.3,
+   "y": 2259.0,
+   "lat": -29.3031596,
+   "lon": 29.5236167
+  }
+ ],
+ "dem_dir": "../dem/drakensberg",
+ "ocr": "ocr.json",
+ "dpi": 300.0,
+ "m_per_px": 3.5246,
+ "m_per_px_xy": [
+  3.5494,
+  3.5
+ ],
+ "contour_interval_m": 24.384,
+ "style": "gaia",
+ "tags": [
+  "gaia",
+  "drakensberg",
+  "proj-merc",
+  "units-ft",
+  "mpp-3-6",
+  "upsample-x3-bilinear",
+  "page-pdf"
+ ],
+ "notes": "Synthetic (fixtures/tools/synth_topo.py): Gaia Topo (feet)-like PDF export: thin light-brown feet contours over hillshade, park tint, dense blue streams, grey dashed trails, Web Mercator ~100 ppi raster; region drakensberg (uKhahlamba-Drakensberg escarpment, 1400-3400 m). Contours from Terrarium z14, generalised, survey offsets and drafting warp 1.7 px; page render x3 bilinear of a 100 ppi raster.",
+ "contour_mask": "contour_mask.png",
+ "contour_rgb": [
+  188,
+  184,
+  156
+ ],
+ "region": "drakensberg",
+ "rotation_deg": 0.0,
+ "projection": "merc",
+ "image_size": [
+  3507,
+  2481
+ ],
+ "map_frame_px": [
+  126,
+  36,
+  3380,
+  2376
+ ],
+ "anisotropy": -0.01393,
+ "relief_m": 1608.1,
+ "dem_source_zoom": 14,
+ "scale_denominator": null,
+ "contour_units": "ft",
+ "n_contour_lines": 234,
+ "grid": null,
+ "generator": {
+  "spec": {
+   "name": "gaia-drakensberg",
+   "style": "gaia",
+   "region": "drakensberg",
+   "mpp": 3.5,
+   "size": [
+    3300,
+    2340
+   ],
+   "upsample": 3,
+   "upsample_mode": "bilinear",
+   "skew": 0.0,
+   "jpeg_q": 80
+  },
+  "seed": 2117430836,
+  "native_size": [
+   1100,
+   780
+  ],
+  "native_m_per_px": 10.5,
+  "ppi": 100.0
+ },
+ "gps_variants": {
+  "centre": [
+   -29.27,
+   29.47
+  ],
+  "offset": [
+   -29.16462698062138,
+   29.400697866034058
+  ],
+  "far": [
+   -29.872745950157825,
+   30.26869722160929
+  ],
+  "offset_km": 13.5,
+  "far_km": 102.2
+ }
+}

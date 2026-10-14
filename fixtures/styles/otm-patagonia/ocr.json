@@ -1,0 +1,235 @@
+{
+"description": "Synthetic map text with exact boxes (perfect-OCR stand-in, synth_topo.py); grid coordinate labels left out",
+"observations": [
+{
+"text": "\u00a9 OpenStreetMap contributors, SRTM | map style: \u00a9 OpenTopoMap (CC-BY-SA)",
+"bbox": [
+874.8333333333333,
+886.4166666666666,
+316.0,
+9.0
+],
+"confidence": 0.95
+},
+{
+"text": "2 km",
+"bbox": [
+104.27777777777777,
+871.6666666666666,
+23.0,
+8.0
+],
+"confidence": 0.95
+},
+{
+"text": "R\u00edo Blanco",
+"bbox": [
+759.0,
+301.0,
+56.0,
+9.0
+],
+"confidence": 0.9
+},
+{
+"text": "Monte Blanco",
+"bbox": [
+139.0,
+427.0,
+73.0,
+9.0
+],
+"confidence": 0.9
+},
+{
+"text": "Arroyo El\u00e9ctrico",
+"bbox": [
+453.0,
+318.0,
+86.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "R\u00edo Torre",
+"bbox": [
+228.0,
+762.0,
+46.0,
+9.0
+],
+"confidence": 0.9
+},
+{
+"text": "Lago Blanco",
+"bbox": [
+535.0,
+761.0,
+65.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "CERRO TORRE",
+"bbox": [
+509.0,
+168.0,
+117.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "R\u00cdO MADRE",
+"bbox": [
+559.0,
+346.0,
+94.0,
+14.0
+],
+"confidence": 0.9
+},
+{
+"text": "PASO FITZ ROY",
+"bbox": [
+42.0,
+273.0,
+126.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "Monte Piedras",
+"bbox": [
+104.0,
+765.0,
+76.0,
+9.0
+],
+"confidence": 0.9
+},
+{
+"text": "Monte Fitz Roy",
+"bbox": [
+935.0,
+820.0,
+79.0,
+10.0
+],
+"confidence": 0.9
+},
+{
+"text": "Aguja Huemul",
+"bbox": [
+424.0,
+270.0,
+76.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "Lago Huemul",
+"bbox": [
+653.0,
+811.0,
+71.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "500",
+"bbox": [
+1128.0,
+881.0,
+19.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "750",
+"bbox": [
+697.0,
+77.0,
+18.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "750",
+"bbox": [
+774.0,
+725.0,
+18.0,
+9.0
+],
+"confidence": 0.9
+},
+{
+"text": "750",
+"bbox": [
+344.0,
+608.0,
+18.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "1000",
+"bbox": [
+388.0,
+314.0,
+25.0,
+14.0
+],
+"confidence": 0.9
+},
+{
+"text": "1000",
+"bbox": [
+502.0,
+621.0,
+25.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "1500",
+"bbox": [
+387.0,
+87.0,
+25.0,
+15.0
+],
+"confidence": 0.9
+},
+{
+"text": "1500",
+"bbox": [
+579.0,
+473.0,
+24.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "1750",
+"bbox": [
+443.0,
+497.0,
+25.0,
+15.0
+],
+"confidence": 0.9
+}
+]
+}

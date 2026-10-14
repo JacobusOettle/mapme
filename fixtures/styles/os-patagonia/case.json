@@ -1,0 +1,250 @@
+{
+ "name": "os-patagonia",
+ "image": "map.jpg",
+ "gps": [
+  -49.3,
+  -72.98
+ ],
+ "truth_points": [
+  {
+   "x": 129.27,
+   "y": 167.0,
+   "lat": -49.2744044,
+   "lon": -73.0212558
+  },
+  {
+   "x": 422.39,
+   "y": 167.0,
+   "lat": -49.2740585,
+   "lon": -73.0011648
+  },
+  {
+   "x": 715.5,
+   "y": 167.0,
+   "lat": -49.273709,
+   "lon": -72.9810742
+  },
+  {
+   "x": 1008.61,
+   "y": 167.0,
+   "lat": -49.2733561,
+   "lon": -72.960984
+  },
+  {
+   "x": 1301.73,
+   "y": 167.0,
+   "lat": -49.2729997,
+   "lon": -72.9408942
+  },
+  {
+   "x": 129.27,
+   "y": 459.5,
+   "lat": -49.2875502,
+   "lon": -73.0207296
+  },
+  {
+   "x": 422.39,
+   "y": 459.5,
+   "lat": -49.2872041,
+   "lon": -73.0006332
+  },
+  {
+   "x": 715.5,
+   "y": 459.5,
+   "lat": -49.2868545,
+   "lon": -72.9805373
+  },
+  {
+   "x": 1008.61,
+   "y": 459.5,
+   "lat": -49.2865014,
+   "lon": -72.9604417
+  },
+  {
+   "x": 1301.73,
+   "y": 459.5,
+   "lat": -49.2861449,
+   "lon": -72.9403466
+  },
+  {
+   "x": 129.27,
+   "y": 752.0,
+   "lat": -49.300696,
+   "lon": -73.020203
+  },
+  {
+   "x": 422.39,
+   "y": 752.0,
+   "lat": -49.3003498,
+   "lon": -73.0001013
+  },
+  {
+   "x": 715.5,
+   "y": 752.0,
+   "lat": -49.3,
+   "lon": -72.98
+  },
+  {
+   "x": 1008.61,
+   "y": 752.0,
+   "lat": -49.2996467,
+   "lon": -72.9598991
+  },
+  {
+   "x": 1301.73,
+   "y": 752.0,
+   "lat": -49.29929,
+   "lon": -72.9397986
+  },
+  {
+   "x": 129.27,
+   "y": 1044.5,
+   "lat": -49.3138418,
+   "lon": -73.0196759
+  },
+  {
+   "x": 422.39,
+   "y": 1044.5,
+   "lat": -49.3134954,
+   "lon": -72.9995689
+  },
+  {
+   "x": 715.5,
+   "y": 1044.5,
+   "lat": -49.3131454,
+   "lon": -72.9794623
+  },
+  {
+   "x": 1008.61,
+   "y": 1044.5,
+   "lat": -49.312792,
+   "lon": -72.9593561
+  },
+  {
+   "x": 1301.73,
+   "y": 1044.5,
+   "lat": -49.3124351,
+   "lon": -72.9392502
+  },
+  {
+   "x": 129.27,
+   "y": 1337.0,
+   "lat": -49.3269875,
+   "lon": -73.0191486
+  },
+  {
+   "x": 422.39,
+   "y": 1337.0,
+   "lat": -49.3266409,
+   "lon": -72.9990362
+  },
+  {
+   "x": 715.5,
+   "y": 1337.0,
+   "lat": -49.3262908,
+   "lon": -72.9789242
+  },
+  {
+   "x": 1008.61,
+   "y": 1337.0,
+   "lat": -49.3259373,
+   "lon": -72.9588126
+  },
+  {
+   "x": 1301.73,
+   "y": 1337.0,
+   "lat": -49.3255802,
+   "lon": -72.9387015
+  }
+ ],
+ "dem_dir": "../dem/patagonia",
+ "ocr": "ocr.json",
+ "dpi": null,
+ "m_per_px": 4.995,
+ "m_per_px_xy": [
+  4.9899,
+  5.0
+ ],
+ "contour_interval_m": 10.0,
+ "style": "os",
+ "tags": [
+  "os",
+  "patagonia",
+  "proj-tm",
+  "units-m",
+  "mpp-3-6",
+  "upsample-none",
+  "page-scan",
+  "rotated",
+  "effect-scan"
+ ],
+ "notes": "Synthetic (fixtures/tools/synth_topo.py): OS Landranger-like: orange 10 m contours, blue km grid, pink/orange/yellow roads, woodland symbols; region patagonia (Fitz Roy massif, 300-3400 m, glaciers and lakes). Contours from Terrarium z14, generalised, survey offsets and drafting warp 1.7 px; scan.",
+ "contour_mask": "contour_mask.png",
+ "contour_rgb": [
+  231,
+  183,
+  139
+ ],
+ "region": "patagonia",
+ "rotation_deg": 358.468,
+ "projection": "tm",
+ "image_size": [
+  1431,
+  1644
+ ],
+ "map_frame_px": [
+  64.1,
+  102,
+  1366.9,
+  1402
+ ],
+ "anisotropy": 0.00202,
+ "relief_m": 1402.9,
+ "dem_source_zoom": 14,
+ "scale_denominator": 50000,
+ "contour_units": "m",
+ "n_contour_lines": 401,
+ "grid": {
+  "kind": "utm",
+  "step_m": 1000
+ },
+ "generator": {
+  "spec": {
+   "name": "os-patagonia",
+   "style": "os",
+   "region": "patagonia",
+   "mpp": 5.0,
+   "size": [
+    1300,
+    1300
+   ],
+   "upsample": 1,
+   "upsample_mode": "bilinear",
+   "skew": 0.0,
+   "jpeg_q": 80
+  },
+  "seed": 107114942,
+  "native_size": [
+   1300,
+   1300
+  ],
+  "native_m_per_px": 5.0,
+  "ppi": 254.0
+ },
+ "gps_variants": {
+  "centre": [
+   -49.3,
+   -72.98
+  ],
+  "offset": [
+   -49.49847100650273,
+   -72.78194499637077
+  ],
+  "far": [
+   -49.02500720496413,
+   -74.23501286400278
+  ],
+  "offset_km": 26.3,
+  "far_km": 96.5
+ }
+}

@@ -1,0 +1,245 @@
+{
+"description": "Synthetic map text with exact boxes (perfect-OCR stand-in, synth_topo.py); grid coordinate labels left out",
+"observations": [
+{
+"text": "Contours 20 m (synthetic)",
+"bbox": [
+1043.5,
+881.75,
+144.0,
+11.0
+],
+"confidence": 0.95
+},
+{
+"text": "1 km",
+"bbox": [
+89.16666666666666,
+863.0,
+30.0,
+10.0
+],
+"confidence": 0.95
+},
+{
+"text": "Waldheim Peak",
+"bbox": [
+481.0,
+446.0,
+114.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "Lake Bluff",
+"bbox": [
+543.0,
+96.0,
+74.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "FURY TIER",
+"bbox": [
+707.0,
+313.0,
+113.0,
+15.0
+],
+"confidence": 0.9
+},
+{
+"text": "Cradle Tier",
+"bbox": [
+860.0,
+295.0,
+81.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "Barn Peak",
+"bbox": [
+244.0,
+130.0,
+74.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "Lake Tier",
+"bbox": [
+337.0,
+686.0,
+67.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "Crater Peak",
+"bbox": [
+445.0,
+272.0,
+86.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "Lake Gorge",
+"bbox": [
+938.0,
+266.0,
+84.0,
+14.0
+],
+"confidence": 0.9
+},
+{
+"text": "Little Plains",
+"bbox": [
+20.0,
+498.0,
+85.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "Cradle Rivulet",
+"bbox": [
+1013.0,
+74.0,
+105.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "Fury Rivulet",
+"bbox": [
+1087.0,
+220.0,
+89.0,
+14.0
+],
+"confidence": 0.9
+},
+{
+"text": "Lake Rivulet",
+"bbox": [
+415.0,
+797.0,
+91.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "800",
+"bbox": [
+1091.0,
+544.0,
+22.0,
+13.0
+],
+"confidence": 0.9
+},
+{
+"text": "900",
+"bbox": [
+59.0,
+385.0,
+22.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "900",
+"bbox": [
+66.0,
+648.0,
+22.0,
+11.0
+],
+"confidence": 0.9
+},
+{
+"text": "900",
+"bbox": [
+1055.0,
+827.0,
+22.0,
+13.0
+],
+"confidence": 0.9
+},
+{
+"text": "1000",
+"bbox": [
+249.0,
+267.0,
+29.0,
+14.0
+],
+"confidence": 0.9
+},
+{
+"text": "1000",
+"bbox": [
+993.0,
+25.0,
+30.0,
+16.0
+],
+"confidence": 0.9
+},
+{
+"text": "1100",
+"bbox": [
+34.0,
+311.0,
+30.0,
+16.0
+],
+"confidence": 0.9
+},
+{
+"text": "1200",
+"bbox": [
+876.0,
+398.0,
+29.0,
+13.0
+],
+"confidence": 0.9
+},
+{
+"text": "1200",
+"bbox": [
+322.0,
+640.0,
+29.0,
+14.0
+],
+"confidence": 0.9
+},
+{
+"text": "1400",
+"bbox": [
+678.0,
+766.0,
+29.0,
+11.0
+],
+"confidence": 0.9
+}
+]
+}
