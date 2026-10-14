@@ -6,6 +6,8 @@ import XCTest
 /// detected sheet (in the simulator Vision often sees only the whole frame; the core's page finder
 /// supplies the outline), flattens and locates it (OCR, then contours against terrain downloaded
 /// over the network near the mocked GPS fix, which is inside the sheet) and opens it, drawn dark.
+/// The editor's header and bottom bar must lie inside the safe area, also when the import starts
+/// as the photo picker's sheet closes (the path on which a device drew Done under the status bar).
 final class PhotoImportUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = true
@@ -31,6 +33,7 @@ final class PhotoImportUITests: XCTestCase {
         XCTAssertTrue(app.buttons["cornersAutoButton"].exists)
         XCTAssertTrue(app.buttons["cornersFullImageButton"].exists)
         XCTAssertTrue(done.isEnabled)
+        assertCornerEditorChromeIsClear(app)
         // The handles sit on the sheet's corners, well inside the photo (not on its corners, as
         // they would for "the whole image"): in the photo the sheet's top-left is ~12 % in from the
         // left edge and its bottom-right ~10 % in from the right; the editor fits the photo to the
@@ -72,7 +75,72 @@ final class PhotoImportUITests: XCTestCase {
         }
     }
 
+    /// The device path of the bug report: a photo picked in the photo picker starts the import as
+    /// the picker's sheet closes (here a stand-in sheet, `-importSamplePhotoAfterSheet`), so the
+    /// import cover is asked for while a sheet is still on its way out. Its header must still lie
+    /// below the status bar, with Cancel and Done tappable.
+    @MainActor
+    func testCornerEditorOpenedAsAPickerSheetClosesStaysClearOfTheStatusBar() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-importSamplePhotoAfterSheet", "-mockLocation", "-25.8405,27.3920"]
+        allowLocationAlerts()
+        app.launch()
+
+        let pick = app.buttons["pickSamplePhotoButton"]
+        guard pick.waitForExistence(timeout: 30) else {
+            attachScreenshot(app, "05c-picker-stand-in-missing")
+            XCTFail("The photo picker's stand-in did not appear")
+            return
+        }
+        pick.tap()
+        let done = app.buttons["cornersDoneButton"]
+        guard done.waitForExistence(timeout: 120) else {
+            attachScreenshot(app, "05c-photo-corners-timeout")
+            XCTFail("The corner editor did not appear after the sheet closed")
+            return
+        }
+        Thread.sleep(forTimeInterval: 1.5)
+        attachScreenshot(app, "05c-photo-corners-after-sheet")
+        assertCornerEditorChromeIsClear(app)
+
+        // Cancel closes the editor and drops the import.
+        app.buttons["cornersCancelButton"].tap()
+        XCTAssertTrue(app.buttons["importMenu"].waitForExistence(timeout: 15), "Cancel did not bring back the library")
+        let deadline = Date().addingTimeInterval(10)
+        while done.exists, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+        XCTAssertFalse(done.exists, "The corner editor is still up after Cancel")
+    }
+
     // MARK: - Helpers
+
+    /// The corner editor's chrome lies inside the safe area: Cancel and Done below the status bar
+    /// (on Face ID iPhones, 812 pt tall and more, the top inset is at least 44 pt in portrait), the
+    /// bottom bar above the home indicator (34 pt in portrait, 21 in landscape); all of them
+    /// tappable, the header buttons at least 44 pt tall.
+    @MainActor
+    private func assertCornerEditorChromeIsClear(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let screen = app.windows.firstMatch.frame
+        let faceID = max(screen.width, screen.height) >= 812
+        let portrait = screen.height > screen.width
+        let minTop: CGFloat = faceID && portrait ? 44 : (portrait ? 20 : 0)
+        let minBottomGap: CGFloat = faceID ? 20 : 0
+        for id in ["cornersCancelButton", "cornersDoneButton"] {
+            let button = app.buttons[id]
+            XCTAssertTrue(button.isHittable, "\(id) can't be tapped", file: file, line: line)
+            XCTAssertGreaterThanOrEqual(button.frame.minY, screen.minY + minTop,
+                                        "\(id) at \(button.frame) is under the status bar (screen \(screen))", file: file, line: line)
+            XCTAssertGreaterThanOrEqual(button.frame.height, 44, "\(id) at \(button.frame) is under 44 pt tall",
+                                        file: file, line: line)
+        }
+        for id in ["cornersAutoButton", "cornersFullImageButton", "cornersRotateButton"] {
+            let button = app.buttons[id]
+            XCTAssertTrue(button.isHittable, "\(id) can't be tapped", file: file, line: line)
+            XCTAssertLessThanOrEqual(button.frame.maxY, screen.maxY - minBottomGap,
+                                     "\(id) at \(button.frame) is on the home indicator (screen \(screen))", file: file, line: line)
+        }
+    }
 
     @MainActor
     private func allowLocationAlerts() {

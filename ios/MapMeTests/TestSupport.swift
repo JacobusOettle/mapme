@@ -16,7 +16,8 @@ enum FixtureError: Error, CustomStringConvertible {
 }
 
 /// fixtures/grootkloof, copied into the test bundle as the folder "grootkloof" (the other sheets
-/// of the series, fixtures/castle-gorge and fixtures/mhlabatini, are copied the same way).
+/// of the series, fixtures/castle-gorge and fixtures/mhlabatini, and the Gaia GPS exports,
+/// fixtures/gaia-langalibalele and fixtures/gaia-giants-castle, are copied the same way).
 enum Fixtures {
     /// Grootkloof map centre (from the core tests).
     static let center = LatLon(lat: -25.8499, lon: 27.4000)
@@ -80,18 +81,27 @@ enum Fixtures {
     /// `offlineDEMService()` with the tiles of `source` (a fixture's dem/ folder of
     /// {z}_{x}_{y}.png); nil serves none, as on a phone that is offline and has no terrain cached.
     static func offlineDEMService(tilesIn source: URL?) throws -> DEMService {
+        try offlineDEMService(tilesInAll: source.map { [$0] } ?? [])
+    }
+
+    /// `offlineDEMService()` with the tiles of every folder in `sources` (fixtures' dem/ folders of
+    /// {z}_{x}_{y}.png, e.g. the terrain around the user and around the map; a tile in several is
+    /// taken from the first).
+    static func offlineDEMService(tilesInAll sources: [URL]) throws -> DEMService {
         let cache = try makeTemporaryDirectory("dem-fixtures-\(UUID().uuidString)")
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [NotFoundURLProtocol.self]
         let service = DEMService(cacheDirectory: cache, session: URLSession(configuration: config))
-        guard let source else { return service }
         let fm = FileManager.default
-        for name in try fm.contentsOfDirectory(atPath: source.path) where name.hasSuffix(".png") {
-            let parts = name.dropLast(4).split(separator: "_")
-            guard parts.count == 3, let z = Int(parts[0]), let x = Int(parts[1]), let y = Int(parts[2]) else { continue }
-            let target = service.cacheURL(for: TileID(z: z, x: x, y: y))
-            try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try fm.copyItem(at: source.appendingPathComponent(name), to: target)
+        for source in sources {
+            for name in try fm.contentsOfDirectory(atPath: source.path) where name.hasSuffix(".png") {
+                let parts = name.dropLast(4).split(separator: "_")
+                guard parts.count == 3, let z = Int(parts[0]), let x = Int(parts[1]), let y = Int(parts[2]) else { continue }
+                let target = service.cacheURL(for: TileID(z: z, x: x, y: y))
+                guard !fm.fileExists(atPath: target.path) else { continue }
+                try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fm.copyItem(at: source.appendingPathComponent(name), to: target)
+            }
         }
         return service
     }

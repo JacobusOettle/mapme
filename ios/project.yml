@@ -113,6 +113,12 @@ targets:
       - path: ../fixtures/mhlabatini
         type: folder
         buildPhase: resources
+      - path: ../fixtures/gaia-langalibalele
+        type: folder
+        buildPhase: resources
+      - path: ../fixtures/gaia-giants-castle
+        type: folder
+        buildPhase: resources
     dependencies:
       - target: MapMe
     settings:

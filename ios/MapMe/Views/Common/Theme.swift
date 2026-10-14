@@ -40,6 +40,8 @@ enum Theme {
     static let uiPOI = UIColor(red: 1.0, green: 0.85, blue: 0.30, alpha: 1)
 
     static let corner: CGFloat = 16
+    /// The smallest comfortable hit target, points (Apple's Human Interface Guidelines).
+    static let minTapTarget: CGFloat = 44
 }
 
 /// Frosted dark capsule used for floating map controls.

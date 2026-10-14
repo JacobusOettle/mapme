@@ -90,7 +90,7 @@ final class GeoreferenceService {
     ///   - dem: terrain tiles (disk cache + network).
     ///   - geocoder: looks up the names on a map for wide searches.
     ///   - isOnline: false skips those lookups.
-    init(dem: TerrainTileSource = DEMService.shared, geocoder: PlaceGeocoding = MapKitPlaceGeocoder(),
+    init(dem: TerrainTileSource = DEMService.shared, geocoder: PlaceGeocoding = AppPlaceGeocoder.make(),
          isOnline: @escaping @Sendable () -> Bool = { NetworkPathObserver.isOnlineNow }) {
         self.dem = dem
         self.hintGeocoder = HintGeocoder(geocoder: geocoder, isOnline: isOnline)
@@ -433,7 +433,14 @@ final class GeoreferenceService {
                 }
                 return "No match within \(radius) of you (\(details.joined(separator: "; ")))."
             }
-            return "This map's contour lines didn't match the terrain within \(radius) of you. Search wider, or calibrate it manually."
+            let notHere = "This map's contour lines didn't match the terrain within \(radius) of you."
+            // Names on the map say where to look (Search wider looks them up and checks there first).
+            let names = HintGeocoder.cleanQueries(response?.hintQueries ?? [])
+            if let name = names.first {
+                let others = names.count > 1 ? " and other places named on the map" : ", named on the map"
+                return "\(notHere) Search wider to look for \u{201C}\(name)\u{201D}\(others), or calibrate it manually."
+            }
+            return "\(notHere) Search wider, or calibrate it manually."
         case .noContours, .other:
             return core.isEmpty ? "MapMe couldn't work out where this map is. Calibrate it manually instead." : core
         }

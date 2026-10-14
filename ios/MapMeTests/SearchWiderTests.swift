@@ -407,6 +407,19 @@ final class SearchWiderTests: XCTestCase {
         XCTAssertEqual(near.message,
                        "This map's contour lines didn't match the terrain within 50 km of you. Search wider, or calibrate it manually.")
 
+        // Names on the map say where Search wider will look.
+        let searchedNear = SearchStatus(radiusM: 50_000, searchedRadiusM: 50_000, tilesPlanned: 25, tilesFetched: 25)
+        let namedNear = GeoreferenceService.outcome(
+            from: GeorefResponse(status: "failed", hintQueries: ["GIANTS CASTLE", "MOUNT DURNFORD"], search: searchedNear),
+            hadGPS: true, searchRadiusKm: 50)
+        XCTAssertEqual(namedNear.message,
+                       "This map's contour lines didn't match the terrain within 50 km of you. Search wider to look for \u{201C}Giants Castle\u{201D} and other places named on the map, or calibrate it manually.")
+        let one = GeoreferenceService.outcome(
+            from: GeorefResponse(status: "failed", hintQueries: ["Thaba-Putsoa", "N1"], search: searchedNear),
+            hadGPS: true, searchRadiusKm: 50)
+        XCTAssertEqual(one.message,
+                       "This map's contour lines didn't match the terrain within 50 km of you. Search wider to look for \u{201C}Thaba-Putsoa\u{201D}, named on the map, or calibrate it manually.")
+
         // No position, but names on the map: the message points at them.
         let named = GeoreferenceService.outcome(from: GeorefResponse(status: "failed", message: "No coordinate labels found.",
                                                                      hintQueries: ["CASTLE GORGE"]),
@@ -483,6 +496,129 @@ final class SearchWiderTests: XCTestCase {
     func testQueriesAreCleanedBeforeLookup() {
         XCTAssertEqual(HintGeocoder.cleanQueries(["CASTLE  GORGE", "castle gorge", " Magaliesberg ", "N1", "", "LOSKOP DAM"]),
                        ["Castle Gorge", "Magaliesberg", "Loskop Dam"])
+        // Mixed case is kept as printed (the sheet shows the names).
+        XCTAssertEqual(HintGeocoder.cleanQueries(["KaMasihlenga  Pass", "Thaba-Putsoa", "mount durnford", "KAMASIHLENGA PASS"]),
+                       ["KaMasihlenga Pass", "Thaba-Putsoa", "Mount Durnford"])
+    }
+
+    // MARK: - Places named on the map, in the "Search wider" sheet
+
+    /// A map of the Drakensberg opened in the Magaliesberg, ~450 km away: the names on it are found
+    /// there, and the sheet picks a distance that reaches them (the search checks only the places
+    /// within the distance picked).
+    func testSuggestedRadiusReachesThePlacesNamedOnTheMap() {
+        func suggest(_ km: [Double], after previous: Double? = 50, _ units: DistanceUnits = .metric) -> Double? {
+            WideSearch.suggestedRadiusKm(placeDistancesKm: km, after: previous, units: units)
+        }
+        // 461 km + the 15 km circle around the place: 500 km, not the default 250 km.
+        XCTAssertEqual(suggest([452, 461, 447, 458]), 500)
+        XCTAssertEqual(WideSearch.defaultPresetKm(after: 50, units: .metric), 250)
+        // A namesake next door and one abroad do not move it: the largest group lying together wins.
+        XCTAssertEqual(suggest([452, 30, 1_900, 461]), 500)
+        // On a tie, the nearer group.
+        XCTAssertEqual(suggest([120, 900]), 250)
+        // Just beyond the first search: a smaller radius than the default.
+        XCTAssertEqual(suggest([60]), 100)
+        // Within the circle searched already: nothing to suggest.
+        XCTAssertNil(suggest([20, 35]))
+        XCTAssertNil(suggest([20, 35], after: nil))
+        XCTAssertNil(suggest([80], after: 100))
+        // Beyond the presets: a custom distance, rounded up to 10 km (10 mi).
+        XCTAssertEqual(suggest([1_180, 1_195]), 1_210)
+        XCTAssertEqual(suggest([1_180, 1_195], .imperial) ?? 0, 760 * WideSearch.kmPerMile, accuracy: 1e-6)
+        XCTAssertEqual(suggest([452, 461, 447, 458], .imperial) ?? 0, 300 * WideSearch.kmPerMile, accuracy: 1e-6)
+        // At the limit: as far as a search goes, which still reaches the place.
+        XCTAssertEqual(suggest([1_990]), 2_000)
+        let imperialLimit = suggest([1_990], .imperial) ?? 0
+        XCTAssertEqual(imperialLimit, 1_242 * WideSearch.kmPerMile, accuracy: 1e-6)
+        XCTAssertGreaterThanOrEqual(imperialLimit, 1_990)
+        // Out of reach, or nothing found.
+        XCTAssertNil(suggest([2_300]))
+        XCTAssertNil(suggest([]))
+        XCTAssertNil(suggest([.nan, -5, .infinity]))
+
+        XCTAssertEqual(WideSearch.radiusReaching(476, units: .metric), 500)
+        XCTAssertEqual(WideSearch.radiusReaching(100.4, units: .metric), 100)
+        XCTAssertEqual(WideSearch.radiusReaching(5, units: .metric), 100)
+        XCTAssertNil(WideSearch.radiusReaching(2_001, units: .metric))
+    }
+
+    func testNamedPlacesAreEachNamesNearestPlace() {
+        let here = LatLon(lat: -25.85, lon: 27.40)
+        let castle = GeocodedPlace(name: "Giants Castle", coordinate: Geodesy.destination(here, bearing: 140, distance: 452_000),
+                                   area: "KwaZulu-Natal, South Africa")
+        let namesake = GeocodedPlace(name: "Giants Castle", coordinate: Geodesy.destination(here, bearing: 0, distance: 1_400_000))
+        let durnford = GeocodedPlace(name: "Mount Durnford", coordinate: Geodesy.destination(here, bearing: 145, distance: 461_000))
+        let results: [(query: String, places: [GeocodedPlace])] = [
+            ("Giants Castle", [namesake, castle]),
+            ("Nowhere", []),
+            ("Mount Durnford", [durnford]),
+        ]
+        let places = WideSearch.namedPlaces(from: results, near: here)
+        XCTAssertEqual(places.map(\.name), ["Giants Castle", "Mount Durnford"])
+        XCTAssertEqual(places[0].distanceKm ?? 0, 452, accuracy: 0.5, "the nearest of the places found")
+        XCTAssertEqual(places[0].area, "KwaZulu-Natal, South Africa")
+        XCTAssertEqual(places[1].distanceKm ?? 0, 461, accuracy: 0.5)
+        // Without a position: Apple Maps' first answer, no distance.
+        let anywhere = WideSearch.namedPlaces(from: results, near: nil)
+        XCTAssertEqual(anywhere.first?.coordinate, namesake.coordinate)
+        XCTAssertNil(anywhere.first?.distanceKm)
+
+        XCTAssertEqual(MapKitPlaceGeocoder.area(region: "KwaZulu-Natal", country: "South Africa"), "KwaZulu-Natal, South Africa")
+        XCTAssertEqual(MapKitPlaceGeocoder.area(region: " ", country: "Lesotho"), "Lesotho")
+        XCTAssertEqual(MapKitPlaceGeocoder.area(region: "Lesotho", country: "Lesotho"), "Lesotho")
+        XCTAssertNil(MapKitPlaceGeocoder.area(region: nil, country: nil))
+    }
+
+    func testSheetLooksUpTheFirstNamesAndMeasuresThemFromYou() async {
+        let here = LatLon(lat: -25.85, lon: 27.40)
+        func at(_ km: Double, _ bearing: Double = 140) -> LatLon { Geodesy.destination(here, bearing: bearing, distance: km * 1000) }
+        let geocoder = MockGeocoder(results: [
+            "Mount Durnford": [GeocodedPlace(name: "Mount Durnford", coordinate: at(1_700, 10)),
+                               GeocodedPlace(name: "Mount Durnford", coordinate: at(461))],
+            "Bannerman Hut": [GeocodedPlace(name: "Bannerman Hut", coordinate: at(458))],
+            "Giants Castle": [GeocodedPlace(name: "Giants Castle", coordinate: at(452))],
+            "Fifth Name": [GeocodedPlace(name: "Fifth Name", coordinate: at(455))],
+        ])
+        let finder = HintGeocoder(geocoder: geocoder)
+        let names = ["MOUNT DURNFORD", "BANNERMAN HUT", "NOWHERE", "GIANTS CASTLE", "FIFTH NAME"]
+        let places = await finder.namedPlaces(for: names, near: here, limit: WideSearch.namesLookedUpInSheet)
+        XCTAssertEqual(Set(geocoder.queries), ["Mount Durnford", "Bannerman Hut", "Nowhere", "Giants Castle"],
+                       "only the first four names are looked up")
+        XCTAssertEqual(places.map(\.name), ["Mount Durnford", "Bannerman Hut", "Giants Castle"])
+        XCTAssertEqual(places.compactMap(\.distanceKm).map { Int($0.rounded()) }, [461, 458, 452])
+        XCTAssertEqual(WideSearch.suggestedRadiusKm(placeDistancesKm: places.compactMap(\.distanceKm), after: 50, units: .metric),
+                       500)
+
+        var offline = HintGeocoder(geocoder: geocoder)
+        offline.isOnline = { false }
+        let none = await offline.namedPlaces(for: names, near: here, limit: 4)
+        XCTAssertTrue(none.isEmpty)
+    }
+
+    func testPlacesFooterSaysWhetherTheDistanceReachesThem() {
+        func place(_ name: String, _ km: Double?) -> NamedPlace {
+            NamedPlace(name: name, coordinate: LatLon(lat: -29.27, lon: 29.52), area: nil, distanceKm: km)
+        }
+        let drakensberg = [place("Giants Castle", 452), place("Mount Durnford", 461)]
+        func footer(_ places: [NamedPlace], _ selected: Double?, previous: Double? = 50, names: Bool = true,
+                    _ units: DistanceUnits = .metric) -> String {
+            SearchWiderSheet.placesFooter(places, selectedKm: selected, previousKm: previous, useMapNames: names, units: units)
+        }
+        XCTAssertEqual(footer(drakensberg, 250), "Pick 500 km or more to reach them.")
+        XCTAssertEqual(footer(drakensberg, 500), "MapMe checks these places first.")
+        XCTAssertEqual(footer(drakensberg, 1_000, names: false),
+                       "Turn on \u{201C}Use names on the map\u{201D} to check these places first.")
+        XCTAssertEqual(footer(drakensberg, 150 * WideSearch.kmPerMile, .imperial), "Pick 300 mi or more to reach them.")
+        XCTAssertEqual(footer([place("Giants Castle", nil)], nil), "MapMe checks these places first.", "no position")
+        XCTAssertEqual(footer([place("Far Away", 2_300)], 1_000), "More than 2\(nbsp)000 km from you: too far to search.")
+        XCTAssertEqual(footer([place("Hartbeespoort", 20)], 250), "Within the 50 km searched already.")
+        XCTAssertEqual(footer([], 250), "")
+
+        XCTAssertTrue(SearchWiderSheet.reaches(500, drakensberg[0]))
+        XCTAssertFalse(SearchWiderSheet.reaches(250, drakensberg[0]))
+        XCTAssertTrue(SearchWiderSheet.reaches(nil, drakensberg[0]))
+        XCTAssertTrue(SearchWiderSheet.reaches(250, place("Somewhere", nil)))
     }
 
     func testLookupsRunAFewAtATimeAndSlowOnesAreDropped() async {

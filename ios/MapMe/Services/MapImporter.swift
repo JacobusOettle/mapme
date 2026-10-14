@@ -470,6 +470,11 @@ final class MapImporter {
         }
         ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
         ctx.fill(CGRect(x: 0, y: 0, width: plan.width, height: plan.height))
+        // Rasters embedded in the page are resampled with this quality, set before the page is
+        // drawn (its content cannot change it). A GPS app's export is one ~100 ppi map image
+        // without /Interpolate, scaled about 3× here: it must come out smooth, not in
+        // nearest-neighbour blocks that turn thin contour lines into staircases.
+        // PDFRasterRenderTests checks that and records the kernel CoreGraphics uses.
         ctx.interpolationQuality = .high
         ctx.setShouldAntialias(true)
         ctx.concatenate(plan.transform)

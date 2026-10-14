@@ -56,8 +56,9 @@ struct MapScreen: View {
 
     @ViewBuilder
     private func content(map: MapDocument) -> some View {
-        GeometryReader { geo in
-            let safe = geo.safeAreaInsets
+        // SwiftUI's safe area, raised to the window's where it falls short (a screen laid out
+        // while a cover was still closing), so the controls never slide under the status bar.
+        SafeAreaReader { size, safe in
             let bottomGap = max(8, safe.bottom - 16)
             ZStack {
                 if let tileStore {
@@ -85,7 +86,7 @@ struct MapScreen: View {
                     Theme.mapBackground.ignoresSafeArea()
                 }
 
-                chrome(map: map, safe: safe, size: geo.size, bottomGap: bottomGap)
+                chrome(map: map, safe: safe, size: size, bottomGap: bottomGap)
                     .ignoresSafeArea()
             }
         }

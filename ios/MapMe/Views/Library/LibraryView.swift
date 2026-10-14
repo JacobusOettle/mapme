@@ -122,6 +122,7 @@ struct LibraryView: View {
             SettingsView()
                 .environment(model)
         }
+        .samplePhotoPickerStandIn(model)
         .sensoryFeedback(.impact(weight: .light), trigger: openCount)
     }
 
@@ -251,3 +252,45 @@ struct LibraryView: View {
         }
     }
 }
+
+extension View {
+    /// Debug builds with `-importSamplePhotoAfterSheet` (UI tests): a stand-in for the photo picker
+    /// opens over the library; its pick closes it and starts the sample photo's import in the same
+    /// moment, as a pick in the real picker does, so the import cover is asked for while a sheet is
+    /// still closing. Release builds: nothing.
+    @ViewBuilder
+    func samplePhotoPickerStandIn(_ model: AppModel) -> some View {
+        #if DEBUG
+        modifier(SamplePhotoPickerStandIn(model: model))
+        #else
+        self
+        #endif
+    }
+}
+
+#if DEBUG
+private struct SamplePhotoPickerStandIn: ViewModifier {
+    static let launchArgument = "-importSamplePhotoAfterSheet"
+
+    let model: AppModel
+    @State private var shown = ProcessInfo.processInfo.arguments.contains(SamplePhotoPickerStandIn.launchArgument)
+
+    func body(content: Content) -> some View {
+        content.sheet(isPresented: $shown) {
+            NavigationStack {
+                List {
+                    Button {
+                        shown = false
+                        model.importSamplePhoto()
+                    } label: {
+                        Label("Sample photo", systemImage: "photo")
+                    }
+                    .accessibilityIdentifier("pickSamplePhotoButton")
+                }
+                .navigationTitle("Photos")
+                .navigationBarTitleDisplayMode(.inline)
+            }
+        }
+    }
+}
+#endif

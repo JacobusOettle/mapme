@@ -2,7 +2,8 @@ import SwiftUI
 
 extension View {
     /// Floating button chrome for the photo screens: Liquid Glass on iOS 26 (prominent = tinted with
-    /// the accent), a frosted material capsule with a soft shadow on iOS 17 and 18.
+    /// the accent), a frosted material capsule with a soft shadow on iOS 17 and 18. With
+    /// `.controlSize(.large)` both are at least 44 pt tall (`Theme.minTapTarget`).
     @ViewBuilder
     func photoGlassButton(prominent: Bool = false) -> some View {
         #if compiler(>=6.2)
@@ -34,11 +35,15 @@ private struct PhotoMaterialButtonBody: View {
     let configuration: ButtonStyleConfiguration
     let prominent: Bool
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.controlSize) private var controlSize
 
     var body: some View {
+        let large = controlSize == .large || controlSize == .extraLarge
         configuration.label
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
+            .frame(minHeight: large ? Theme.minTapTarget : nil)
+            .contentShape(Capsule())
             .foregroundStyle(prominent ? Color.black : Color.white)
             .background {
                 if prominent {

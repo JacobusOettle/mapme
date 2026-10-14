@@ -78,6 +78,20 @@ struct WideSearchChoice: Equatable {
     }
 }
 
+/// A name on the map and the place Apple Maps found for it ("Search wider" sheet: "Giant's Castle,
+/// 452 km away").
+struct NamedPlace: Equatable, Identifiable, Sendable {
+    /// The name as looked up ("Giant's Castle").
+    var name: String
+    var coordinate: LatLon
+    /// Region and country, when Apple Maps gave them ("KwaZulu-Natal, South Africa").
+    var area: String?
+    /// From your position, km (nil without one).
+    var distanceKm: Double?
+
+    var id: String { name }
+}
+
 /// A button on the import result screen when a map could not be located.
 enum ImportResultAction: Equatable {
     case searchWider
@@ -118,6 +132,60 @@ enum WideSearch {
     static func defaultPresetKm(after previousKm: Double?, units: DistanceUnits) -> Double? {
         let minimum = max(previousKm ?? nearRadiusKm, 1) * 2.5
         return presetsKm(units: units).first { $0 >= minimum - 0.5 }
+    }
+
+    /// Names on the map the "Search wider" sheet looks up as it opens.
+    static let namesLookedUpInSheet = 4
+    /// Places named on one map lie within this of each other (a sheet spans a few tens of km): a
+    /// name found farther from the rest is taken for a namesake elsewhere.
+    static let placeClusterKm = 150.0
+    /// The circle the core checks around each place named on the map, km.
+    static var hintRadiusKm: Double { SearchHint.defaultRadiusM / 1000 }
+
+    /// Each name's place, with its distance from `fix`: the one nearest `fix` (Apple Maps' first
+    /// without a fix). Names Apple Maps did not find are left out; the rest keep their order.
+    static func namedPlaces(from results: [(query: String, places: [GeocodedPlace])], near fix: LatLon?) -> [NamedPlace] {
+        results.compactMap { result -> NamedPlace? in
+            let candidates = result.places.filter { $0.coordinate.lat.isFinite && $0.coordinate.lon.isFinite }
+            guard let first = candidates.first else { return nil }
+            guard let fix else {
+                return NamedPlace(name: result.query, coordinate: first.coordinate, area: first.area, distanceKm: nil)
+            }
+            let measured = candidates.map { (place: $0, km: Geodesy.distance(fix, $0.coordinate) / 1000) }
+            guard let nearest = measured.min(by: { $0.km < $1.km }) else { return nil }
+            return NamedPlace(name: result.query, coordinate: nearest.place.coordinate, area: nearest.place.area,
+                              distanceKm: nearest.km)
+        }
+    }
+
+    /// The radius "Search wider" picks once the places named on the map have been found
+    /// `placeDistancesKm` from you: the smallest one reaching the largest group of them that lie
+    /// together (`placeClusterKm`, the nearer group on a tie), with room for the circle checked
+    /// around each place (`radiusReaching`). Nil when none of them is within the 2 000 km limit,
+    /// or that group lies within the `previousKm` already searched.
+    static func suggestedRadiusKm(placeDistancesKm: [Double], after previousKm: Double?, units: DistanceUnits) -> Double? {
+        let distances = placeDistancesKm.filter { $0.isFinite && $0 >= 0 && $0 <= maxRadiusKm }.sorted()
+        guard !distances.isEmpty else { return nil }
+        var best = (first: 0, last: 0)
+        var first = 0
+        for last in distances.indices {
+            while distances[last] - distances[first] > placeClusterKm { first += 1 }
+            if last - first > best.last - best.first { best = (first: first, last: last) }
+        }
+        let farthest = distances[best.last]
+        guard farthest > (previousKm ?? nearRadiusKm) + 0.5 else { return nil }
+        return radiusReaching(min(farthest + hintRadiusKm, maxRadiusKm), units: units)
+    }
+
+    /// The smallest radius the sheet offers that reaches `km`: a preset, else a custom distance
+    /// rounded up to 10 km (10 mi) within the custom range; nil beyond the 2 000 km limit.
+    static func radiusReaching(_ km: Double, units: DistanceUnits) -> Double? {
+        guard km.isFinite, km <= maxRadiusKm + 0.5 else { return nil }
+        if let preset = presetsKm(units: units).first(where: { $0 >= km - 0.5 }) { return preset }
+        let perKm = units == .metric ? 1 : 1 / kmPerMile
+        let range = customRange(units: units)
+        let value = min(max((km * perKm / 10).rounded(.up) * 10, Double(range.lowerBound)), Double(range.upperBound))
+        return customKm(value, units: units)
     }
 
     /// Hard cap on terrain tiles for a search with this estimate.

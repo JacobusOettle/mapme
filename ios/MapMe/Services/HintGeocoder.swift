@@ -6,6 +6,8 @@ import MapKit
 struct GeocodedPlace: Equatable, Sendable {
     var name: String
     var coordinate: LatLon
+    /// Region and country ("KwaZulu-Natal, South Africa"), when known.
+    var area: String? = nil
 }
 
 /// Looks up a name printed on a map ("Castle Gorge"). `MapKitPlaceGeocoder` in the app, a mock in
@@ -39,12 +41,64 @@ struct MapKitPlaceGeocoder: PlaceGeocoding {
             search.cancel()
         }
         return response.mapItems.compactMap { item -> GeocodedPlace? in
-            let c = item.placemark.coordinate
+            let placemark = item.placemark
+            let c = placemark.coordinate
             guard CLLocationCoordinate2DIsValid(c), c.latitude != 0 || c.longitude != 0 else { return nil }
-            return GeocodedPlace(name: item.name ?? query, coordinate: LatLon(c))
+            return GeocodedPlace(name: item.name ?? query, coordinate: LatLon(c),
+                                 area: Self.area(region: placemark.administrativeArea, country: placemark.country))
         }
     }
+
+    /// "KwaZulu-Natal, South Africa" (either alone when the other is missing or the same).
+    static func area(region: String?, country: String?) -> String? {
+        var parts: [String] = []
+        for part in [region, country] {
+            guard let text = part?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty,
+                  !parts.contains(text) else { continue }
+            parts.append(text)
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
 }
+
+/// The app's place lookups: Apple Maps; in Debug builds launched with
+/// `-mockPlaces "Name=lat,lon;Name=lat,lon"` (UI tests) a fixed table instead.
+enum AppPlaceGeocoder {
+    static func make() -> PlaceGeocoding {
+        #if DEBUG
+        if let table = FixedPlaceGeocoder(launchArguments: ProcessInfo.processInfo.arguments) {
+            return table
+        }
+        #endif
+        return MapKitPlaceGeocoder()
+    }
+}
+
+#if DEBUG
+/// Answers lookups from `-mockPlaces "Name=lat,lon;…"` (names match ignoring case).
+struct FixedPlaceGeocoder: PlaceGeocoding {
+    var table: [String: GeocodedPlace]
+
+    init?(launchArguments args: [String]) {
+        guard let flag = args.firstIndex(of: "-mockPlaces"), flag + 1 < args.count else { return nil }
+        var table: [String: GeocodedPlace] = [:]
+        for entry in args[flag + 1].split(separator: ";") {
+            let parts = entry.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            guard parts.count == 2, !parts[0].isEmpty else { continue }
+            let numbers = parts[1].split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+            guard numbers.count == 2 else { continue }
+            table[parts[0].lowercased()] = GeocodedPlace(name: parts[0], coordinate: LatLon(lat: numbers[0], lon: numbers[1]),
+                                                         area: "Test place")
+        }
+        guard !table.isEmpty else { return nil }
+        self.table = table
+    }
+
+    func places(matching query: String, near center: LatLon?, radiusM: Double) async throws -> [GeocodedPlace] {
+        table[query.lowercased()].map { [$0] } ?? []
+    }
+}
+#endif
 
 /// Turns the names the core found on a map (`hint_queries`) into search hints: each name is looked
 /// up (a few at a time, each with a timeout), places beyond the search radius of the GPS fix are
@@ -72,9 +126,28 @@ struct HintGeocoder {
     func hints(for queries: [String], near fix: LatLon?, searchRadiusM: Double) async -> [SearchHint] {
         let names = Array(Self.cleanQueries(queries).prefix(maxQueries))
         guard !names.isEmpty, isOnline() else { return [] }
+        let results = await lookUpAll(names, near: fix, radiusM: searchRadiusM)
+        return Self.hints(from: results, near: fix, searchRadiusM: searchRadiusM,
+                          maxResultsPerQuery: maxResultsPerQuery, maxHints: maxHints, hintRadiusM: hintRadiusM,
+                          mergeDistanceM: mergeDistanceM)
+    }
+
+    /// Where the first `limit` names were found, for the "Search wider" sheet: each name's place
+    /// nearest `fix` (anywhere within reach of the widest search) and its distance. Names not
+    /// found are left out; offline, nothing.
+    func namedPlaces(for queries: [String], near fix: LatLon?, limit: Int) async -> [NamedPlace] {
+        let names = Array(Self.cleanQueries(queries).prefix(max(0, limit)))
+        guard !names.isEmpty, isOnline() else { return [] }
+        let results = await lookUpAll(names, near: fix, radiusM: WideSearch.maxRadiusKm * 1000)
+        return WideSearch.namedPlaces(from: results, near: fix)
+    }
+
+    /// Looks `names` up a few at a time (`maxConcurrent`), each within `timeoutSeconds`, searching
+    /// around `fix` within about `radiusM`; results in the names' order.
+    private func lookUpAll(_ names: [String], near fix: LatLon?,
+                           radiusM: Double) async -> [(query: String, places: [GeocodedPlace])] {
         let geocoder = self.geocoder
         let timeout = timeoutSeconds
-        let region = searchRadiusM
         var found = [[GeocodedPlace]](repeating: [], count: names.count)
         await withTaskGroup(of: (Int, [GeocodedPlace]).self) { group in
             var next = 0
@@ -83,7 +156,7 @@ struct HintGeocoder {
                 let name = names[index]
                 next += 1
                 group.addTask {
-                    let places = await Self.lookUp(name, with: geocoder, near: fix, radiusM: region, timeout: timeout)
+                    let places = await Self.lookUp(name, with: geocoder, near: fix, radiusM: radiusM, timeout: timeout)
                     return (index, places)
                 }
             }
@@ -94,15 +167,12 @@ struct HintGeocoder {
                 let name = names[index]
                 next += 1
                 group.addTask {
-                    let places = await Self.lookUp(name, with: geocoder, near: fix, radiusM: region, timeout: timeout)
+                    let places = await Self.lookUp(name, with: geocoder, near: fix, radiusM: radiusM, timeout: timeout)
                     return (index, places)
                 }
             }
         }
-        let results: [(query: String, places: [GeocodedPlace])] = zip(names, found).map { (query: $0, places: $1) }
-        return Self.hints(from: results, near: fix, searchRadiusM: searchRadiusM,
-                          maxResultsPerQuery: maxResultsPerQuery, maxHints: maxHints, hintRadiusM: hintRadiusM,
-                          mergeDistanceM: mergeDistanceM)
+        return zip(names, found).map { (query: $0, places: $1) }
     }
 
     /// Hints from looked-up places, best first: each name's nearest place within `searchRadiusM`
@@ -136,17 +206,21 @@ struct HintGeocoder {
         return hints
     }
 
-    /// Names worth looking up: trimmed, at least 3 letters, each once (ignoring case), in title
-    /// case ("CASTLE GORGE" → "Castle Gorge").
+    /// Names worth looking up: trimmed, at least 3 letters, each once (ignoring case). Names in
+    /// capitals or in lower case are put in title case ("CASTLE GORGE" → "Castle Gorge"); mixed
+    /// case is kept as printed ("KaMasihlenga Pass", "Thaba-Putsoa"), as the "Search wider" sheet
+    /// shows them.
     static func cleanQueries(_ queries: [String]) -> [String] {
         var seen = Set<String>()
         var out: [String] = []
         for raw in queries {
             let collapsed = raw.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-            guard collapsed.filter(\.isLetter).count >= 3 else { continue }
+            let letters = collapsed.filter(\.isLetter)
+            guard letters.count >= 3 else { continue }
             let key = collapsed.lowercased()
             guard seen.insert(key).inserted else { continue }
-            out.append(collapsed.capitalized)
+            let mixedCase = letters != letters.uppercased() && letters != letters.lowercased()
+            out.append(mixedCase ? collapsed : collapsed.capitalized)
         }
         return out
     }

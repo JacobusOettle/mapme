@@ -1540,7 +1540,20 @@ scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
   already searched selected; what it will download from `mm_search_estimate`
   ("Wi-Fi recommended" from 25 MB), and on an expensive path (mobile data,
   hotspot) Start asks first above 50 MB; "Use names on the map" on by
-  default. `WideSearch` holds those limits and the outcome kinds
+  default. As the sheet opens it looks up the first 4 names on the map
+  (`HintGeocoder.namedPlaces`: each name's place nearest you, anywhere within
+  2 000 km) and lists them with their distance ("Giant's Castle, 452 km
+  away"), since a search checks only the places within the distance picked.
+  Unless a distance has been picked by then, it selects the smallest that
+  reaches the largest group of them lying within 150 km of each other, plus
+  the 15 km circle checked around each (`WideSearch.suggestedRadiusKm`: a
+  preset, else a custom distance rounded up to 10 km or 10 mi, at most
+  2 000 km; nothing when they lie within the radius already searched), and
+  says under the list whether the distance picked reaches them. After the
+  first search the result screen names the first of them ("Search wider to
+  look for “Giant's Castle” and other places named on the map"); names in
+  capitals are put in title case, mixed case is kept as printed.
+  `WideSearch` holds those limits and the outcome kinds
   (`GeorefFailure`: no terrain match, stopped at the tile limit, no
   position, no contours, terrain unavailable, …) the result screen words
   its message and buttons from. The search itself (`GeoreferenceService.run`):
@@ -1576,6 +1589,34 @@ scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
   The import screen shows the stage and the core's `search` progress
   ("Searched 320 of 1 000 km"), and a failed wide search says what was
   searched.
+* Safe areas: a full-screen cover that SwiftUI presents while another
+  presentation is still opening or closing can be laid out with a zero safe
+  area (on a device the corner editor's Cancel / Done were drawn under the
+  status bar, out of reach). `RootView` therefore presents the
+  import cover only once `PresentationGate.settled()` finds no view
+  controller in the app's windows in a presentation or dismissal transition
+  (each waited for to its end, at most 2 s), and the chrome of full-screen
+  surfaces does not rely on SwiftUI's safe area alone
+  (`Views/Common/WindowSafeArea.swift`): `windowSafeAreaPadding()` (corner
+  editor, progress screen, calibration, the Search wider sheet's Start bar)
+  and `SafeAreaReader` (map screen) measure the view's frame in its window
+  with a UIKit probe and add whatever part of the window's unsafe area
+  (`UIWindow.safeAreaInsets`) SwiftUI's safe area left uncovered, re-measured
+  on resizing and rotation and once the presentation it came in with has
+  finished. The corner editor's header buttons are large controls (at least
+  44 pt tall). Debug builds launched with `-importSamplePhotoAfterSheet`
+  open a stand-in for the photo picker whose pick starts the sample photo's
+  import as the sheet closes (`PhotoImportUITests`); `-mockPlaces
+  "Name=lat,lon;…"` replaces Apple Maps' place lookups with a fixed table
+  (`SearchWiderUITests`).
+* PDFs are rendered at 300 dpi with `interpolationQuality = .high`, set before
+  the page is drawn: rasters embedded in the page (a GPS app's export is one
+  ~100 ppi image without /Interpolate, scaled about 3×) are resampled
+  smoothly rather than in nearest-neighbour blocks. `PDFRasterRenderTests`
+  renders a hand-made PDF with a 1 px line in a 100 ppi image, checks the
+  upscaling is smooth and unbiased and attaches the measured profile next to
+  nearest, bilinear, bicubic and Lanczos predictions (poppler's `pdftoppm`,
+  which the corpus tools use, is bilinear below 4× with a half-pixel shift).
 * Photos of paper maps keep the original as `source-photo.*` and the flattened
   page as `source.jpg` (the base raster); `MapDocument.photoSource` stores the
   page corners so they can be adjusted later, and georeferencing runs with

@@ -63,6 +63,9 @@ struct CornerEditorView: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 10)
             }
+            // Clear of the status bar and the home indicator even when the cover was laid out
+            // without a safe area (it came up while the photo picker was still closing).
+            .windowSafeAreaPadding()
         }
         .preferredColorScheme(.dark)
         .sensoryFeedback(.selection, trigger: grabCount)
@@ -75,36 +78,44 @@ struct CornerEditorView: View {
 
     // MARK: - Chrome
 
+    /// Cancel, the title and Done. The two buttons sit in equally wide side columns, so the title
+    /// stays centred; they keep their full size (large controls: at least 44 pt tall) and the
+    /// photo's name gives way first on a narrow screen.
     private var header: some View {
-        ZStack {
+        HStack(spacing: 8) {
+            Button(action: onCancel) {
+                Text("Cancel")
+                    .foregroundStyle(Color.white)
+            }
+            .photoGlassButton()
+            .fixedSize()
+            .accessibilityIdentifier("cornersCancelButton")
+            .frame(maxWidth: .infinity, alignment: .leading)
             VStack(spacing: 2) {
                 Text("Adjust Corners")
                     .font(.headline)
                     .foregroundStyle(Color.white)
+                    .lineLimit(1)
+                    .accessibilityAddTraits(.isHeader)
                 Text(photo.name)
                     .font(.caption)
                     .foregroundStyle(Color.white.opacity(0.6))
                     .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            .padding(.horizontal, 110)
-            HStack {
-                Button(action: onCancel) {
-                    Text("Cancel")
-                        .foregroundStyle(Color.white)
-                }
-                .photoGlassButton()
-                .accessibilityIdentifier("cornersCancelButton")
-                Spacer()
-                Button(action: finish) {
-                    Text("Done")
-                        .fontWeight(.semibold)
-                        .foregroundStyle(Color.black)
-                }
-                .photoGlassButton(prominent: true)
-                .disabled(!isValid)
-                .accessibilityIdentifier("cornersDoneButton")
+            .layoutPriority(1)
+            Button(action: finish) {
+                Text("Done")
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Color.black)
             }
+            .photoGlassButton(prominent: true)
+            .fixedSize()
+            .disabled(!isValid)
+            .accessibilityIdentifier("cornersDoneButton")
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
+        .controlSize(.large)
         .font(.body)
     }
 

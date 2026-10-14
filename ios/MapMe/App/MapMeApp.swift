@@ -21,10 +21,15 @@ struct MapMeApp: App {
 /// swap in place instead of one cover dismissing while the next presents.
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    /// The import cover is up. Follows `model.isImportFlowActive`, but comes up only once no other
+    /// presentation is still opening or closing (`PresentationGate`): the photo picker, the Files
+    /// browser or a context menu closing as the import starts would otherwise leave the cover
+    /// laid out without a safe area, its header under the status bar.
+    @State private var showsImportFlow = false
 
     var body: some View {
-        // A plain reference for the cover binding's setter (not the local @Bindable var below,
-        // which a possibly @Sendable closure must not capture).
+        // A plain reference for the closures below (not the local @Bindable var, which a
+        // possibly @Sendable closure must not capture).
         let app = self.model
         @Bindable var model = model
         let flowActive = model.isImportFlowActive
@@ -34,11 +39,21 @@ struct RootView: View {
                     MapScreen(mapID: id)
                 }
         }
-        .fullScreenCover(isPresented: Binding(get: { flowActive }, set: { shown in
+        .fullScreenCover(isPresented: $showsImportFlow) {
+            ImportFlowView()
+        }
+        .onChange(of: showsImportFlow) { _, shown in
             // Only a dismissal the model didn't ask for cancels the flow.
             if !shown, app.isImportFlowActive { app.cancelImport() }
-        })) {
-            ImportFlowView()
+        }
+        .task(id: flowActive) {
+            guard flowActive else {
+                showsImportFlow = false
+                return
+            }
+            guard !showsImportFlow else { return }
+            await PresentationGate.settled()
+            if !Task.isCancelled, app.isImportFlowActive { showsImportFlow = true }
         }
     }
 }

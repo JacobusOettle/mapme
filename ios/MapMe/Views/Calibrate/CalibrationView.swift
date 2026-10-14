@@ -53,7 +53,10 @@ struct CalibrationView: View {
         NavigationStack {
             Group {
                 if let map = model.library.map(id: mapID) {
+                    // The bottom panel and the "I'm here" button stay clear of the home indicator
+                    // even if the sheet was laid out without a safe area.
                     content(map)
+                        .windowSafeAreaPadding()
                 } else {
                     ContentUnavailableView("Map not found", systemImage: "map",
                                            description: Text("This map is no longer in your library."))

@@ -436,11 +436,19 @@ final class AppModel {
 
     #if DEBUG
     /// `-importSamplePhoto` launch argument: import a photo of the sample sheet through the photo
-    /// flow, corner editor included. Debug builds bundle the real phone photo of the printed sheet
-    /// (SamplePhoto.jpg: wooden table, folded in four); without it the bundled sample map is
-    /// photographed synthetically (tilted on a table, uneven light).
+    /// flow, corner editor included.
     private func importSamplePhotoIfRequested() -> Bool {
         guard ProcessInfo.processInfo.arguments.contains("-importSamplePhoto") else { return false }
+        importSamplePhoto()
+        return true
+    }
+
+    /// Imports a photo of the sample sheet through the photo flow, corner editor included (also
+    /// started from the photo picker's stand-in, `samplePhotoPickerStandIn`). Debug builds bundle
+    /// the real phone photo of the printed sheet (SamplePhoto.jpg: wooden table, folded in four);
+    /// without it the bundled sample map is photographed synthetically (tilted on a table, uneven
+    /// light).
+    func importSamplePhoto() {
         let picker = cornerPicker
         let name = "Grootkloof photo"
         startImport(name: name) { importer, progress in
@@ -452,7 +460,6 @@ final class AppModel {
                                                       mode: .detectPhoto(picker, fallbackCorners: photo.corners),
                                                       progress: progress)
         }
-        return true
     }
     #endif
 

@@ -68,6 +68,55 @@ final class SearchWiderUITests: XCTestCase {
         XCTAssertTrue(searchWider.exists)
     }
 
+    /// A map of somewhere far away: the names on it are found ~430 km from you (`-mockPlaces`
+    /// stands in for Apple Maps), so the sheet says how far away they are and picks 500 km, which
+    /// reaches them, instead of the default 250 km.
+    @MainActor
+    func testSearchWiderSaysWhereTheNamedPlacesAreAndReachesThem() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-importSample", "-simulateTerrainMiss", "-mockLocation", "-25.8405,27.3920",
+                               "-mockPlaces", "Grootkloof=-29.2678,29.5213;Magaliesberg=-29.2167,29.4667"]
+        allowLocationAlerts()
+        app.launch()
+
+        let searchWider = app.buttons["searchWiderButton"]
+        guard searchWider.waitForExistence(timeout: 180) else {
+            attachScreenshot(app, "07b-search-wider-timeout")
+            XCTFail("The import did not end on the not-found screen with Search wider")
+            return
+        }
+        Thread.sleep(forTimeInterval: 1.5)
+        searchWider.tap()
+
+        let place = app.descendants(matching: .any).matching(identifier: "namedPlace-0").firstMatch
+        guard place.waitForExistence(timeout: 20) else {
+            attachScreenshot(app, "07b-named-places-missing")
+            XCTFail("The sheet does not list the places named on the map")
+            return
+        }
+        XCTAssertTrue(place.label.contains("km away"), "place row: \(place.label)")
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "namedPlace-1").firstMatch.exists)
+        let fiveHundred = app.buttons["radiusOption-500"]
+        let deadline = Date().addingTimeInterval(10)
+        while !fiveHundred.isSelected, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+        XCTAssertTrue(fiveHundred.isSelected, "500 km (reaching the places ~430 km away) is not picked")
+        XCTAssertFalse(app.buttons["radiusOption-250"].isSelected)
+        let footer = app.staticTexts["namedPlacesFooter"]
+        XCTAssertTrue(footer.exists && footer.label.contains("checks these places first"), "footer: \(footer.label)")
+        Thread.sleep(forTimeInterval: 1)
+        attachScreenshot(app, "07b-search-wider-far-places")
+
+        // A shorter distance no longer reaches them, and the footer says what does.
+        let shorter = app.buttons["radiusOption-250"]
+        if shorter.exists { shorter.tap() }
+        XCTAssertTrue(footer.waitForExistence(timeout: 5))
+        XCTAssertTrue(footer.label.contains("Pick 500 km or more"), "footer: \(footer.label)")
+        app.buttons["cancelSearchWiderButton"].tap()
+        XCTAssertTrue(app.buttons["calibrateButton"].waitForExistence(timeout: 10))
+    }
+
     // MARK: - Helpers
 
     @MainActor

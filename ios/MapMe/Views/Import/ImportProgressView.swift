@@ -21,6 +21,9 @@ struct ImportProgressView: View {
                     .padding(.horizontal, 24)
                     .padding(.vertical, 20)
                     .frame(maxWidth: 520)
+                    // The buttons stay clear of the home indicator (and the title of the status
+                    // bar) even if the cover was laid out without a safe area.
+                    .windowSafeAreaPadding()
             }
         }
         .animation(.spring(response: 0.5, dampingFraction: 0.85), value: job?.phase)
