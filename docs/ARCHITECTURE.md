@@ -1229,7 +1229,9 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
                       the chunked wide search on synthetic terrain;
                       wide_measure.rs: ignored network measurements;
                       sheets.rs: the Castle Gorge and Mhlabatini sheets; stress.rs:
-                      the grid under simulated phone-OCR damage)
+                      the grid under simulated phone-OCR damage; gaia_contours.rs: the
+                      user's Gaia GPS exports, smooth and blocky page renders and the
+                      native raster)
 fixtures/grootkloof/  the real map (PDF + extracted JPEG), DEM tiles, OCR fixture, truth
 fixtures/castle-gorge/, fixtures/mhlabatini/  two more sheets of the series: PDF, JPEG,
                       DEM tiles, truth, RapidOCR (ocr.json) and Apple Vision OCR
