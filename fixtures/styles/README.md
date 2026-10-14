@@ -24,10 +24,11 @@ directory is the small committed subset that `core/tests/styles.rs` runs; the fu
 | dense-himalaya | dense 1:25 000, 10 m | Himalayan foothills | 3 | scan | located, ~1 m |
 
 Since the contour mask became a line detector on the contour ink at the raster's effective
-resolution (`core/src/contour_lines.rs`, docs/ARCHITECTURE.md *Contour lines of any map style*),
-every case but `sparse-drakensberg` (outside the default scale range) is located from the
-centre: gaia-drakensberg ~7 m (analysed at level 3), bw-tasmania ~9 m and grey-tasmania ~4 m
-(grey/black ink), faded-himalaya ~1 m.
+resolution (`core/src/contour_lines.rs`, docs/ARCHITECTURE.md *Contour lines of any map style*)
+and the search covers 0.4-50 m/px with scale bars as priors (*Any map: scales, priors,
+units*), every case is located from the centre: gaia-drakensberg ~7 m (analysed at level 3),
+bw-tasmania ~9 m and grey-tasmania ~4 m (grey/black ink), faded-himalaya ~1 m,
+sparse-drakensberg 40/104 m (median/max at 30 m/px, searched on zoom-9 tiles).
 
 ## Case format (common benchmark format)
 
@@ -65,7 +66,9 @@ screenshots. Effects: photocopy, fading, JPEG. Projections: Web Mercator, UTM, n
 
 `dem/<region>/`: zoom 11 under each case's image footprint + 4 km, and the fine zoom the core
 picks for the refinement (13, or coarser past 36 tiles) under the footprint + 20 %
-(`synth_topo.regression_tiles`). Nothing else: the core marks the rest missing, as offline. So
+(`synth_topo.regression_tiles`); for sparse-drakensberg (30 m/px, searched in the coarse
+scale band) also the zoom-9/10 tiles of its search and the zoom-13 tiles its refinement
+asks for (20 tiles). Nothing else: the core marks the rest missing, as offline. So
 the "far" tests here only check that little terrain does not produce a confident answer; the
 full benchmark has the terrain around the far GPS too.
 

@@ -241,7 +241,6 @@ fn gaia_drakensberg_far() {
 }
 
 #[test]
-#[ignore = "1:250 000 at 30 m/px: the scale bar and the coarse scale band reach it, but the hypsometric tints put much of the map in the brown ink models, and this fixture holds only zoom-11/13 tiles"]
 fn sparse_drakensberg_centre() {
     located_from_centre("sparse-drakensberg");
 }

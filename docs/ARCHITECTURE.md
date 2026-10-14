@@ -124,6 +124,72 @@ order:
    GPS position). 2 points give a similarity, 3 an affine, 4+ an affine
    (homography for photos).
 
+### Contours on any map: what makes it work
+
+The contour path was built on 1:25 000 MCSA sheets (brown 5 m contours on white paper,
+300 dpi, 1.9 m/px). It has to locate any map with contour lines: Gaia GPS and OpenTopoMap
+exports, USGS, Swiss, OS, Kompass and N50 sheets, photocopies, faded prints, bare grey
+contours, 1:250 000 maps over hypsometric tints. Four things make that work:
+
+1. **Effective resolution** (`contour_lines::estimate_level`). A PDF whose 100 ppi raster
+   the app renders at 300 dpi spreads every 1 px line over 3–4 soft pixels (or 3 × 3
+   blocks). The mask is made on the raster box-averaged back to about its native size
+   (level 2–4) and its samples mapped back to page pixels exactly; sharp scans and the
+   MCSA sheets stay at level 1.
+2. **Lines first, then ink** (`ink_lines`, `model_bits`, `select_model`). A contour pixel
+   is darker than the background on both sides 1–3 px away (tints, hillshade and area
+   edges never are). Its ink is the colour divided by the background (printed inks) or
+   white-balanced by the paper (digital maps); of five warm ink models, faded to strong,
+   and a grey/black one (only on maps without coloured lines), the one whose lines hang
+   together best wins. See *Contour lines of any map style*.
+3. **Scale range and priors** (`wide::scale_bands`, `scalebar.rs`). 0.4–50 m/px in bands
+   (zoom-11 tiles up to 12 m/px, a coarser zoom beyond); a printed ratio with the dpi is a
+   constraint, a scale bar ("1 mi", "0 1 2 km") a ±15 % prior searched first. Maps of
+   more than 40 km get a small perspective term for their projection. See *Any map:
+   scales, priors, units*.
+4. **Units and names** (`labels::height_unit`, `hints::hint_queries`). Heights are in feet
+   when the map says so or the terrain agrees; attribution and projection notes are no
+   places; the names on the map are what the app geocodes into hints when the user is
+   far from it ("Search wider").
+
+What keeps it honest is the refinement's fit (explained variance, within-segment spread
+scaled to the DEM cell and the map's pixel, contour-interval SNR) and the gradient
+alignment (contours cross the slope; a wrong fit lies along it): of the 727 wrong
+candidates the far runs below refine (97 maps), none fits above 0 (alignment 0.45 at the
+least; right fits 0.11–0.36).
+
+Contour benchmark (`fixtures/tools/bench_contours.py`, contour path only): 88 synthetic
+maps of 14 styles (the 76-map corpus and fixtures/styles) and 9 real ones (the three MCSA
+sheets; the user's two Gaia exports as the app renders the page, rendered blockily, and
+as their native rasters), with the GPS at the map centre, 10–30 km off and 90–110 km off.
+The core before this work (c66236b) and now:
+
+| | before | now |
+|---|---|---|
+| synthetic, GPS at the centre / 10–30 km off | 52 / 51 of 88 | 78 / 77 of 88 |
+| real, GPS at the centre and 10–30 km off | 6 of 9 | 9 of 9 |
+| confidently wrong (any run) | 3 | 0 |
+| GPS 90–110 km off: located / confident | 0 / 0 | 0 / 0 |
+
+By style (centre, before → now): photocopies 0 → 5 of 5, grey contours 0 → 5 of 6,
+Gaia-like pages 1 → 8 of 10, 1:250 000 hypsometric 0 → 5 of 9, Kompass 3 → 5 of 5, the
+others (dense, faded, MCSA-like, N50, OpenTopoMap, OS, Swiss, USGS) 48 → 50 of 53. The
+Gaia pages as the app renders them: 11/16 m and 14/17 m (median/max) with the GPS at the
+centre or 15 km off, and from the Magaliesberg (450 km) through a geocoded name on the
+map (`tests/gaia_contours.rs`); the MCSA sheets 2–7 m as before. What still fails
+(no answer, or a right one outside the benchmark's tolerance; none confidently wrong):
+
+* flat terrain (Kansas, the Free State: 6 maps, tens of metres of relief): the
+  orientation field holds no pattern to find, or the right fit has too few contour
+  levels for the interval check (20 m contours over 36 m of relief): no answer;
+* 1:200 000–1:250 000 sheets in UTM at 17–40 m/px (3 maps): over 40–90 km their
+  projection is no projective image of Web Mercator; two are placed 26 and 53 m off
+  (median) but 112 and 170 m at the edges (beyond 4 px), the third fits too loosely
+  to be accepted;
+* faint 1 px lines on a native 18 m/px Gaia raster, 11 % of them sampled: 36/82 m;
+* a raster upsampled 3× after its dense contours had merged into solid areas: located
+  from the centre only.
+
 ### Any map: scales, priors, units
 
 The pipeline was first tuned on 1:25 000 sheets at 300 dpi (1.9 m/px, 5 m
@@ -238,23 +304,15 @@ differ in scale, contour interval, units and furniture:
   no interval, it measures it (`contour_interval_m`: 24.0 m on the 80 ft Gaia
   map, 48.3 m on the 160 ft one, 92–100 m on 1:250 000 sheets).
 
-Measured on the contour benchmark (`fixtures/tools/bench_contours.py`: the
-76 synthetic maps and the 5 real ones, GPS at the centre / 10–25 km off /
-~100 km away), against the search as it was (HEAD 5c5702e): located at the
-centre 48 → 51 of 81 (by true m/px: under 3: 3 → 3, 3–6: 26 → 26, 6–12:
-15 → 15, 12–25: 4 → 5 plus 2 within 100 m, 25–50: 0 → 2), the same from
-the offset fix; confident wrong answers 1 → 0 (a Gaia-like page placed
-820 m off at confidence 0.5 now fails); from ~100 km nothing is located,
-before or after. The user's Gaia rasters: the 9.1 m/px one located before
-and after (7.7 m), the 23 m/px one now (12.3 m), both from 450 km through
-a geocoded place name (`tests/gaia.rs`); the 300-dpi pages still find no
-contours (extraction). Time, the two builds alternating on 20 maps (one
-process at a time, same machine load): searches that find the map 1.25 →
-0.86 s median (38.1 → 22.8 s in all: the scale bar's band first, the
-small-scale maps now found at once instead of failing); searches that
-cannot (the fix 100 km away) 3.74 → 3.76 s median, 85.9 → 97.1 s in all
-(+13 %: the coarse band, and the default range after a scale bar's band),
-8.7 → 10.9 s at most.
+* **Refinement samples**: the finest DEM level refines at most 60 000
+  samples (`MAX_SAMPLES_FINE`), thinned per segment so that every segment
+  keeps at least 8 (`thin_segments`); the line detector gives 300-dpi pages
+  100–550 k, and three wrong candidates refined at 150 k cost 1–3 s more in
+  every search that does not find the map. Photos keep 150 k (their
+  projective stage needs them).
+
+How the search and the extraction do together on the contour benchmark:
+*Contours on any map: what makes it work*.
 
 ### Grid labels as a phone reads them
 
@@ -395,17 +453,11 @@ box average); the orientation field uses cells of about `field_px_per_cell` base
 (`search::map_field_at`). `diagnostics.contours.extraction` reports the level, thin shares,
 block size, chosen ink and every model's score.
 
-On the contour benchmark (`fixtures/tools/bench_contours.py`: 76 synthetic maps of 14 styles
-plus the 5 real maps; contour path only, default scale range) 65 of 81 maps are located with
-the GPS at their centre (48 with the colour threshold), none of the 81 answers confidently
-from 90–110 km away, and the one confidently wrong and the one confidently off answer are
-gone. Skeleton samples on true contours: 0.97 (0.84), true contour lines sampled: 0.79
-(0.39); photocopies and grey contours 0 → 4 of 4 and 4 of 5, Gaia-like PDF pages 1 → 6 of 9.
-The user's two Gaia GPS exports, as the app renders them, are located within 11/16 m and
-14/17 m (median/max), also blockily rendered (10/15, 14/19 m) and as their native rasters
-(7/11 m). The MCSA sheets stay at 2–7 m. What still fails: maps outside the scale range,
-flat terrain (rejected at the refinement, honestly) and a raster upsampled 3× from dense
-contours already merged into solid areas.
+Against the colour threshold, on the 88 synthetic maps of the contour benchmark (centre
+runs, scored against their `contour_mask.png`): skeleton samples on true contours 0.83 →
+0.97, true contour lines sampled 0.37 → 0.79 (photocopies and grey contours 0 → 0.95,
+Gaia-like PDF pages 0.01 → 0.50, Kompass 0.13 → 0.72, MCSA-like 0.13 → 0.81). The located
+counts of the whole pipeline are in *Contours on any map: what makes it work*.
 
 ### Photo mode (`"photo": true`)
 
@@ -1392,7 +1444,8 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
                       traced grid lines and contours, held-out checks, inverse
   src/page.rs         page (paper sheet) finder for photos: mm_detect_page
   src/dark.rs         dark map: paper grid + flat field, OKLab tone map, 65³ LUT, tile render
-  src/labels.rs       coordinate / scale / POI label parsing
+  src/labels.rs       coordinate / scale / POI label parsing, height units
+  src/scalebar.rs     scale bars: tick labels or a distance label and its measured bar
   src/hints.rs        search hints: label hints from coordinate labels, hint_queries
   src/wide.rs         wide search planning: coarse zoom, chunks, mm_search_estimate
   src/grid.rs         grid-line detection, label↔line association, GCP fit
@@ -1411,11 +1464,18 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
                       sheets.rs: the Castle Gorge and Mhlabatini sheets; stress.rs:
                       the grid under simulated phone-OCR damage; gaia_contours.rs: the
                       user's Gaia GPS exports, smooth and blocky page renders and the
-                      native raster)
+                      native raster, the app's requests near and from 450 km; gaia.rs:
+                      their scale bars, names, feet, the 23 m/px raster; styles.rs:
+                      the synthetic maps of many styles in fixtures/styles)
 fixtures/grootkloof/  the real map (PDF + extracted JPEG), DEM tiles, OCR fixture, truth
 fixtures/castle-gorge/, fixtures/mhlabatini/  two more sheets of the series: PDF, JPEG,
                       DEM tiles, truth, RapidOCR (ocr.json) and Apple Vision OCR
                       (vision-ocr.json); fixtures/tools/ builds them
+fixtures/gaia-langalibalele/, fixtures/gaia-giants-castle/  the user's Gaia GPS PDF
+                      exports: page renders, native rasters, OCR, truth, DEM tiles
+fixtures/styles/      synthetic maps of 12 styles with exact truth (case.json in the
+                      common benchmark format); fixtures/tools/synth_topo.py renders
+                      them and the 76-map corpus, bench_contours.py runs the benchmark
 ios/                  XcodeGen project (project.yml), app, unit tests, UI tests
 scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
 .github/workflows/    core.yml (Linux), ios.yml (macOS build, test, IPA)
@@ -1527,7 +1587,15 @@ library card.
   style corpus a located map costs 0.9–3 s of core time with the GPS at its
   centre (back to back with the previous mask: −20 % to +45 %, the extra from
   the mask and from refining the contour samples the old mask missed, up to
-  several times as many). Wide search on the reference box: 6–26 s of
+  several times as many). The whole contour path against c66236b, the two
+  builds alternating one process at a time on 25 maps (19 synthetic ones of 14 styles,
+  the MCSA sheets, the Gaia pages and a Gaia raster): maps located 1.05 →
+  0.76 s median, 4.4 → 3.6 s p95, 3.9 s at most (each within the 4 s); a
+  50 km search that cannot find the map (the fix 90–110 km away) 4.9 →
+  4.3 s median, 9.0 → 7.8 s p95 on the 19 maps both builds search (the
+  fine-level sample cap pays for the coarse scale band and the scale bar's
+  second pass), while maps the old mask found no contours on now take 3–6 s
+  to fail instead of 0.3 s. Wide search on the reference box: 6–26 s of
   core time to find the sheet from up to 650 km, 26 s for a whole 1 000 km
   search that fails (see *Wide search*), at most one chunk mosaic (≤ 8 × 8
   tiles) in memory. Photo mode adds the normalisation (~0.1 s for 9 MP) and costlier
