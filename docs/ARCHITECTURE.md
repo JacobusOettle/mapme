@@ -111,14 +111,17 @@ order:
      the georeference is right, each contour segment has constant elevation.
      Gauss-Newton / Levenberg–Marquardt with a robust loss minimises the
      within-segment elevation variance over similarity (4 parameters), then
-     affine (6), with DEM gradients giving the Jacobian. The prototype
+     a similarity with its own aspect ratio (5, no shear) when the whole map
+     supports it, with DEM gradients giving the Jacobian. The prototype
      converged to about 14 m max error over the whole sheet (the SRTM noise
      floor) from starts up to 470 m off, in under a second.
    * *Confidence*: coarse peak ratio (best vs best distinct location) +
-     refined robust cost + inlier fraction. If the map is not in the search
+     refined robust cost + inlier fraction + how much of the map the
+     contours span. If the map is not in the search
      area, the result is a low score and `failed` status, never a confident
      wrong answer. See *Any map: scales, priors, units* for what keeps this
-     true beyond 1:25 000 sheets.
+     true beyond 1:25 000 sheets. The ± the app shows (`rms_m`) bounds the
+     error anywhere on the image: see *Honest accuracy*.
 3. **Manual control points** (`control_points.rs`): the user taps matching
    points on the map and on an Apple satellite map (or "I'm here" at their
    GPS position). 2 points give a similarity, 3 an affine, 4+ an affine
@@ -175,7 +178,7 @@ The core before this work (c66236b) and now:
 By style (centre, before → now): photocopies 0 → 5 of 5, grey contours 0 → 5 of 6,
 Gaia-like pages 1 → 8 of 10, 1:250 000 hypsometric 0 → 5 of 9, Kompass 3 → 5 of 5, the
 others (dense, faded, MCSA-like, N50, OpenTopoMap, OS, Swiss, USGS) 48 → 50 of 53. The
-Gaia pages as the app renders them: 11/16 m and 14/17 m (median/max) with the GPS at the
+Gaia pages as the app renders them: 9/15 m and 13/16 m (median/max) with the GPS at the
 centre or 15 km off, and from the Magaliesberg (450 km) through a geocoded name on the
 map (`tests/gaia_contours.rs`); the MCSA sheets 2–7 m as before. What still fails
 (no answer, or a right one outside the benchmark's tolerance; none confidently wrong):
@@ -251,9 +254,10 @@ differ in scale, contour interval, units and furniture:
   of the 1:250 000 Rockies sheet (2 000 × 1 500 px at 50 m/px, UTM) to its
   truth is 104 m off (median; 200 m at the edges), a homography 53 m. A
   map whose samples span more than 40 km (ground diagonal) therefore gets a
-  projective stage after the affine one (`refine::REGIONAL_SPAN_M`), kept
+  projective stage after the similarity (`refine::REGIONAL_SPAN_M`), kept
   if it lowers the cost by 1 % with perspective terms ≤ 0.02 over the
-  samples' extent and a near-conformal local part: that sheet 118 → 59 m,
+  samples' extent and a near-conformal local part, and the whole map
+  supports it (*Honest accuracy*): that sheet 118 → 59 m,
   a 1:100 000 Norway sheet at 20 m/px 41 → 29 m; Web Mercator exports
   (OpenTopoMap at 20 m/px) keep their affine fit.
 * **Gradient alignment** (`RefineResult::gradient_alignment`, Σ|g·t̂| / Σ|g|
@@ -332,6 +336,94 @@ differ in scale, contour interval, units and furniture:
 
 How the search and the extraction do together on the contour benchmark:
 *Contours on any map: what makes it work*.
+
+### Honest accuracy: the fit's model and the ±
+
+A contour fit is only as good at a place as the contours near it. When they
+survive on part of the map (a JPEG at quality 25 keeps them on the Lesotho side
+of the Gaia raster only, the western 40 %; a crop; a legend or a park tint over
+them), a free affine fitted to them takes up whatever the DEM and the drawing
+disagree on there as shear and extrapolates it to the far side: 38 m off
+(median) and 96 m at the far corners at confidence 0.994, while the app said
+±18 m. Three things keep the answer and its ± honest (`refine.rs`,
+`georef::contour_rms`):
+
+1. **The jackknife** (`refine::jackknife`). Contour samples are not
+   independent (a stretch of map the DEM or the drawing gets wrong shifts all
+   its samples together), so the fit's uncertainty is judged by leaving out
+   whole areas: segments are grouped by where they lie (a 5 × 5 grid over the
+   samples' bounding box, by segment centroid; with fewer than 6 groups, each
+   segment is a group), and for each group the fit is redone without it (one
+   linearised Gauss–Newton step with the group's share of the normal
+   equations removed: one Jacobian evaluation for all groups). The spread of
+   those refits at the corners of the image (`RefineOptions::extent`, the RMS
+   displacement with the jackknife's (k − 1)/k factor, the largest corner)
+   is `RefineResult::spread_m`: ~2–5 m on a whole MCSA sheet or Gaia page,
+   10–30 m when the contours cover a third of the map, more when they cover a
+   corner of it. `diagnostics.refined.spread_m`, `.extent_cover` and
+   `.stages` (each model tried: its transform, cost, spread, shift from the
+   previous one, kept or not) report it.
+2. **The model the evidence holds** (`refine::MODEL_MIN_Z`). No map is drawn
+   sheared, so maps never get a free affine: after the similarity comes a
+   similarity whose image axes are scaled apart (`Model::Aniso`, 5
+   parameters: a PDF page rendered at another aspect ratio, 1.6 % on the Gaia
+   pages; a scanner's few tenths of a percent), then, past 40 km, the
+   projective stage. A richer model is kept only if it lowers the cost and
+   moves the image's corners at least 4× its own jackknife spread from the
+   simpler one: its extra parameters must be held by the whole map, not by
+   one area of it. The jackknife sees the scatter between areas, not what they
+   share, and underestimates by 2–4× on maps with few contours, hence 4. On
+   the Gaia pages the aspect ratio moves the corners 60–160 m at 2–4 m of
+   spread and is kept (9/15 m and 13/16 m, median/max, against 11/16 m and
+   14/17 m with the free affine); on the partial rasters the spurious shear
+   moved them 2–5 spreads and is dropped. Photos keep their anisotropic affine
+   and projective stages (their flattening leaves both).
+3. **The ±** (`rms_m`, what the app shows) = √(floor² + (5 × spread)²), the
+   floor as before (half a DEM cell plus twice the within-segment noise,
+   inflated by an uncertain fit), at most 2 km; 250 m when the jackknife
+   cannot judge the fit (fewer than 6 groups, or one area alone holds it).
+   The confidence drops when the contours span little of the map
+   (`refine::span_evidence`, part of `fit_evidence`: full from 35 % of the
+   image's 8 × 8 cells, × 0.25 at 10 % and below): the quality-25 raster with
+   lowered contrast kept 18 short segments in its west (16 % of the cells) and
+   was placed 115 m off at 0.97; it now fails honestly. The extent is the
+   whole image; a client or a page detector that knows the map's content box
+   should pass that instead (a small map on a large white page would
+   otherwise count as sparse).
+
+Calibration: the contour benchmark (76 synthetic maps, the 12 style maps, the
+9 real cases; GPS at the centre and 10–30 km off, 179 answers) and 121
+perturbed copies of the real maps (`fixtures/tools/perturb_real.py`: Gaia A/B
+native rasters and page renders, the three MCSA sheets; JPEG quality 25 and
+15, crops to 30–60 % of each side at the centre, a corner or a side, contours
+hidden on 40–70 % of the map by a median filter, contrast 0.5, blur,
+combinations; truth on a 7 × 7 grid over the map content from each map's own
+truth; GPS at the map centre), plus the reviewer's two repros.
+`bench_contours.py` reports the same ratio for any run. True max error /
+reported ±:
+
+| | runs answered | within ± | p50 | p90 | max | > 2× | median ± |
+|---|---|---|---|---|---|---|---|
+| benchmark, before | 179 | 78.8 % | 0.68 | 1.41 | 2.23 | 2 | 19 m |
+| benchmark, now | 179 | 95.5 % | 0.51 | 0.88 | 1.15 | 0 | 27 m |
+| perturbed, before | 108 | 53.7 % | 0.96 | 2.25 | 23.0 | 17 | 16 m |
+| perturbed, now | 106 | 93.4 % | 0.53 | 0.91 | 2.19 | 1 | 28 m |
+
+Located (benchmark verdict) at the centre / 10–30 km off: 87 / 86 of 97 as
+before; 90–110 km off: none answered, as before; confidently wrong: none (one
+of the perturbed maps was before: the quality-25 low-contrast raster above).
+Perturbed: 99 → 101 of 121 located (the two repros and a central crop now
+within tolerance; one corner crop with 18 segments, located before by its
+spurious affine, is no longer accepted). The repros: quality 25 at 12/21 m
+(median/max over the whole image) with ±60 m, the central crop at 29/51 m
+with ±59 m (`tests/gaia_contours.rs`, `*_is_honest`). The MCSA sheets are
+fitted as before (similarities: 2–7 m), with ±16–18 m instead of ±12 m; the
+synthetic photos' contour fits (`tests/photo.rs`, 15–22 m off at most) say
+±20–31 m instead of ±11 m.
+What the ± still misses: a bias the whole fitted area shares. A 3 × 2 km
+crop of the Gaia page fits 35/62 m off at a spread of 4 m (its contours and
+the DEM disagree there; the truth fits them worse than the answer) and gets
+±28 m; on the benchmark the 1:250 000 sheets in UTM are 1.1–1.15× their ±.
 
 ### Grid labels as a phone reads them
 
@@ -588,7 +680,8 @@ into the paper. With `photo: true` the request:
   (robust mean elevation residual), `contour_holdout_gain`,
   `median_seg_std_m`, `max_offset_m`, `derivative_ratio`, `iterations` and
   `ms`. With a warp, `rms_m` is the held-out line RMS (grid) or the contour
-  estimate from the warped segments' spread.
+  estimate from the warped segments' spread (and the homography's
+  jackknife spread, *Honest accuracy*).
 
 The response's `pixel_to_mercator` is then a true homography (last row not
 `[0, 0, 1]`); without a warp `scale_m_per_px` and `rotation_deg` are taken
@@ -768,6 +861,9 @@ image's pixels, like everything else.
 * `pixel_to_mercator` is affine (last row `[0, 0, 1]`) except in photo mode,
   where it may be a full homography; always evaluate it projectively.
 * `scale_m_per_px` is in *ground* metres.
+* `rms_m` is the ± the app shows (ground metres); for a contour fit, how far
+  the dot may be off anywhere on the image, including what the contours
+  leave to extrapolation (*Honest accuracy*).
 * `rotation_deg` is the clockwise angle of map-up from true north.
 * `corners` are the image corners TL, TR, BR, BL as `[lat, lon]`.
 * `pois` are map labels classified as place names, peaks, water or spot
@@ -1494,7 +1590,8 @@ fixtures/gaia-langalibalele/, fixtures/gaia-giants-castle/  the user's Gaia GPS 
                       exports: page renders, native rasters, OCR, truth, DEM tiles
 fixtures/styles/      synthetic maps of 12 styles with exact truth (case.json in the
                       common benchmark format); fixtures/tools/synth_topo.py renders
-                      them and the 76-map corpus, bench_contours.py runs the benchmark
+                      them and the 76-map corpus, bench_contours.py runs the benchmark,
+                      perturb_real.py makes damaged copies of the real maps (the ±)
 ios/                  XcodeGen project (project.yml), app, unit tests, UI tests
 scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
 .github/workflows/    core.yml (Linux), ios.yml (macOS build, test, IPA)
@@ -1655,7 +1752,12 @@ library card.
   4.3 s median, 9.0 → 7.8 s p95 on the 19 maps both builds search (the
   fine-level sample cap pays for the coarse scale band and the scale bar's
   second pass), while maps the old mask found no contours on now take 3–6 s
-  to fail instead of 0.3 s. Wide search on the reference box: 6–26 s of
+  to fail instead of 0.3 s. The honest ± (*Honest accuracy*: the jackknife
+  of the stages the selection tests and of the kept one, the aspect-ratio
+  stage instead of the free affine) costs little: on the same 25 maps
+  against 30efdda, alternating, on a loaded 4-core box, located 0.91 →
+  0.95 s median (per-map ratio 1.01, 1.18 at p90), 2.28 → 2.41 s p95; ten
+  50 km searches that fail 6.8 → 7.4 s median (ratio 1.06). Wide search on the reference box: 6–26 s of
   core time to find the sheet from up to 650 km, 26 s for a whole 1 000 km
   search that fails (see *Wide search*), at most one chunk mosaic (≤ 8 × 8
   tiles) in memory. Photo mode adds the normalisation (~0.1 s for 9 MP) and costlier

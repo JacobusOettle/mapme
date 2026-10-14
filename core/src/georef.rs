@@ -1724,7 +1724,9 @@ impl<'a> Run<'a> {
         let r = if evaluate_only {
             evaluate_prepared(&prod.samples, &prep, t)
         } else {
-            refine_prepared_with(&prod.samples, &prep, t, &RefineOptions { photo: key.photo })
+            let (w, h) = self.size();
+            let extent = Some([0, 0, w as u32, h as u32]);
+            refine_prepared_with(&prod.samples, &prep, t, &RefineOptions { photo: key.photo, extent })
         };
         self.time(if evaluate_only { "verify" } else { "refine" }, tm);
         lock(&self.s.refinements).insert(rkey, r.clone());
@@ -2314,6 +2316,16 @@ impl<'a> Run<'a> {
                 "converged": r.converged,
                 "dem_zoom": zoom,
                 "source": if from_labels { "labels" } else { "search" },
+                "spread_m": finite_or_null(round_dp(r.spread_m, 1)),
+                "extent_cover": finite_or_null(round_dp(r.extent_cover, 3)),
+                "stages": r.stages.iter().map(|s| json!({
+                    "model": s.model,
+                    "m": s.homography.m,
+                    "cost": round_dp(s.cost, 1),
+                    "spread_m": finite_or_null(round_dp(s.spread_m, 1)),
+                    "shift_m": finite_or_null(round_dp(s.shift_m, 1)),
+                    "kept": s.kept,
+                })).collect::<Vec<_>>(),
             }),
         );
         let mut msg = if from_labels {
@@ -2428,15 +2440,40 @@ fn transforms_agree(a: &Affine, b: &Affine, w: usize, h: usize, rms_m: f64) -> b
     })
 }
 
-/// Honest position-error estimate (ground metres) of a contour fit: half a
-/// DEM cell plus twice the within-segment elevation noise, inflated when the
-/// fit is uncertain. Grootkloof on zoom 13: ~13 m (measured max error 11.6 m).
+/// Honest position-error estimate (ground metres) of a contour fit, the
+/// app's ±: what the dot may be off by anywhere on the image. Two parts:
+///
+/// * the noise floor: half a DEM cell plus twice the within-segment
+///   elevation noise, inflated when the fit is uncertain (Grootkloof on
+///   zoom 13: ~12 m);
+/// * how far the fit could swing at the image's corners: `SPREAD_K` × the
+///   delete-an-area jackknife spread of the kept model
+///   (`RefineResult::spread_m`), which grows when the contours cover little
+///   of the map or one side of it (the far side is extrapolated).
+///
+/// Calibrated on the contour benchmark and perturbed real maps (JPEG q15–25,
+/// crops to 30–60 %, contours hidden on 40–70 % of the map, low contrast,
+/// blur): the true largest error over the map is within the ± in ≥ 90 % of
+/// the located runs (docs/ARCHITECTURE.md, *Honest accuracy*).
 fn contour_rms(r: &RefineResult, zoom: u8, lat: f64) -> f64 {
     let cell_m = resolution(zoom) * lat.to_radians().cos();
     let seg = if r.median_seg_std_m.is_finite() { r.median_seg_std_m } else { 50.0 };
     let base = (0.5 * cell_m + 2.0 * seg).clamp(10.0, 200.0);
-    (base * (1.0 + 2.0 * (1.0 - fit_confidence(r)))).min(250.0)
+    let floor = (base * (1.0 + 2.0 * (1.0 - fit_confidence(r)))).min(250.0);
+    if r.spread_m.is_finite() {
+        floor.hypot(SPREAD_K * r.spread_m).min(MAX_CONTOUR_RMS_M)
+    } else {
+        // No jackknife (too few contour segments to leave areas out), or
+        // one area alone holds the fit.
+        floor.max(UNJUDGED_RMS_M)
+    }
 }
+
+/// `contour_rms`: the jackknife spread's weight…
+const SPREAD_K: f64 = 5.0;
+/// …the ± of a fit the jackknife could not judge, and the largest ±.
+const UNJUDGED_RMS_M: f64 = 250.0;
+const MAX_CONTOUR_RMS_M: f64 = 2000.0;
 
 /// Local ground scale (m/px) and map-up bearing (degrees) of a pixel →
 /// Mercator homography at pixel (x, y).
@@ -2470,6 +2507,15 @@ fn round_dp(v: f64, decimals: i32) -> f64 {
         (v * k).round() / k
     } else {
         v
+    }
+}
+
+/// A finite number as JSON, else null (∞ / NaN have no JSON form).
+fn finite_or_null(v: f64) -> Value {
+    if v.is_finite() {
+        json!(v)
+    } else {
+        Value::Null
     }
 }
 

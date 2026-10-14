@@ -372,3 +372,110 @@ fn langalibalele_app_far_then_place_hints() {
 fn giants_castle_app_far_then_place_hints() {
     app_far_then_hints("gaia-giants-castle");
 }
+
+// ---------------------------------------------------------------------------
+// Honest accuracy when the contours cover part of the map: the adversarial
+// review's two repros on the native raster of map A. The reported ± (rms_m)
+// must bound the error anywhere on the image, and the fit must not take up
+// a shear that only the covered part holds (the free affine extrapolated it:
+// 38/96 m off at confidence 0.994 with ±18 m; 51/132 m at 0.915).
+// ---------------------------------------------------------------------------
+
+impl Case {
+    /// native.png's pixel → Mercator truth (truth.json).
+    fn native_truth(&self) -> Homography {
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(self.dir.join("truth.json")).unwrap()).unwrap();
+        let m: Vec<f64> =
+            v["native"]["pixel_to_mercator"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+        Homography { m: m.try_into().unwrap() }
+    }
+}
+
+/// `img` (native.png's pixels from `off` on) located with the GPS at its
+/// centre, contours only; returns the response and the median and largest
+/// ground error over a 9 × 9 grid spanning the whole image, corners included.
+fn native_part(img: Rgb8, off: (f64, f64)) -> (GeorefResponse, Option<(f64, f64)>) {
+    let case = Case::load("gaia-langalibalele", "case_native.json");
+    let truth = case.native_truth();
+    let (w, h) = (img.w as f64, img.h as f64);
+    let at = |x: f64, y: f64| {
+        let (mx, my) = truth.apply(x + off.0, y + off.1);
+        merc_to_latlon(mx, my)
+    };
+    let (lat, lon) = at(w / 2.0, h / 2.0);
+    let req = GeorefRequest {
+        gps: Some(GpsFix { lat, lon, accuracy_m: Some(10.0) }),
+        methods: vec!["contours".into()],
+        ..Default::default()
+    };
+    let resp = case.run_request(&Session::new(img), &req);
+    let errs = resp.pixel_to_mercator.map(|m| {
+        let fit = Homography { m };
+        let mut e: Vec<f64> = (0..81)
+            .map(|k| {
+                let (x, y) = (w * (k % 9) as f64 / 8.0, h * (k / 9) as f64 / 8.0);
+                let (mx, my) = fit.apply(x, y);
+                let (la, lo) = merc_to_latlon(mx, my);
+                let (tl, tn) = at(x, y);
+                haversine_m(LatLon { lat: la, lon: lo }, LatLon { lat: tl, lon: tn })
+            })
+            .collect();
+        e.sort_by(f64::total_cmp);
+        (e[40], e[80])
+    });
+    (resp, errs)
+}
+
+/// Located, the error everywhere on the image within the reported ± and
+/// `max_m`, and no free affine kept (`refine`: a similarity, or one with
+/// the page's aspect ratio when the whole map supports it).
+fn assert_honest(label: &str, resp: &GeorefResponse, errs: Option<(f64, f64)>, max_m: f64) {
+    let refined = &resp.diagnostics["refined"];
+    let kept: Vec<&str> = refined["stages"]
+        .as_array()
+        .map(|s| s.iter().filter(|s| s["kept"] == true).filter_map(|s| s["model"].as_str()).collect())
+        .unwrap_or_default();
+    let s = format!(
+        "{label}: {:?} conf {:?} ±{:?} m, errors (median, max) {errs:?}, kept {kept:?}, spread {} m, cover {}: {}",
+        resp.status, resp.confidence, resp.rms_m, refined["spread_m"], refined["extent_cover"], resp.message
+    );
+    println!("{s}");
+    assert_eq!(resp.status, Status::Ok, "{s}");
+    assert!(resp.confidence.unwrap() >= 0.5, "{s}");
+    let (_, max) = errs.unwrap();
+    assert!(max <= resp.rms_m.unwrap(), "{s}: the error exceeds the reported ±");
+    assert!(max <= max_m, "{s}");
+    assert!(kept == ["similarity"] || kept == ["aniso"], "{s}");
+}
+
+/// JPEG quality 25 (the reviewer's file, native_q25.jpg): the contours
+/// survive only on the Lesotho side, the western 40 % of the map.
+#[test]
+fn langalibalele_native_jpeg_q25_is_honest() {
+    let _g = serial();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/gaia-langalibalele");
+    let (resp, errs) = native_part(load_jpeg_file(&dir.join("native_q25.jpg")), (0.0, 0.0));
+    assert_honest("native q25", &resp, errs, 50.0);
+    // Contours over less than half of the image.
+    assert!(resp.diagnostics["refined"]["extent_cover"].as_f64().unwrap() < 0.6);
+}
+
+/// The central 50 % of the raster as the reviewer saved it (JPEG quality
+/// 88, native_crop50.jpg: 559 × 395 px from (279, 197), 29 segments), and
+/// cut from native.png losslessly.
+#[test]
+fn langalibalele_native_central_crop_is_honest() {
+    let _g = serial();
+    let (x0, y0, w, h) = (279, 197, 559, 395);
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/gaia-langalibalele");
+    let (resp, errs) = native_part(load_jpeg_file(&dir.join("native_crop50.jpg")), (x0 as f64, y0 as f64));
+    assert_honest("native central 50 % (JPEG)", &resp, errs, 75.0);
+    let full = Case::load("gaia-langalibalele", "case_native.json").image();
+    let mut data = Vec::with_capacity(w * h * 3);
+    for y in y0..y0 + h {
+        data.extend_from_slice(&full.data[(y * full.w + x0) * 3..(y * full.w + x0 + w) * 3]);
+    }
+    let (resp, errs) = native_part(Rgb8::from_rgb(w, h, data).unwrap(), (x0 as f64, y0 as f64));
+    assert_honest("native central 50 % (lossless)", &resp, errs, 75.0);
+}

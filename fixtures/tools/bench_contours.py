@@ -519,6 +519,15 @@ def report(runs, meta):
         L.append("")
     else:
         L += ["No confident wrong answers.", ""]
+    # The reported ± (rms_m, what the app shows) against the true largest error at the truth points.
+    pm = [r for r in c + o if r.get("status") == "ok" and r.get("rms_m") and r.get("err_max_m") is not None]
+    if pm:
+        ratio = sorted(r["err_max_m"] / r["rms_m"] for r in pm)
+        q = lambda p: ratio[min(len(ratio) - 1, int(p * len(ratio)))]  # noqa: E731
+        L += ["Reported ± (`rms_m`) against the true max error, centre and offset answers: %d of %d within it "
+              "(%.1f %%), true/± p50 %.2f, p90 %.2f, max %.2f, %d over 2×; median ± %.0f m." % (
+                  sum(v <= 1 for v in ratio), len(ratio), 100.0 * sum(v <= 1 for v in ratio) / len(ratio), q(0.5),
+                  q(0.9), ratio[-1], sum(v > 2 for v in ratio), statistics.median(r["rms_m"] for r in pm)), ""]
     off = [r for r in runs if r.get("confident_off")]
     if off:
         L += ["### Confident but off at the edges (%d): confidence >= 0.5, max error > max(150 m, 6 px)" % len(off), "",
