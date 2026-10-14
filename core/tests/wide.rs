@@ -1033,3 +1033,123 @@ fn offline_wide_search_says_what_was_missing() {
     assert!(m.starts_with("Terrain for much of the search area couldn't be downloaded ("), "{m}");
     assert!(!m.contains("No match within"), "{m}");
 }
+
+// ---------------------------------------------------------------------------
+// Scale priors are priors: a misread scale bar, a printed scale that the
+// page's dpi turns into a wrong one, and the scale bands' reach
+// ---------------------------------------------------------------------------
+
+/// Clear the bottom 90 px of `img` to white (a legend band) and draw a 2 px
+/// black scale bar `px` long in it, with its label read as `text` centred
+/// over it: the OCR read.
+fn with_scale_bar(img: &mut Rgb8, px: f64, text: &str) -> Value {
+    let (w, h) = (img.w, img.h);
+    for y in h - 90..h {
+        for x in 0..w {
+            let i = (y * w + x) * 3;
+            img.data[i..i + 3].copy_from_slice(&[255, 255, 255]);
+        }
+    }
+    let (x0, yb) = (w / 3, h - 30);
+    let x1 = x0 + px.round() as usize;
+    for y in yb..yb + 2 {
+        for x in x0..x1 {
+            let i = (y * w + x) * 3;
+            img.data[i..i + 3].copy_from_slice(&[20, 20, 20]);
+        }
+    }
+    let cx = (x0 + x1) as f64 / 2.0;
+    json!({"text": text, "bbox": [cx - 25.0, (yb - 40) as f64, 50.0, 25.0], "confidence": 0.9})
+}
+
+/// A 1:50 000 sheet 120 km from the fix whose "2 km" bar was read as
+/// "2 mi" (a bar 1.6 times too long on the ground): the bar's scale is a
+/// prior, not a constraint, in the wide search too (as in the hint and near
+/// areas), so the map is still found.
+#[test]
+fn misread_scale_bar_does_not_hide_the_map_from_the_wide_search() {
+    let _g = serial();
+    let fix = LatLon::new(46.5, 8.0);
+    let at = destination(fix, 70.0, 120_000.0);
+    let (mut img, _) = synthetic_sheet(at);
+    let bar = with_scale_bar(&mut img, 2000.0 / sheet_scale(50_000.0), "2 mi");
+    let (w, h) = (img.w, img.h);
+    let s = Session::new(img);
+    let req = json!({"gps": gps(fix), "ocr": [bar], "methods": ["contours"], "search_radius_m": 150_000.0});
+    let out = serve(&s, &req, 64, 120, &noise_terrain, &mut |_| {});
+    let r = out.last();
+    summary("misread bar, wide 120 km", &out.responses, None);
+    eprintln!("    {}", out.log);
+    let sb = &r["diagnostics"]["scale_bar"];
+    assert!((sb["m_per_px"].as_f64().unwrap() / sheet_scale(50_000.0) - 1.609).abs() < 0.02, "{sb}");
+    assert_eq!(r["status"], "ok", "{}", r["message"]);
+    assert!(centre_off_m(r, w, h, at) < 60.0);
+    assert_eq!(r["diagnostics"]["selected"]["source"], "wide", "{}", r["diagnostics"]["selected"]);
+}
+
+/// A small screen map (380 × 380 px at 20 m/px, 7.6 km across) 250 km from
+/// the fix, no scale prior: too small at the near zoom's scales (up to
+/// 12 m/px) for the wide search past 150 km, but at the coarse band's
+/// scales it is searched out to the whole radius, and found there; no wide
+/// tile is fetched for placements no band searches.
+#[test]
+fn coarse_scale_band_reaches_past_the_fine_band() {
+    let _g = serial();
+    let fix = LatLon::new(46.5, 8.0);
+    let at = destination(fix, 200.0, 250_000.0);
+    let denom = 20.0 * 300.0 / 0.0254;
+    let (img, _) = sheet_of(at, 380, 380, denom, &noise_terrain);
+    let s = Session::new(img);
+    let req = json!({"gps": gps(fix), "methods": ["contours"], "search_radius_m": 300_000.0});
+    let out = serve(&s, &req, 64, 200, &noise_terrain, &mut |_| {});
+    let r = out.last();
+    summary("small coarse map, wide 250 km", &out.responses, None);
+    eprintln!("    {}", out.log);
+    assert_eq!(r["status"], "ok", "{}", r["message"]);
+    assert!(centre_off_m(r, 380, 380, at) < 100.0);
+    assert_eq!(r["diagnostics"]["wide"]["radius_m"], 300_000.0, "{}", r["diagnostics"]["wide"]);
+}
+
+/// A 1:50 000 sheet whose page says "1:25 000" (a sheet printed reduced to
+/// fit the page, or a misread label): the printed scale and the dpi put the
+/// map at half its size, but its scale bar, measured in the image, says
+/// otherwise; the bar's scale is searched too, and the map is found.
+#[test]
+fn scale_bar_overrules_a_printed_scale_that_disagrees() {
+    let _g = serial();
+    let at = LatLon::new(46.5, 8.0);
+    let (mut img, _) = synthetic_sheet(at);
+    let bar = with_scale_bar(&mut img, 2000.0 / sheet_scale(50_000.0), "2 km");
+    let (w, h) = (img.w, img.h);
+    let label = json!({"text": "1:25 000", "bbox": [1200.0, 1820.0, 120.0, 25.0], "confidence": 0.9});
+    let s = Session::new(img);
+    let req = json!({"gps": gps(destination(at, 30.0, 8_000.0)), "dpi": 300.0, "ocr": [label, bar],
+                     "methods": ["contours"]});
+    let out = serve(&s, &req, 64, 60, &noise_terrain, &mut |_| {});
+    let r = out.last();
+    summary("1:25 000 printed on a 1:50 000 sheet with its bar", &out.responses, None);
+    assert_eq!(r["diagnostics"]["scale_denominator"], 25_000.0);
+    assert_eq!(r["status"], "ok", "{}", r["message"]);
+    assert!(centre_off_m(r, w, h, at) < 60.0);
+}
+
+/// A bar label read as "2 m" (for "2 mi" or "2 km"): a bar implying a few
+/// millimetres per pixel is a misread, not a prior; the default range finds
+/// the sheet as if there were no bar.
+#[test]
+fn implausible_scale_bar_is_ignored() {
+    let _g = serial();
+    let at = LatLon::new(46.5, 8.0);
+    let (mut img, _) = synthetic_sheet(at);
+    let bar = with_scale_bar(&mut img, 2000.0 / sheet_scale(50_000.0), "2 m");
+    let (w, h) = (img.w, img.h);
+    let s = Session::new(img);
+    let req = json!({"gps": gps(destination(at, 30.0, 8_000.0)), "ocr": [bar], "methods": ["contours"]});
+    let out = serve(&s, &req, 64, 60, &noise_terrain, &mut |_| {});
+    let r = out.last();
+    summary("bar read as 2 m", &out.responses, None);
+    assert!(r["diagnostics"]["scale_bar"].is_null(), "{}", r["diagnostics"]["scale_bar"]);
+    assert_eq!(r["diagnostics"]["scale_range"]["source"], "default");
+    assert_eq!(r["status"], "ok", "{}", r["message"]);
+    assert!(centre_off_m(r, w, h, at) < 60.0);
+}

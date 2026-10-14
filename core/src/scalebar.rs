@@ -9,7 +9,9 @@
 //!   2.5 text heights), under the label or reaching to within 1.5 text
 //!   heights of it, between 3 and 60 text heights long and thin (a line, not
 //!   a box or the frame). Gaia GPS exports: "1 mi" centred over a 532 px
-//!   line on a 300-dpi page (3.025 m/px; the truth is 3.03 × 3.08).
+//!   line on a 300-dpi page (3.025 m/px; the truth is 3.03 × 3.08). A read
+//!   taller than 8 % of the image's short side is no bar's label (its window
+//!   would be most of the image).
 //! * Tick labels: three numbers or more on one baseline in arithmetic
 //!   progression ("0", "1", "2 km"; the unit on the last one or beside it):
 //!   pixels per unit from their positions (least squares).
@@ -22,6 +24,13 @@
 use crate::image::Rgb8;
 use crate::labels::OcrObservation;
 use serde::Serialize;
+
+/// Largest text height of a bar's label, as a share of the image's short
+/// side (Gaia's "1 mi": 1 % of the page; a phone screenshot's "500 ft":
+/// 2.6 %; a small crop around the bar more), and at least `MIN_LABEL_CAP`
+/// pixels.
+const MAX_LABEL_SHARE: f64 = 0.08;
+const MIN_LABEL_CAP: f64 = 48.0;
 
 /// A scale bar found on the map.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -107,11 +116,23 @@ fn bar_line(img: &Rgb8, o: &OcrObservation) -> Option<(f64, f64, usize)> {
     if x_hi <= x_lo || y_hi <= y_lo {
         return None;
     }
-    // Dark: well below the local paper (the window's bright level).
-    let mut lums: Vec<f64> =
-        (y_lo..=y_hi).flat_map(|y| (x_lo..=x_hi).map(move |x| (x, y))).map(|(x, y)| lum(img, x, y)).collect();
-    lums.sort_by(|a, b| a.total_cmp(b));
-    let paper = lums[(lums.len() * 9) / 10];
+    // Dark: well below the local paper (the window's bright level: the
+    // 90th percentile of its luminance, from a histogram).
+    let mut hist = [0usize; 256];
+    for y in y_lo..=y_hi {
+        for x in x_lo..=x_hi {
+            hist[(lum(img, x, y).round() as usize).min(255)] += 1;
+        }
+    }
+    let n = (x_hi - x_lo + 1) * (y_hi - y_lo + 1);
+    let mut seen = 0;
+    let paper = hist
+        .iter()
+        .position(|&k| {
+            seen += k;
+            seen > (n * 9) / 10
+        })
+        .unwrap_or(255) as f64;
     let dark = paper - 90.0;
     if dark <= 0.0 {
         return None;
@@ -196,8 +217,11 @@ pub fn find_scale_bar(img: &Rgb8, obs: &[OcrObservation]) -> Option<ScaleBar> {
         return Some(t);
     }
     let mut found: Vec<ScaleBar> = Vec::new();
+    // A bar's label is small print: a box taller than this share of the
+    // image is no such label (and its window would be the whole image).
+    let max_text = (MAX_LABEL_SHARE * img.w.min(img.h) as f64).max(MIN_LABEL_CAP);
     for o in obs {
-        if !o.bbox.iter().all(|v| v.is_finite()) || o.bbox[2] < o.bbox[3] {
+        if !o.bbox.iter().all(|v| v.is_finite()) || o.bbox[2] < o.bbox[3] || o.bbox[3] > max_text {
             continue;
         }
         let Some(m) = distance_label(&o.text) else { continue };
@@ -360,6 +384,10 @@ mod tests {
         // No bar drawn: no prior from the label alone.
         let blank = Rgb8::from_rgb(w, h, vec![255u8; w * h * 3]).unwrap();
         assert_eq!(find_scale_bar(&blank, &obs), None);
+        // A read as tall as the page is no bar's label (its window would be
+        // the whole image, for every such read).
+        let huge = vec![ob("1 mi", 0.0, 0.0, 1200.0, 380.0)];
+        assert_eq!(find_scale_bar(&page(true), &huge), None);
     }
 
     #[test]

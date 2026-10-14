@@ -144,7 +144,8 @@ contours, 1:250 000 maps over hypsometric tints. Four things make that work:
    together best wins. See *Contour lines of any map style*.
 3. **Scale range and priors** (`wide::scale_bands`, `scalebar.rs`). 0.4–50 m/px in bands
    (zoom-11 tiles up to 12 m/px, a coarser zoom beyond); a printed ratio with the dpi is a
-   constraint, a scale bar ("1 mi", "0 1 2 km") a ±15 % prior searched first. Maps of
+   constraint (a scale bar that disagrees with it is searched after it), a scale bar ("1
+   mi", "0 1 2 km") a ±15 % prior searched first, never the only range searched. Maps of
    more than 40 km get a small perspective term for their projection. See *Any map:
    scales, priors, units*.
 4. **Units and names** (`labels::height_unit`, `hints::hint_queries`). Heights are in feet
@@ -215,7 +216,12 @@ differ in scale, contour interval, units and furniture:
   in). A coarse candidate is re-checked one zoom finer than its band
   (`wide::recheck_zoom`). The wide search plans each band (`wide_band_reach`:
   the fine band on zoom 9/10 as before, the coarse one up to two zooms
-  coarser) and merges their chunks into one sweep, nearest first
+  coarser) out to the radius its own scales allow (a small image is too
+  small for zoom 9 at up to 12 m/px but not at 50 m/px: its coarse band goes
+  past the fine band's 150 km, `wide_limit` is the farthest band's reach and
+  each chunk's placements stop at its band's), leaves out a band inside
+  another on the same zoom (a scale bar's inside the default range's), and
+  merges their chunks into one sweep, nearest first
   (`wide::merge_plans`: tiles are released after their last use in the merged
   order, so bands sharing a zoom never ask for a released tile).
   `diagnostics.search_areas[].band` is `{zoom, min, max}`,
@@ -280,7 +286,20 @@ differ in scale, contour interval, units and furniture:
   m/px ±15 % (`diagnostics.scale_bar`, source "scale_bar"), a prior, not a
   constraint: hint and near areas search its band first (the inner 20 km,
   then 50 km), then the default bands over the whole disc at once; the wide
-  search (costly) its range alone. Of the 76 benchmark maps 57 have a bar
+  search the default bands (its band lies inside them: in one sweep nearest
+  first it would add work, not reach). A bar read wrongly ("2 mi" for
+  "2 km") so costs time but never hides the map: with the bar's range alone
+  the wide search missed a sheet 120 km away that it finds without the bar
+  (`tests/wide.rs`); the price is the wide search's compute of a map without
+  a bar (Gaia page from 450 km, 2 000 km radius, no hints: 8.4 s with the
+  bar's range alone, 14.4 s now, 13.0 s without OCR; tiles 360 / 424 / 424).
+  A bar implying a scale outside 0.02–500 m/px ("2 m" for "2 mi") is a
+  misread and ignored, and so is a label taller than 8 % of the image's
+  short side (at least 48 px): five page-sized reads of "1 km" took the bar
+  search 17 s on a 6 000 px page. With a printed ratio the ratio's range comes first
+  and a bar that disagrees with it is searched after it: the dpi turns the
+  ratio into pixels only for a page printed at that scale (a sheet reduced
+  to fit the page is not), the bar is measured in the image. Of the 76 benchmark maps 57 have a bar
   read, all 57 within 15 % (the 19 others: no bar, or labels OCR misses).
   The Gaia pages: "1 mi" over 532 px → 3.025 m/px (truth 3.029 across ×
   3.077 down), "2 mi" over 421.5 px → 7.636 m/px (7.650 × 7.771). Photos

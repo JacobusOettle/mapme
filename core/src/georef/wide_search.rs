@@ -161,23 +161,40 @@ impl Run<'_> {
 
     /// The wide search's key, plan (cached in the session) and the coarse
     /// search parameters of each scale band's chunks; None when the map is
-    /// too small to be searched beyond the near disc (`wide_reach`). The
-    /// plan covers the radius the map's size allows (`wide_limit`, from the
-    /// first band: coarser bands' maps cover more ground and reach as far).
+    /// too small to be searched beyond the near disc at every scale
+    /// (`wide_reach`). Each band is searched out to the radius the map's size
+    /// at its scales allows (a coarser band's maps cover more ground and
+    /// reach farther); the plan covers the farthest of them (`wide_limit`).
     /// The bands' chunks are searched in one sweep, nearest first
     /// (`wide::merge_plans`).
     fn wide_setup(&mut self, gps: LatLon, bands: &[ScaleBand]) -> Option<(WideKey, Arc<WidePlan>, Vec<SearchParams>)> {
         let (w, h) = self.size();
         let near = NEAR_RADIUS_M.min(self.radius_m);
-        let reaches: Vec<Option<(u8, f64)>> =
+        let mut reaches: Vec<Option<(u8, f64)>> =
             bands.iter().map(|b| wide_band_reach(self.radius_m, b, w, h, gps.lat)).collect();
-        let first = reaches.first().copied().flatten();
-        self.wide_limit = match first {
-            Some((_, r)) if r < self.radius_m => Some(r),
+        // A band inside another one searched on the same zoom at least as far
+        // (a scale bar's inside the default range's) adds nothing to a sweep
+        // nearest first: the other finds what it would, at the same chunks.
+        for i in 0..bands.len() {
+            let Some((zi, ri)) = reaches[i] else { continue };
+            let covered = (0..bands.len()).any(|j| {
+                j != i
+                    && reaches[j].is_some_and(|(zj, rj)| zj == zi && rj >= ri)
+                    && bands[j].lo <= bands[i].lo
+                    && bands[j].hi >= bands[i].hi
+                    && (j < i || bands[j] != bands[i])
+            });
+            if covered {
+                reaches[i] = None;
+            }
+        }
+        let farthest = reaches.iter().flatten().map(|r| r.1).reduce(f64::max);
+        self.wide_limit = match farthest {
+            Some(r) if r < self.radius_m => Some(r),
             Some(_) => None,
             None => Some(near),
         };
-        let (_, reach_m) = first?;
+        let reach_m = farthest?;
         let origin = latlon_to_merc(gps.lat, gps.lon);
         let mut bases = Vec::new();
         let mut wide_bands = Vec::new();
@@ -290,7 +307,8 @@ impl Run<'_> {
                     bounds: b,
                     origin,
                     r_min_m: near,
-                    r_max_m: wkey.radius_m as f64,
+                    // The chunk's band's own reach (`wide_setup`).
+                    r_max_m: base.search_radius_m,
                     exclude: chunk.exclude,
                 }),
                 ..base.clone()

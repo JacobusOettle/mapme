@@ -576,6 +576,14 @@ struct SearchKey {
     tiles_present: usize,
 }
 
+/// The ground scale range (m/px) a scale bar gives: its scale within
+/// `SCALE_BAR_TOLERANCE` (a bar is drawn for the ground at the map's
+/// latitude), within the plausible scales.
+fn bar_range(b: &ScaleBar) -> (f64, f64) {
+    let (lo, hi) = (b.m_per_px / SCALE_BAR_TOLERANCE, b.m_per_px * SCALE_BAR_TOLERANCE);
+    (lo.clamp(PLAUSIBLE_SCALE.0, PLAUSIBLE_SCALE.1), hi.clamp(PLAUSIBLE_SCALE.0, PLAUSIBLE_SCALE.1))
+}
+
 /// Refinement starts this close (Mercator metres at every image corner, or
 /// two map pixels) converge to the same fit: the refinement scans ±450 m
 /// around either on its coarsest level.
@@ -1529,17 +1537,13 @@ impl<'a> Run<'a> {
         (0.75 * prior * lat.to_radians().cos()..=1.25 * prior).contains(&scale)
     }
 
-    /// Ground scale range (m/px) to search at latitude `lat`: from an OCR'd
-    /// scale and the dpi, a scale bar, a labels-only fit, or the default range.
-    fn scale_range(&mut self, lat: f64, init: Option<&GridResult>) -> (f64, f64) {
-        self.scale_range_source(lat, init).0
-    }
-
     /// The map's scale bar (`scalebar::find_scale_bar`: a distance label
     /// read and its bar measured), found once per call.
     fn scale_bar(&mut self) -> Option<ScaleBar> {
         if self.scale_bar.is_none() {
-            let found = if self.req.ocr.is_empty() { None } else { find_scale_bar(&self.s.image, &self.req.ocr) };
+            // A bar implying an implausible scale is a misread ("1 m" for "1 mi").
+            let found = if self.req.ocr.is_empty() { None } else { find_scale_bar(&self.s.image, &self.req.ocr) }
+                .filter(|b| (PLAUSIBLE_SCALE.0..=PLAUSIBLE_SCALE.1).contains(&b.m_per_px));
             if let Some(b) = &found {
                 self.diag.insert("scale_bar".into(), serde_json::to_value(b).unwrap_or(Value::Null));
             }
@@ -1548,8 +1552,10 @@ impl<'a> Run<'a> {
         self.scale_bar.clone().flatten()
     }
 
-    /// `scale_range` with its source: "scale_label", "scale_bar", "labels" or
-    /// "default".
+    /// Ground scale range (m/px) to search first at latitude `lat`, with its
+    /// source: an OCR'd scale and the dpi ("scale_label"), a scale bar
+    /// ("scale_bar"), a labels-only fit ("labels"), or the default range
+    /// ("default"). `area_bands` adds the fallbacks.
     fn scale_range_source(&mut self, lat: f64, init: Option<&GridResult>) -> ((f64, f64), &'static str) {
         let (w, h) = self.size();
         let cos_lat = lat.to_radians().cos();
@@ -1560,8 +1566,8 @@ impl<'a> Run<'a> {
             self.diag.insert("scale_denominator".into(), json!(denom));
             (0.75 * prior * cos_lat, 1.25 * prior, "scale_label")
         } else if let Some(b) = self.scale_bar() {
-            // A bar is drawn for the ground at the map's latitude.
-            (b.m_per_px / SCALE_BAR_TOLERANCE, b.m_per_px * SCALE_BAR_TOLERANCE, "scale_bar")
+            let (lo, hi) = bar_range(&b);
+            (lo, hi, "scale_bar")
         } else if let Some(g) = init {
             let (s, _) = scale_and_rotation(&g.transform, w as f64 / 2.0, h as f64 / 2.0);
             if s.is_finite() && s > 0.0 {
@@ -1578,24 +1584,33 @@ impl<'a> Run<'a> {
         ((lo, hi), source)
     }
 
-    /// The scale range at latitude `lat` as bands searched in turn, finest
-    /// first (`wide::scale_bands`): the wide search's.
-    fn bands(&mut self, lat: f64, init: Option<&GridResult>) -> Vec<ScaleBand> {
-        let (w, h) = self.size();
-        let (lo, hi) = self.scale_range(lat, init);
-        scale_bands(lo, hi, w, h, lat)
-    }
-
-    /// The bands of a hint or near area: `bands`, and after a scale bar's
-    /// range (a prior, not a constraint: a bar misread or mismeasured must
-    /// not hide the map) the default range's.
+    /// The scale bands searched in turn at latitude `lat`, in every hint
+    /// area, the near area and the wide search (`wide::scale_bands`, finest
+    /// first): `scale_range_source`'s, then
+    ///
+    /// * after a scale bar's range (a prior, not a constraint: a bar misread
+    ///   or mismeasured, "2 mi" for "2 km", must not hide the map) the default
+    ///   range's;
+    /// * after a printed scale's range the range of a scale bar that
+    ///   disagrees with it: the printed scale becomes pixels through the dpi,
+    ///   which holds only for a page printed at that scale (not for a sheet
+    ///   reduced to fit the page), while the bar is measured in the image.
     fn area_bands(&mut self, lat: f64, init: Option<&GridResult>) -> Vec<ScaleBand> {
         let (w, h) = self.size();
         let ((lo, hi), source) = self.scale_range_source(lat, init);
         let mut bands = scale_bands(lo, hi, w, h, lat);
-        if source == "scale_bar" {
-            let (dlo, dhi) = default_scale_range(w, h);
-            bands.extend(scale_bands(dlo, dhi, w, h, lat));
+        match source {
+            "scale_bar" => {
+                let (dlo, dhi) = default_scale_range(w, h);
+                bands.extend(scale_bands(dlo, dhi, w, h, lat));
+            }
+            "scale_label" => {
+                if let Some(b) = self.scale_bar().filter(|b| !(lo..=hi).contains(&b.m_per_px)) {
+                    let (blo, bhi) = bar_range(&b);
+                    bands.extend(scale_bands(blo, bhi, w, h, lat));
+                }
+            }
+            _ => {}
         }
         bands
     }
@@ -1882,7 +1897,7 @@ impl<'a> Run<'a> {
             // 5. The wide area, chunk by chunk, nearest first.
             if wide {
                 let prod = self.products(self.contour_key())?;
-                let bands = self.bands(gps.lat, init);
+                let bands = self.area_bands(gps.lat, init);
                 if let Some(r) = self.wide_search(&prod, gps, &bands)? {
                     return Ok(Found::Located(r));
                 }
@@ -1961,7 +1976,7 @@ impl<'a> Run<'a> {
         }
         self.pinned = planned;
         if let Some(g) = self.gps.filter(|_| self.radius_m > NEAR_RADIUS_M) {
-            let bands = self.bands(g.lat, init);
+            let bands = self.area_bands(g.lat, init);
             self.plan_wide_progress(g, &bands);
         }
         let first_lat = self.hints.first().map(|h| h.lat).or(self.gps.map(|g| g.lat)).unwrap_or(0.0);
