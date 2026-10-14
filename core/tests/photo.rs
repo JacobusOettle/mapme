@@ -243,7 +243,7 @@ fn contours_photo(corner_error: f64, max_err_m: f64) -> Value {
     eprintln!("[coarse] best candidate {off:.0} m from the true centre, peak ratio {}", cand["peak_ratio"]);
     assert!(off < 400.0, "coarse candidate {off:.0} m off: {cand}");
     check_geometry(c, &r);
-    assert!(total < 6.0, "photo contour path took {total:.1} s");
+    assert!(total * 1e3 < time_budget_ms(6000.0), "photo contour path took {total:.1} s");
     r
 }
 

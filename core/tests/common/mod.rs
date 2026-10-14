@@ -704,3 +704,56 @@ pub fn max_graticule_error_m(h: &Homography, pts: &[GraticulePoint]) -> f64 {
         })
         .fold(0.0, f64::max)
 }
+
+/// A time budget of `ms` milliseconds, set on the 4-thread machine the core is developed on,
+/// scaled to this machine (`speed_factor`): a slower CI runner gets proportionally more time,
+/// while a real slowdown of the code still fails.
+pub fn time_budget_ms(ms: f64) -> f64 {
+    ms * speed_factor()
+}
+
+/// How much slower this machine is than the one the time budgets were set on, from 1 to 4:
+/// the best of 5 runs of a fixed single-threaded workload (`reference_workload`, 15 ms there)
+/// times the shortfall in threads (budgets were set with 4; rayon spreads most of the core's
+/// work over all of them). Measured once per test binary.
+pub fn speed_factor() -> f64 {
+    static FACTOR: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *FACTOR.get_or_init(|| {
+        const REFERENCE_MS: f64 = 15.0;
+        const REFERENCE_THREADS: f64 = 4.0;
+        let best = (0..5)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                std::hint::black_box(reference_workload());
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .fold(f64::INFINITY, f64::min);
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
+        let factor = ((best / REFERENCE_MS).max(1.0) * (REFERENCE_THREADS / threads).max(1.0)).min(4.0);
+        eprintln!("[timing] budgets ×{factor:.2}: reference workload {best:.1} ms ({REFERENCE_MS} ms where they were set), {threads} threads");
+        factor
+    })
+}
+
+/// Image-processing-like work: box blurs of a 1024×1024 float image and a table lookup per pixel.
+fn reference_workload() -> f32 {
+    let (w, h) = (1024usize, 1024usize);
+    let mut a: Vec<f32> = (0..w * h).map(|i| ((i * 2_654_435_761) % 1000) as f32 / 1000.0).collect();
+    let mut b = vec![0.0f32; w * h];
+    let lut: Vec<f32> = (0..4096).map(|i| (i as f32 / 4096.0).sqrt()).collect();
+    for _ in 0..4 {
+        for y in 0..h {
+            let row = &a[y * w..(y + 1) * w];
+            for x in 1..w - 1 {
+                b[y * w + x] = (row[x - 1] + row[x] + row[x + 1]) * (1.0 / 3.0);
+            }
+        }
+        for y in 1..h - 1 {
+            for x in 0..w {
+                let v = (b[(y - 1) * w + x] + b[y * w + x] + b[(y + 1) * w + x]) * (1.0 / 3.0);
+                a[y * w + x] = lut[((v * 4095.0) as usize).min(4095)];
+            }
+        }
+    }
+    a.iter().sum()
+}

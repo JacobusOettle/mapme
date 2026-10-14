@@ -77,7 +77,7 @@ fn detect_lines_is_fast() {
     println!("detect_lines on {}x{}: {best:.1} ms (best of 3)", img.w, img.h);
     assert_eq!(n, 12);
     if !cfg!(debug_assertions) {
-        assert!(best < 400.0, "detect_lines took {best:.1} ms");
+        assert!(best < time_budget_ms(400.0), "detect_lines took {best:.1} ms");
     }
 }
 
@@ -154,7 +154,7 @@ fn grid_georeference_with_lots_of_ocr_junk() {
         assert!(err < 8.0, "max error {err:.2} m");
         assert!((0..8).all(|i| r.used_labels.contains(&i)), "{:?}", r.used_labels);
         if !cfg!(debug_assertions) {
-            assert!(ms < 250.0, "{ms:.1} ms");
+            assert!(ms < time_budget_ms(250.0), "{ms:.1} ms");
         }
     }
 }

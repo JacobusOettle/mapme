@@ -216,7 +216,7 @@ fn grid_labels_locate_the_sheet() {
     assert!(pois.iter().any(|p| p["kind"] == "spot_height" && p["elevation_m"].as_f64() == Some(1523.0)), "{pois:?}");
     // Coordinate labels are not POIs.
     assert!(!pois.iter().any(|p| p["name"].as_str().unwrap().contains('°')));
-    assert!(r["timings_ms"]["total"].as_f64().unwrap() < 3000.0);
+    assert!(r["timings_ms"]["total"].as_f64().unwrap() < time_budget_ms(3000.0));
 }
 
 /// (a') Grid + `verify`: the contour check needs zoom-13 tiles, then agrees.

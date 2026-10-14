@@ -269,5 +269,5 @@ fn speed_on_a_24_megapixel_photo() {
         }
     }
     eprintln!("[page] {}x{} RGBA through mm_detect_page: {best:.0} ms (best of 4)", img.w, img.h);
-    assert!(best < 150.0, "page detection took {best:.0} ms on 24 MP");
+    assert!(best < time_budget_ms(150.0), "page detection took {best:.0} ms on 24 MP");
 }

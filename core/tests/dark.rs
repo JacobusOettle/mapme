@@ -1219,9 +1219,9 @@ fn speed() {
         "style (65³ LUT) build {:.1} ms (best of 3); 512×512 tile render {:.2} ms median, {:.2} ms best (photo {:.2} ms median); profile of a 1169×1653 overview {profile_ms:.0} ms (photo, 850×1116: {photo_profile_ms:.0} ms)",
         builds[0], times[7], times[0], ptimes[7]
     );
-    assert!(builds[0] < 150.0, "style creation took {:.1} ms", builds[0]);
-    assert!(times[7] < 30.0, "512×512 render took {:.2} ms", times[7]);
-    assert!(ptimes[7] < 30.0, "512×512 photo render took {:.2} ms", ptimes[7]);
+    assert!(builds[0] < time_budget_ms(150.0), "style creation took {:.1} ms", builds[0]);
+    assert!(times[7] < time_budget_ms(30.0), "512×512 render took {:.2} ms", times[7]);
+    assert!(ptimes[7] < time_budget_ms(30.0), "512×512 photo render took {:.2} ms", ptimes[7]);
 }
 
 // ---------------------------------------------------------------------------

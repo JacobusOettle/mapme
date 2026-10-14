@@ -360,8 +360,8 @@ fn full_pipeline_timing() {
         total
     );
     assert!(o.confidence >= 0.7);
-    assert!(t_skel < 1.0, "skeleton {t_skel:.2} s");
-    assert!(total < 5.0, "pipeline {total:.2} s");
+    assert!(t_skel * 1e3 < time_budget_ms(1000.0), "skeleton {t_skel:.2} s");
+    assert!(total * 1e3 < time_budget_ms(5000.0), "pipeline {total:.2} s");
 }
 
 /// Refinement converges from coarse starts several hundred metres off.
@@ -426,7 +426,7 @@ fn mask_and_skeleton_on_real_map() {
     );
     assert!(mask.fraction() > 0.05 && mask.fraction() < 0.2);
     assert!(s.n_segs > 300);
-    assert!(t_skel < 1.0);
+    assert!(t_skel * 1e3 < time_budget_ms(1000.0), "skeleton {t_skel:.2} s");
 }
 
 /// Synthetic DEM tiles at each (zoom, box) from an elevation function of

@@ -753,7 +753,7 @@ fn repeat_is_free(s: &Session, req: &Value, last: &Value) {
     assert_eq!(again["message"], last["message"]);
     assert!(tiles_of(&again).is_empty());
     assert_eq!(again["pixel_to_mercator"], last["pixel_to_mercator"]);
-    assert!(secs < 1.5, "a repeated call took {secs:.2} s");
+    assert!(secs * 1e3 < time_budget_ms(1500.0), "a repeated call took {secs:.2} s");
 }
 
 /// Cancel the wide search several times mid-chunk: every cancelled call

@@ -31,7 +31,7 @@
 //! `realphoto_dump` (ignored) writes debug images to `$PHOTO_DUMP`.
 
 mod common;
-use common::fixture_dir;
+use common::{fixture_dir, time_budget_ms};
 use mapme_core::contour::{normalize_illumination, photo_mask};
 use mapme_core::geo::{haversine_m, latlon_to_merc, merc_to_latlon, Homography, LatLon};
 use mapme_core::georef::Session;
@@ -440,7 +440,7 @@ fn warped(o: &Outcome, source: &str, flat: Stats) -> Result<(), String> {
         return Err(format!("pixel_to_mercator alone {f:?} exceeds {flat:?}"));
     }
     let ms = o.r["timings_ms"]["warp"].as_f64().unwrap_or(f64::INFINITY);
-    if ms > WARP_MS {
+    if ms > time_budget_ms(WARP_MS) {
         return Err(format!("warp took {ms} ms"));
     }
     Ok(())
