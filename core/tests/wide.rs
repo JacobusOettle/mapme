@@ -205,12 +205,17 @@ fn wrong_hint_then_correct_hint() {
     summary("wrong hint, right hint", &rs, Some(err));
     assert_eq!(r["status"], "ok", "{r}");
     assert!(err < 40.0, "max error {err:.1} m");
+    // The wrong hint in both scale bands (no scale label: the small-scale band
+    // too, on zoom-8 tiles), then the right one, found in the near zoom's band.
     let areas = r["diagnostics"]["search_areas"].as_array().unwrap();
-    assert_eq!(areas.len(), 2, "{areas:?}");
-    assert_eq!(areas[0]["name"], "Elsewhere");
-    assert_ne!(areas[0]["outcome"], "located");
-    assert_eq!(areas[1]["name"], "Grootkloof");
-    assert_eq!(areas[1]["outcome"], "located");
+    assert_eq!(areas.len(), 3, "{areas:?}");
+    for a in &areas[..2] {
+        assert_eq!(a["name"], "Elsewhere");
+        assert_ne!(a["outcome"], "located");
+    }
+    assert!(areas[0]["band"]["max"].as_f64().unwrap() <= 12.0 && areas[1]["band"]["min"].as_f64().unwrap() >= 12.0);
+    assert_eq!(areas[2]["name"], "Grootkloof");
+    assert_eq!(areas[2]["outcome"], "located");
     assert_eq!(r["search"]["hints_tried"], 2);
 }
 

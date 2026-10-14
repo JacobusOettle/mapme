@@ -19,6 +19,7 @@ pub mod image;
 pub mod labels;
 pub mod page;
 pub mod refine;
+pub mod scalebar;
 pub mod search;
 pub mod skeleton;
 pub mod warp;

@@ -1383,13 +1383,51 @@ pub(crate) fn words_of(text: &str) -> Vec<String> {
 
 /// "1428", "1428m", "1428.5 m" → elevation.
 pub(crate) fn parse_height(text: &str) -> Option<f64> {
+    parse_height_in(text, HeightUnit::Metres)
+}
+
+/// Unit of the heights printed on a map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeightUnit {
+    Metres,
+    Feet,
+}
+
+/// Metres per international foot.
+pub const FOOT_M: f64 = 0.3048;
+
+impl HeightUnit {
+    /// Metres per printed unit.
+    pub fn metres(self) -> f64 {
+        match self {
+            HeightUnit::Metres => 1.0,
+            HeightUnit::Feet => FOOT_M,
+        }
+    }
+}
+
+/// A printed height in `unit` (the value as printed, not converted): three
+/// or four digits in metres ("1428", "1428m", "1428.5 m"), three to five in
+/// feet ("10876", "6316 ft"), never a multiple of 50 (contour labels), at
+/// most Everest's height.
+pub(crate) fn parse_height_in(text: &str, unit: HeightUnit) -> Option<f64> {
     let t = text.trim();
-    let t = t.strip_suffix('m').or_else(|| t.strip_suffix('M')).unwrap_or(t).trim_end();
+    let t = match unit {
+        HeightUnit::Metres => t.strip_suffix('m').or_else(|| t.strip_suffix('M')).unwrap_or(t),
+        HeightUnit::Feet => t.strip_suffix("ft").or_else(|| t.strip_suffix("FT")).unwrap_or(t),
+    }
+    .trim_end();
     let (int, frac) = match t.split_once('.') {
         Some((a, b)) => (a, Some(b)),
         None => (t, None),
     };
-    if !(3..=4).contains(&int.len()) || !int.chars().all(|c| c.is_ascii_digit()) {
+    let digits = match unit {
+        HeightUnit::Metres => 3..=4,
+        HeightUnit::Feet => 3..=5,
+    };
+    // No height is printed with a leading zero ("0348" is "10348" cut short).
+    if !digits.contains(&int.len()) || !int.chars().all(|c| c.is_ascii_digit()) || int.starts_with('0') {
         return None;
     }
     if let Some(f) = frac {
@@ -1399,10 +1437,98 @@ pub(crate) fn parse_height(text: &str) -> Option<f64> {
     }
     let v: f64 = t.parse().ok()?;
     let iv = int.parse::<i64>().ok()?;
-    if !(-400.0..=8850.0).contains(&v) || iv % 50 == 0 {
+    if !(-400.0..=8850.0).contains(&(v * unit.metres())) || iv % 50 == 0 {
         return None;
     }
     Some(v)
+}
+
+/// The unit of the heights printed on a map, from its text: a note about
+/// heights or contours with its unit ("Gaia Topo (feet)", "CONTOUR INTERVAL
+/// 40 FEET", "Elevations in metres"), or five-digit heights, which no metre
+/// height reaches (two or more "10876"s). None when nothing says: the
+/// terrain may tell (`georef`, spot heights against the DEM). A scale bar's
+/// "500 ft" or "1 km" says nothing about heights.
+pub fn height_unit(obs: &[OcrObservation]) -> Option<HeightUnit> {
+    let (mut feet, mut metres) = (0usize, 0usize);
+    for o in obs {
+        let lower = o.text.to_lowercase();
+        let words = words_of(&o.text);
+        let has = |set: &[&str]| words.iter().any(|w| set.contains(&w.as_str()));
+        let about_heights = has(&[
+            "contour",
+            "contours",
+            "interval",
+            "elevation",
+            "elevations",
+            "height",
+            "heights",
+            "altitude",
+            "topo",
+        ]) || lower.contains("(feet)")
+            || lower.contains("(ft)")
+            || lower.contains("(metres)")
+            || lower.contains("(meters)");
+        if about_heights {
+            if has(&["feet", "foot", "ft"]) {
+                feet += 1;
+            }
+            if has(&["metres", "meters", "metre", "meter", "m"]) {
+                metres += 1;
+            }
+        }
+    }
+    // Most of the heights, and two at least: a garbled read ("11283" for
+    // 1283) is no unit.
+    let five_digit = obs
+        .iter()
+        .filter(|o| {
+            let t = o.text.trim();
+            t.len() == 5
+                && parse_height_in(t, HeightUnit::Feet).is_some()
+                && parse_height_in(t, HeightUnit::Metres).is_none()
+        })
+        .count();
+    let heights = obs.iter().filter(|o| parse_height_in(o.text.trim(), HeightUnit::Feet).is_some()).count();
+    if five_digit >= 2 && 2 * five_digit > heights {
+        feet += 1;
+    }
+    match feet.cmp(&metres) {
+        std::cmp::Ordering::Greater => Some(HeightUnit::Feet),
+        std::cmp::Ordering::Less => Some(HeightUnit::Metres),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+/// Credits, attribution and projection notes of map apps and tile services
+/// ("Gaia Topo (feet): © Gaia GPS, OpenStreetMap", the "GAIAGPS" logo, "Web
+/// Mercator | EPSG: 3857", "© Mapbox © OpenStreetMap contributors"): map
+/// furniture, never a place name.
+pub(crate) fn credit_text(text: &str) -> bool {
+    /// Letter runs (in the text's letters, lower case, spaces and symbols
+    /// dropped) of brands and attribution: cut short by the OCR too
+    /// ("OpenStreetN").
+    const RUNS: &[&str] = &[
+        "openstreet",
+        "gaiagps",
+        "gaiatopo",
+        "caltopo",
+        "alltrails",
+        "mapbox",
+        "maptiler",
+        "thunderforest",
+        "opentopomap",
+        "outdooractive",
+        "webmercator",
+        "contributors",
+        "naturalearth",
+        "swisstopo",
+        "ordnancesurvey",
+    ];
+    /// Whole words.
+    const WORDS: &[&str] = &["epsg", "osm", "esri", "mercator", "wgs84", "nad83", "nad27", "attribution", "komoot"];
+    let letters: String = text.chars().filter(|c| c.is_alphabetic()).flat_map(char::to_lowercase).collect();
+    RUNS.iter().any(|r| letters.contains(r)) || words_of(text).iter().any(|w| WORDS.contains(&w.as_str()))
 }
 
 const SCALE_UNITS: &[&str] =
@@ -1617,13 +1743,21 @@ fn letter_height(o: &OcrObservation) -> f64 {
     o.text_height().min(o.bbox[2].hypot(o.bbox[3]) / (0.55 * n))
 }
 
-fn verdict(o: &OcrObservation, furniture: bool, th: f64) -> Verdict {
+/// What one read is. `unit`: the map's height unit (heights stay in it here,
+/// as printed; `classify_pois_reads` converts them to metres at the end).
+fn verdict(o: &OcrObservation, furniture: bool, th: f64, unit: HeightUnit) -> Verdict {
     // Large lettering is the title.
     if furniture || letter_height(o) > TITLE_TEXT_HEIGHT * th {
         return Verdict::Furniture;
     }
     let text = o.text.as_str();
-    if parse_coordinate(text).is_some() || parse_scale(text).is_some() || has_angle_mark(text) {
+    let parse_height = |t: &str| parse_height_in(t, unit);
+    // A grid value is round: a five-digit height in feet ("10305") is no easting.
+    let coordinate = match parse_coordinate(text) {
+        Some(CoordValue::Grid(_)) => parse_height(text).is_none(),
+        c => c.is_some(),
+    };
+    if coordinate || parse_scale(text).is_some() || has_angle_mark(text) || credit_text(text) {
         return Verdict::Furniture;
     }
     let (x, y) = o.center();
@@ -1657,7 +1791,7 @@ fn verdict(o: &OcrObservation, furniture: bool, th: f64) -> Verdict {
         };
         if let Some(h) = parse_height(&tail).or_else(|| {
             let t = tail.trim_end_matches(['m', 'M']);
-            t.parse::<f64>().ok().filter(|v| t.len() >= 3 && (-400.0..=8850.0).contains(v))
+            t.parse::<f64>().ok().filter(|v| t.len() >= 3 && (-400.0..=8850.0).contains(&(v * unit.metres())))
         }) {
             elevation = Some(h);
             let keep = if tail.len() > raw[raw.len() - 1].len() { raw.len() - 2 } else { raw.len() - 1 };
@@ -1726,7 +1860,39 @@ fn verdict(o: &OcrObservation, furniture: bool, th: f64) -> Verdict {
     if words.len() == 1 && letters <= 4 && name.ends_with('.') && !lexicon_word(&words[0]) {
         return Verdict::Junk;
     }
+    let name = split_glued(&name);
+    let words = words_of(&name);
     Verdict::Poi(PoiLabel { name, kind: poi_kind(&words), elevation_m: elevation, x, y })
+}
+
+/// Two words the OCR ran together, the second's capital showing where
+/// ("MountDurnford" → "Mount Durnford"), when one of them is a feature or
+/// lexicon word of three letters or more; a name's own capitals stay
+/// ("KaMasihlenga", "uKhahlamba", "McGregor", "DeHoop").
+fn split_glued(name: &str) -> String {
+    let feature = |w: &str| {
+        let l = w.to_lowercase();
+        l.chars().count() >= 3
+            && (lexicon_word(&l) || PEAK_WORDS.contains(&l.as_str()) || WATER_WORDS.contains(&l.as_str()))
+    };
+    let mut out: Vec<String> = Vec::new();
+    for tok in name.split_whitespace() {
+        let c: Vec<char> = tok.chars().collect();
+        let cut = (1..c.len()).find(|&k| {
+            c[k].is_uppercase() && c[k - 1].is_lowercase() && k >= 3 && c.len() - k >= 3 && {
+                let (a, b): (String, String) = (c[..k].iter().collect(), c[k..].iter().collect());
+                a.chars().all(char::is_alphabetic) && b.chars().all(char::is_alphabetic) && (feature(&a) || feature(&b))
+            }
+        });
+        match cut {
+            Some(k) => {
+                out.push(c[..k].iter().collect());
+                out.push(c[k..].iter().collect());
+            }
+            None => out.push(tok.to_string()),
+        }
+    }
+    out.join(" ")
 }
 
 /// Lettering this many times the median text height is the title.
@@ -2112,16 +2278,21 @@ pub fn classify_pois(obs: &[OcrObservation]) -> Vec<PoiLabel> {
 
 /// `classify_pois` with the read each POI came from (its box and confidence).
 pub(crate) fn classify_pois_reads(obs: &[OcrObservation]) -> Vec<(PoiLabel, OcrObservation)> {
-    let merged = merge_identical(obs);
+    let mut merged = merge_identical(obs);
     let th = median(merged.iter().map(|o| o.text_height()).filter(|&h| h > 0.0).collect()).unwrap_or(20.0);
     let scale_bar = scale_bar_members(&merged, th);
     let legend = legend_members(&merged, th);
     let vocab = Vocabulary::new(&merged);
+    // Heights stay as printed until the end (the truncated-height rules
+    // count digits); unknown is read as metres.
+    let unit = height_unit(obs);
+    let read_unit = unit.unwrap_or(HeightUnit::Metres);
     let mut verdicts: Vec<Verdict> =
-        merged.iter().enumerate().map(|(i, o)| verdict(o, scale_bar[i] || legend[i], th)).collect();
+        merged.iter().enumerate().map(|(i, o)| verdict(o, scale_bar[i] || legend[i], th, read_unit)).collect();
     mend_names(&merged, &mut verdicts, &vocab);
     drop_fragments(&merged, &mut verdicts, &vocab);
     drop_garbled_turned(&merged, &mut verdicts, &vocab, th);
+    join_stacked(&mut merged, &mut verdicts);
     let mut out: Vec<(PoiLabel, OcrObservation)> = verdicts
         .into_iter()
         .zip(merged)
@@ -2150,7 +2321,129 @@ pub(crate) fn classify_pois_reads(obs: &[OcrObservation]) -> Vec<(PoiLabel, OcrO
             p.elevation_m = Some(h);
         }
     }
+    // Printed heights to metres (the name keeps the printed text: "10876").
+    let k = read_unit.metres();
+    if k != 1.0 {
+        for (p, _) in out.iter_mut() {
+            if let Some(e) = p.elevation_m.as_mut() {
+                *e = (*e * k * 10.0).round() / 10.0;
+            }
+        }
+    }
     out
+}
+
+/// Names printed on two or more lines, one under the other and centred
+/// ("Giant's" / "Castle", "Thaba-" / "Putsoa", "Bannerman" / "Hut": Gaia GPS
+/// and other screen maps wrap their labels), are one name: lines across the
+/// map of about the same letter height, centred on each other within 0.6
+/// letter heights, the lower one starting at most 0.6 letter heights under
+/// the upper one (and overlapping it by at most 0.35). A line ending in a
+/// hyphen runs on without a space. A height centred under the name (Gaia's
+/// summits: "Giant's" / "Castle" / "10876") gives a name without one its
+/// elevation and makes it a peak; the height stays a spot height of its own.
+/// Separate labels of a sheet are rarely centred on each other that close.
+fn join_stacked(merged: &mut [OcrObservation], verdicts: &mut [Verdict]) {
+    let line = |o: &OcrObservation| o.bbox[2] >= o.bbox[3] && o.bbox[2] > 0.0 && o.bbox[3] > 0.0;
+    let is_name = |v: &Verdict| matches!(v, Verdict::Poi(p) if p.kind != PoiKind::SpotHeight);
+    // A line of one or two feature words ("Hut", "Cave", "Camp"): legend
+    // text on its own, the end of the name above it here.
+    let feature_line = |o: &OcrObservation, v: &Verdict| {
+        let words = words_of(&o.text);
+        matches!(v, Verdict::Furniture)
+            && (1..=2).contains(&words.len())
+            && words.iter().all(|w| w.chars().count() >= 3 && lexicon_word(w))
+            && o.text.chars().all(|c| c.is_alphabetic() || c.is_whitespace() || "'-.".contains(c))
+    };
+    let usable = |o: &OcrObservation, v: &Verdict| matches!(v, Verdict::Poi(_)) || feature_line(o, v);
+    let mut order: Vec<usize> =
+        (0..merged.len()).filter(|&i| line(&merged[i]) && usable(&merged[i], &verdicts[i])).collect();
+    order.sort_by(|&a, &b| merged[a].bbox[1].total_cmp(&merged[b].bbox[1]));
+    // The next line under a line centred at `cx`, ending at `bottom`, of letter height `lh`.
+    let below = |merged: &[OcrObservation], verdicts: &[Verdict], cx: f64, bottom: f64, lh: f64| -> Option<usize> {
+        order
+            .iter()
+            .copied()
+            .filter(|&j| usable(&merged[j], &verdicts[j]))
+            .filter(|&j| {
+                let o = &merged[j];
+                let h = o.bbox[3];
+                let th = lh.max(h);
+                let gap = o.bbox[1] - bottom;
+                let ocx = o.bbox[0] + o.bbox[2] / 2.0;
+                h >= 0.7 * lh && h <= lh / 0.7 && (ocx - cx).abs() <= 0.6 * th && gap >= -0.35 * th && gap <= 0.6 * th
+            })
+            .min_by(|&a, &b| merged[a].bbox[1].total_cmp(&merged[b].bbox[1]))
+    };
+    for &i in &order {
+        if !is_name(&verdicts[i]) {
+            continue;
+        }
+        // The read keeps its first line's height (its letter size); its box
+        // widens to the lines', its position is their middle.
+        let first = merged[i].bbox;
+        let (cx, mut bottom, mut lh) = (first[0] + first[2] / 2.0, first[1] + first[3], first[3]);
+        let (mut x0, mut x1) = (first[0], first[0] + first[2]);
+        // Absorb the lines under it, then a height under them.
+        while let Some(j) = below(merged, verdicts, cx, bottom, lh).filter(|&j| j != i) {
+            let Verdict::Poi(upper) = &verdicts[i] else { break };
+            let upper = upper.clone();
+            let lower = match &verdicts[j] {
+                Verdict::Poi(p) => p.clone(),
+                _ => {
+                    let (x, y) = merged[j].center();
+                    PoiLabel { name: merged[j].text.clone(), kind: PoiKind::Place, elevation_m: None, x, y }
+                }
+            };
+            if lower.kind == PoiKind::SpotHeight {
+                if upper.elevation_m.is_none() {
+                    if let Verdict::Poi(p) = &mut verdicts[i] {
+                        p.elevation_m = lower.elevation_m;
+                        p.kind = PoiKind::Peak;
+                    }
+                }
+                break;
+            }
+            if upper.elevation_m.is_some() {
+                break;
+            }
+            // Two names of several words each, or sharing a word, are two
+            // places one under the other ("NORTH PEAK" / "SOUTH PEAK", "RAND
+            // WATER BOX 1" / "… 2"); a wrapped label breaks off one word.
+            // A line ending in a hyphen (as read: the name lost it to the symbol trim).
+            let hyphen = merged[i].text.trim_end().ends_with('-');
+            let (wu, wl) = (words_of(&upper.name), words_of(&lower.name));
+            let shared = wu.iter().any(|w| w.chars().count() >= 3 && wl.contains(w));
+            if shared || !(wu.len() == 1 || wl.len() == 1 || hyphen) {
+                break;
+            }
+            let join = |a: &str, b: &str| {
+                if hyphen {
+                    format!("{}-{b}", a.trim_end().trim_end_matches('-'))
+                } else {
+                    format!("{a} {b}")
+                }
+            };
+            let name = join(&upper.name, &lower.name);
+            let text = join(&merged[i].text, &merged[j].text);
+            let b = merged[j].bbox;
+            x0 = x0.min(b[0]);
+            x1 = x1.max(b[0] + b[2]);
+            bottom = b[1] + b[3];
+            lh = b[3];
+            let confidence = merged[i].confidence.min(merged[j].confidence);
+            let (x, y) = ((x0 + x1) / 2.0, (first[1] + bottom) / 2.0);
+            let kind = match lower.kind {
+                PoiKind::Peak | PoiKind::Water => lower.kind,
+                _ => poi_kind(&words_of(&name)),
+            };
+            let kind = if upper.kind == PoiKind::Peak { PoiKind::Peak } else { kind };
+            verdicts[i] =
+                Verdict::Poi(PoiLabel { name, kind, elevation_m: lower.elevation_m.or(upper.elevation_m), x, y });
+            verdicts[j] = Verdict::Junk;
+            merged[i] = OcrObservation { text, bbox: [x0, first[1], x1 - x0, first[3]], confidence };
+        }
+    }
 }
 
 /// Drop spot heights that are misreads with digits missing, such as "112" for a "1412" that a
@@ -2868,5 +3161,89 @@ mod tests {
         let p = classify_pois(&obs);
         let names: Vec<&str> = p.iter().map(|q| q.name.as_str()).collect();
         assert_eq!(names, vec!["Rhino Pools"], "{p:?}");
+    }
+
+    #[test]
+    fn heights_in_feet() {
+        // As printed: five digits in feet, never with a leading zero or round.
+        assert_eq!(parse_height_in("10876", HeightUnit::Feet), Some(10876.0));
+        assert_eq!(parse_height_in("6316 ft", HeightUnit::Feet), Some(6316.0));
+        assert_eq!(parse_height_in("10876", HeightUnit::Metres), None);
+        assert_eq!(parse_height_in("0348", HeightUnit::Feet), None);
+        assert_eq!(parse_height_in("10800", HeightUnit::Feet), None);
+        assert_eq!(parse_height_in("29100", HeightUnit::Feet), None);
+        // The unit: said on the map, or most heights of five digits.
+        let o = |t: &str| ob(t, 0.0, 0.0, 100.0, 20.0);
+        assert_eq!(height_unit(&[o("Gaia Topo (feet): © Gaia GPS")]), Some(HeightUnit::Feet));
+        assert_eq!(height_unit(&[o("CONTOUR INTERVAL 40 FEET")]), Some(HeightUnit::Feet));
+        assert_eq!(height_unit(&[o("Contour interval 20 m")]), Some(HeightUnit::Metres));
+        assert_eq!(height_unit(&[o("10807"), o("10328"), o("6316")]), Some(HeightUnit::Feet));
+        // A scale bar's unit says nothing; garbled reads are no unit.
+        assert_eq!(height_unit(&[o("500 ft"), o("1 mi")]), None);
+        assert_eq!(height_unit(&[o("11283"), o("17384"), o("1246"), o("1331"), o("1492")]), None);
+        // POIs: names keep the printed text, elevations are metres; a five-digit
+        // height in feet is no UTM easting.
+        let obs = vec![
+            ob("Gaia Topo (feet): © Gaia GPS, OpenStreetMap", 100.0, 2300.0, 560.0, 28.0),
+            ob("Web Mercator | EPSG: 3857", 2960.0, 2364.0, 265.0, 26.0),
+            ob("Mount", 1909.0, 896.0, 94.0, 35.0),
+            ob("Durnford", 1894.0, 930.0, 119.0, 34.0),
+            ob("10807", 1913.0, 963.0, 84.0, 33.0),
+            ob("10305", 1063.0, 1040.0, 85.0, 27.0),
+        ];
+        let p = classify_pois(&obs);
+        let got: Vec<(&str, PoiKind, Option<f64>)> =
+            p.iter().map(|q| (q.name.as_str(), q.kind, q.elevation_m)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Mount Durnford", PoiKind::Peak, Some(3294.0)),
+                ("10807", PoiKind::SpotHeight, Some(3294.0)),
+                ("10305", PoiKind::SpotHeight, Some(3141.0)),
+            ],
+            "{p:?}"
+        );
+    }
+
+    #[test]
+    fn wrapped_labels_and_credits() {
+        let names =
+            |obs: &[OcrObservation]| -> Vec<String> { classify_pois(obs).into_iter().map(|p| p.name).collect() };
+        // Centred lines, one word each (or a hyphen): one name; legend words may end it.
+        let obs = vec![
+            ob("Giant's", 2472.0, 1466.0, 99.0, 34.0),
+            ob("Castle", 2479.0, 1504.0, 74.0, 29.0),
+            ob("Thaba-", 1227.0, 919.0, 93.0, 35.0),
+            ob("Putsoa", 1226.0, 952.0, 96.0, 35.0),
+            ob("Bannerman", 1909.0, 138.0, 182.0, 30.0),
+            ob("Hut", 1968.0, 167.0, 64.0, 32.0),
+        ];
+        assert_eq!(names(&obs), vec!["Giant's Castle", "Thaba-Putsoa", "Bannerman Hut"]);
+        // Off centre, or too far under, or two names of several words: apart.
+        let obs = vec![
+            ob("Grysbok", 2594.0, 415.0, 153.0, 40.0),
+            ob("Bush", 2722.0, 458.0, 97.0, 37.0),
+            ob("Erskine", 931.0, 575.0, 105.0, 34.0),
+            ob("Kambule", 941.0, 680.0, 128.0, 31.0),
+            ob("NORTH PEAK", 300.0, 300.0, 200.0, 30.0),
+            ob("SOUTH PEAK", 300.0, 335.0, 200.0, 30.0),
+        ];
+        assert_eq!(names(&obs), vec!["Grysbok", "Bush", "Erskine", "Kambule", "NORTH PEAK", "SOUTH PEAK"]);
+        // Glued words split at a capital only beside a feature word.
+        assert_eq!(split_glued("MountDurnford"), "Mount Durnford");
+        for n in ["KaMasihlenga", "uKhahlamba", "McGregor", "DeHoop"] {
+            assert_eq!(split_glued(n), n);
+        }
+        for c in [
+            "Gaia Topo (feet): @ Gaia GPS, OpenStreetN",
+            "GAIAGPS",
+            "Web Mercator|EPSG:3857",
+            "© Mapbox © OpenStreetMap contributors",
+        ] {
+            assert!(credit_text(c), "{c}");
+        }
+        for n in ["Giant's Castle", "Esperance", "Mercury Bay", "Gaiaville"] {
+            assert!(!credit_text(n), "{n}");
+        }
     }
 }

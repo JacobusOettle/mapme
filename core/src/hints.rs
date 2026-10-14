@@ -14,9 +14,9 @@
 
 use crate::geo::{destination, latlon_to_merc, merc_to_latlon, LatLon};
 use crate::labels::{
-    classify_pois_reads, has_angle_mark, imprint_text, is_measure, legend_members, lexicon_word, longest_common_run,
-    median, mend_name, parse_coordinate, parse_height, parse_scale, reads_across, scale_bar_members, words_of,
-    CoordValue, OcrObservation, PoiKind, Vocabulary, LEGEND_WORDS, META_WORDS, NOTE_WORDS,
+    classify_pois_reads, credit_text, has_angle_mark, imprint_text, is_measure, legend_members, lexicon_word,
+    longest_common_run, median, mend_name, parse_coordinate, parse_height, parse_scale, reads_across,
+    scale_bar_members, words_of, CoordValue, OcrObservation, PoiKind, Vocabulary, LEGEND_WORDS, META_WORDS, NOTE_WORDS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -530,6 +530,7 @@ pub fn hint_queries(obs: &[OcrObservation]) -> Vec<String> {
             || text.contains('©')
             || text.to_lowercase().contains("(c)")
             || imprint_text(text)
+            || credit_text(text)
         {
             continue;
         }

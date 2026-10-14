@@ -242,7 +242,7 @@ fn gaia_drakensberg_far() {
 }
 
 #[test]
-#[ignore = "1:250 000 at 30 m/px is outside the default scale range 0.4-12 m/px, and the hypsometric tints put 54 % of the map in the brown colour models"]
+#[ignore = "1:250 000 at 30 m/px: the scale bar (25.7-34 m/px) and the coarse scale band reach it now, but the hypsometric tints put 43 % of the map in the brown colour models (the synthetic benchmark's copy is rejected at refinement with the truth as top candidate), and this fixture holds only zoom-11/13 tiles"]
 fn sparse_drakensberg_centre() {
     located_from_centre("sparse-drakensberg");
 }

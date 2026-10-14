@@ -9,7 +9,7 @@
 use crate::dem::{merc_to_tile, resolution, tile_bounds, tiles_covering, MercBox, TileId, TILE_SIZE};
 use crate::geo::{destination, haversine_m, latlon_to_merc, merc_to_latlon, LatLon, EARTH_RADIUS};
 use crate::hints::SearchHint;
-use crate::search::{map_half_extent, min_searchable_scale, nearest_in_box, required_dem_box, SearchParams};
+use crate::search::{map_half_extent, min_searchable_scale, nearest_in_box, required_dem_box_capped, SearchParams};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -51,6 +51,125 @@ pub fn near_zoom(lat: f64) -> u8 {
     zoom_at_latitude(NEAR_ZOOM, lat)
 }
 
+/// Scales (ground m/px) up to this are searched on the near zoom's tiles
+/// (zoom 11): every 300-dpi sheet from 1:5 000 to 1:140 000 and screen maps
+/// down to ~zoom 13. Coarser scales (small-scale maps, large-area exports:
+/// a Gaia GPS raster at 23 m/px, a 1:250 000 sheet at 21 m/px) are a band of
+/// their own on coarser tiles: on zoom 11 their templates would be searched
+/// on a 2–4× downsampled mosaic anyway, and the mosaic that holds such a
+/// map would be hundreds of zoom-11 tiles.
+pub const FINE_MAX_SCALE: f64 = 12.0;
+/// A coarse band's zoom keeps its smallest scale's template at least this
+/// many cells on its short side (`search::TARGET_SIDE`: the coarse search
+/// would downsample to about this anyway)…
+const BAND_TARGET_SIDE: f64 = 64.0;
+/// …and is at most this many zooms coarser than the near zoom.
+const BAND_MAX_ZOOM_STEPS: u8 = 3;
+/// A range of scales too fine for the near zoom is searched at most this
+/// many zooms finer (zoom 13: a box of ±15 km).
+const FINE_BAND_MAX_ZOOM_STEPS: u8 = 2;
+
+/// Largest ground extent (metres, the image's long side) a contour map is
+/// assumed to show without a scale prior: the default range stops at the
+/// scale that gives it (a 4 960 px A3 page: 30 m/px; a 1 118 px export:
+/// the default 50 m/px).
+pub const MAX_MAP_EXTENT_M: f64 = 150_000.0;
+
+/// The scale range (ground m/px) searched without a scale prior for an
+/// image of `img_w` × `img_h` px: `georef::DEFAULT_SCALE_RANGE`, up to the
+/// scale at which it would show `MAX_MAP_EXTENT_M` (never below
+/// `FINE_MAX_SCALE`).
+pub fn default_scale_range(img_w: usize, img_h: usize) -> (f64, f64) {
+    let (lo, hi) = crate::georef::DEFAULT_SCALE_RANGE;
+    let long = img_w.max(img_h).max(1) as f64;
+    (lo, hi.min((MAX_MAP_EXTENT_M / long).max(FINE_MAX_SCALE)))
+}
+
+/// A part of the scale range searched on DEM tiles of one zoom.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScaleBand {
+    pub zoom: u8,
+    /// Ground m/px.
+    pub lo: f64,
+    pub hi: f64,
+}
+
+impl ScaleBand {
+    /// Largest half-size (ground metres) of the coarse DEM box of an area
+    /// searched in this band: `search::MAX_BOX_HALF_M` on the near zoom, as
+    /// many cells on other zooms (240 km on zoom 9, 15 km on zoom 13).
+    pub fn max_box_half_m(&self, lat: f64) -> f64 {
+        let near = near_zoom(lat);
+        let coarser = near.saturating_sub(self.zoom).min(BAND_MAX_ZOOM_STEPS);
+        let finer = self.zoom.saturating_sub(near).min(FINE_BAND_MAX_ZOOM_STEPS);
+        crate::search::MAX_BOX_HALF_M * f64::from(1u32 << coarser) / f64::from(1u32 << finer)
+    }
+
+    /// The near zoom's band (scales up to `FINE_MAX_SCALE`)?
+    pub fn is_fine(&self) -> bool {
+        self.lo < FINE_MAX_SCALE
+    }
+}
+
+/// The scale range `lo`…`hi` (ground m/px) as bands searched in turn, finest
+/// first: up to `FINE_MAX_SCALE` on the near zoom (as always), beyond it on
+/// `band_zoom` of its smallest scale. A range from a scale label ±25 % lies
+/// in one band (two when it straddles `FINE_MAX_SCALE`).
+pub fn scale_bands(lo: f64, hi: f64, img_w: usize, img_h: usize, lat: f64) -> Vec<ScaleBand> {
+    let near = near_zoom(lat);
+    let mut out = Vec::new();
+    if !(lo.is_finite() && hi.is_finite() && lo > 0.0 && hi >= lo) {
+        return out;
+    }
+    if lo < FINE_MAX_SCALE {
+        // A range wholly too fine for the near zoom (no template of
+        // `MIN_SIDE` cells: a 1:5 000 plan at 300 dpi, 0.42 m/px) is searched
+        // on the finer zoom that reaches its largest scale, in a smaller box.
+        let fhi = hi.min(FINE_MAX_SCALE);
+        let mut zoom = near;
+        while zoom < near + FINE_BAND_MAX_ZOOM_STEPS && min_searchable_scale(img_w, img_h, resolution(zoom), lat) > fhi
+        {
+            zoom += 1;
+        }
+        out.push(ScaleBand { zoom, lo, hi: fhi });
+    }
+    if hi > FINE_MAX_SCALE {
+        let blo = lo.max(FINE_MAX_SCALE);
+        out.push(ScaleBand { zoom: band_zoom(blo, img_w, img_h, lat), lo: blo, hi });
+    }
+    out
+}
+
+/// The coarsest zoom, at most `BAND_MAX_ZOOM_STEPS` coarser than the near
+/// zoom, on which a map of `img_w` × `img_h` px at `scale` (ground m/px) has
+/// a template of `BAND_TARGET_SIDE` cells on its short side: zoom 9 for a
+/// 3 500 × 2 500 px page at 12 m/px, zoom 10 for a 1 118 × 791 px export.
+pub fn band_zoom(scale: f64, img_w: usize, img_h: usize, lat: f64) -> u8 {
+    let near = near_zoom(lat);
+    let cos = lat.to_radians().cos().abs().max(1e-6);
+    let cells = |z: u8| img_w.min(img_h) as f64 * scale / (resolution(z) * cos);
+    let floor = near.saturating_sub(BAND_MAX_ZOOM_STEPS).max(1);
+    let mut z = near;
+    while z > floor && cells(z - 1) >= BAND_TARGET_SIDE {
+        z -= 1;
+    }
+    z
+}
+
+/// Zoom of the local re-check of a candidate at `scale` (ground m/px): the
+/// near zoom up to `FINE_MAX_SCALE`, beyond it one zoom finer than the
+/// candidate's band (a template of 128–256 cells, like a 1:25 000 sheet's
+/// on zoom 11).
+pub fn recheck_zoom(scale: f64, img_w: usize, img_h: usize, lat: f64) -> u8 {
+    let near = near_zoom(lat);
+    if scale <= FINE_MAX_SCALE {
+        // The near zoom, or the finer one a plan too detailed for it needs.
+        scale_bands(scale, scale, img_w, img_h, lat).first().map_or(near, |b| b.zoom)
+    } else {
+        (band_zoom(scale, img_w, img_h, lat) + 1).min(near)
+    }
+}
+
 /// Coarse zoom of the wide search and the radius it covers, for a map of
 /// `img_w` × `img_h` px at up to `scale_hi` ground m/px around latitude
 /// `lat`: zoom 10 up to `WIDE_Z10_MAX_RADIUS_M`, zoom 9 beyond (both for
@@ -90,6 +209,10 @@ pub struct WideChunk {
     /// point of `placement`.
     pub min_dist_m: f64,
     pub max_dist_m: f64,
+    /// Zoom of `tiles`, and the scale band (index into the bands a merged
+    /// plan was made of, `merge_plans`; 0 in a plan of one band).
+    pub zoom: u8,
+    pub scale_band: usize,
 }
 
 /// A wide search's chunks, nearest first (those of a labels' band before
@@ -185,6 +308,59 @@ pub fn plan_wide(
     WidePlan { zoom, chunks, last_use, unique_tiles, band_chunks }
 }
 
+/// One plan of the chunks of several scale bands (each planned on its own
+/// zoom and with its own map extent by `plan_wide`), searched in one sweep
+/// nearest first: the labels' band's chunks of every scale band first, then
+/// the others by the distance of their nearest point, the finer scale band
+/// first at equal distance. Tiles are released after their last use in this
+/// order, so bands sharing a zoom never ask for a released tile again. The
+/// plan's `zoom` is the first band's.
+pub fn merge_plans(plans: Vec<WidePlan>) -> WidePlan {
+    let zoom = plans.first().map_or(NEAR_ZOOM, |p| p.zoom);
+    let mut first: Vec<WideChunk> = Vec::new();
+    let mut rest: Vec<WideChunk> = Vec::new();
+    for (b, plan) in plans.into_iter().enumerate() {
+        for (i, mut c) in plan.chunks.into_iter().enumerate() {
+            c.scale_band = b;
+            if i < plan.band_chunks {
+                first.push(c);
+            } else {
+                rest.push(c);
+            }
+        }
+    }
+    // Stable: equal distances keep the bands' order.
+    first.sort_by(|a, b| a.min_dist_m.total_cmp(&b.min_dist_m));
+    rest.sort_by(|a, b| a.min_dist_m.total_cmp(&b.min_dist_m));
+    let band_chunks = first.len();
+    let chunks: Vec<WideChunk> = first.into_iter().chain(rest).collect();
+    let mut last_use = HashMap::new();
+    for (i, c) in chunks.iter().enumerate() {
+        for t in &c.tiles {
+            last_use.insert(*t, i);
+        }
+    }
+    let unique_tiles = last_use.len();
+    WidePlan { zoom, chunks, last_use, unique_tiles, band_chunks }
+}
+
+/// Zoom of the wide search for a scale band: `wide_reach`'s for the near
+/// zoom's band; a coarser band (scales over `FINE_MAX_SCALE`) goes up to two
+/// zooms coarser while every scale of it keeps a template of `MIN_SIDE`
+/// cells (`min_searchable_scale`): zoom 7 for a 3 500 × 2 500 px page at
+/// 12–50 m/px, zoom 9 for a 1 118 × 791 px export.
+pub fn wide_band_reach(radius_m: f64, band: &ScaleBand, img_w: usize, img_h: usize, lat: f64) -> Option<(u8, f64)> {
+    let (zoom, reach) = wide_reach(radius_m, band.hi, img_w, img_h, lat)?;
+    if band.is_fine() {
+        return Some((zoom, reach));
+    }
+    let mut z = zoom;
+    while z > zoom.saturating_sub(2).max(1) && min_searchable_scale(img_w, img_h, resolution(z - 1), lat) <= band.lo {
+        z -= 1;
+    }
+    Some((z, reach))
+}
+
 /// The chunks of `plan_wide`, nearest first: placements clipped to `clip`,
 /// or leaving out `exclude`.
 #[allow(clippy::too_many_arguments)]
@@ -277,7 +453,16 @@ fn plan_chunks(
                 chunks.push((
                     min_d,
                     bearing,
-                    WideChunk { placement, exclude, mosaic, tiles, min_dist_m: min_d, max_dist_m: max_d },
+                    WideChunk {
+                        placement,
+                        exclude,
+                        mosaic,
+                        tiles,
+                        min_dist_m: min_d,
+                        max_dist_m: max_d,
+                        zoom,
+                        scale_band: 0,
+                    },
                 ));
             }
             if cx > x1.saturating_sub(sx) {
@@ -364,18 +549,28 @@ impl Estimate {
     }
 }
 
-/// Coarse tiles of a near-zoom area search around `c` (Mercator) of radius `r`.
-fn area_tiles(c: (f64, f64), r: f64, img: (usize, usize), scale: (f64, f64)) -> Vec<TileId> {
+/// Coarse tiles of an area search in one scale band around `c` (Mercator)
+/// of radius `r` (as `georef` plans it: the band's zoom and box cap).
+fn area_tiles(c: (f64, f64), r: f64, img: (usize, usize), band: &ScaleBand) -> Vec<TileId> {
     let p = SearchParams {
         center_merc: c,
         search_radius_m: r,
-        scale_min: scale.0,
-        scale_max: scale.1,
+        scale_min: band.lo,
+        scale_max: band.hi,
         rotations_deg: vec![0.0],
         top_k: 1,
         region: None,
     };
-    tiles_covering(near_zoom(merc_to_latlon(c.0, c.1).0), &required_dem_box(&p, img.0, img.1))
+    let lat = merc_to_latlon(c.0, c.1).0;
+    tiles_covering(band.zoom, &required_dem_box_capped(&p, img.0, img.1, band.max_box_half_m(lat)))
+}
+
+/// Scales of a band against the default fine band's (0.4–12 m/px), which the
+/// compute rate per mosaic cell was measured over: a band's search costs in
+/// proportion to its scales.
+fn band_work(band: &ScaleBand) -> f64 {
+    let n = |lo: f64, hi: f64| (hi / lo).ln().max(0.0);
+    (n(band.lo, band.hi) / n(TYPICAL_SCALE.0, FINE_MAX_SCALE)).clamp(0.05, 1.0)
 }
 
 /// Estimate a search of `radius_m` around `gps` (or of the hints alone)
@@ -408,46 +603,73 @@ pub fn estimate(
     .take(crate::georef::MAX_HINTS)
     .collect();
     let lat = gps.map(|g| g.lat).or(hints.first().map(|h| h.lat)).unwrap_or(0.0);
-    // Coarse tiles of the hint and near areas (zoom 11, coarser far north
-    // or south: `near_zoom`).
-    let mut coarse11: HashSet<TileId> = HashSet::new();
+    // The scale bands searched in turn (`scale_bands`): the near zoom's
+    // (zoom 11, coarser far north or south) and, without a scale label, the
+    // coarser tiles of small-scale maps.
+    let bands = scale_bands(scale.0, scale.1, img.0, img.1, lat);
+    let rate = |band: &ScaleBand| {
+        if scale_known {
+            SEARCH_S_PER_MCELL_SCALE_KNOWN
+        } else {
+            SEARCH_S_PER_MCELL * band_work(band)
+        }
+    };
+    let mcell = |n: usize| n as f64 * 65_536.0 / 1e6;
+    // Coarse tiles of the hint and near areas.
+    let mut coarse: HashSet<TileId> = HashSet::new();
     let mut areas = 0usize;
-    let mut mcells = 0.0;
+    let mut compute = 0.0;
     let mut rounds = 0usize;
     for h in &hints {
-        let t = area_tiles(latlon_to_merc(h.lat, h.lon), h.radius_m.clamp(1_000.0, near_m), img, scale);
-        mcells += t.len() as f64 * 65_536.0 / 1e6;
-        rounds += t.len().div_ceil(max_tiles.max(1)) + 1;
-        coarse11.extend(t);
-        areas += 1;
+        for band in &bands {
+            let t = area_tiles(latlon_to_merc(h.lat, h.lon), h.radius_m.clamp(1_000.0, near_m), img, band);
+            compute += mcell(t.len()) * rate(band);
+            rounds += t.len().div_ceil(max_tiles.max(1)) + 1;
+            coarse.extend(t);
+            areas += 1;
+        }
     }
     let mut coarse_zoom = near_zoom(lat);
-    let mut wide_tiles = 0usize;
+    let mut wide_tiles: Vec<TileId> = Vec::new();
     let mut chunks = 0usize;
     if let Some(g) = gps {
         let c = latlon_to_merc(g.lat, g.lon);
-        let t = area_tiles(c, radius_m.min(near_m), img, scale);
-        mcells += t.len() as f64 * 65_536.0 / 1e6;
-        rounds += t.len().div_ceil(max_tiles.max(1)) + 1;
-        coarse11.extend(t);
-        areas += 1;
-        // The inner disc is searched first (its tiles are among those).
-        let first = crate::georef::NEAR_FIRST_RADIUS_M;
-        if radius_m.min(near_m) > first {
-            mcells += area_tiles(c, first, img, scale).len() as f64 * 65_536.0 / 1e6;
-            rounds += 1;
+        for band in &bands {
+            let t = area_tiles(c, radius_m.min(near_m), img, band);
+            compute += mcell(t.len()) * rate(band);
+            rounds += t.len().div_ceil(max_tiles.max(1)) + 1;
+            coarse.extend(t);
             areas += 1;
+            // The near zoom's inner disc is searched first (its tiles are among those).
+            let first = crate::georef::NEAR_FIRST_RADIUS_M;
+            if band.is_fine() && radius_m.min(near_m) > first {
+                compute += mcell(area_tiles(c, first, img, band).len()) * rate(band);
+                rounds += 1;
+                areas += 1;
+            }
         }
-        let reach = if radius_m > near_m { wide_reach(radius_m, scale.1, img.0, img.1, g.lat) } else { None };
-        if let Some((zoom, reach_m)) = reach {
-            coarse_zoom = zoom;
-            let p = SearchParams { center_merc: c, scale_min: scale.0, scale_max: scale.1, ..SearchParams::default() };
-            let plan = plan_wide(c, reach_m, near_m, coarse_zoom, map_half_extent(&p, img.0, img.1), max_tiles, None);
-            wide_tiles = plan.unique_tiles;
+        // The wide search: every band's chunks in one sweep (`merge_plans`).
+        if radius_m > near_m {
+            let mut plans = Vec::new();
+            let mut work = Vec::new();
+            for band in &bands {
+                let Some((zoom, reach_m)) = wide_band_reach(radius_m, band, img.0, img.1, g.lat) else { continue };
+                let p =
+                    SearchParams { center_merc: c, scale_min: band.lo, scale_max: band.hi, ..SearchParams::default() };
+                plans.push(plan_wide(c, reach_m, near_m, zoom, map_half_extent(&p, img.0, img.1), max_tiles, None));
+                work.push(rate(band));
+            }
+            if let Some(first) = plans.first() {
+                coarse_zoom = first.zoom;
+            }
+            for (plan, r) in plans.iter().zip(&work) {
+                compute += mcell(plan.chunks.iter().map(|c| c.tiles.len()).sum::<usize>()) * r;
+            }
+            let plan = merge_plans(plans);
+            wide_tiles = plan.last_use.keys().copied().collect();
             chunks = plan.chunks.len();
-            mcells += plan.chunks.iter().map(|c| c.tiles.len()).sum::<usize>() as f64 * 65_536.0 / 1e6;
             // One round per chunk (re-checks ride along with the next chunk).
-            rounds += chunks + 1;
+            rounds += chunks + usize::from(chunks > 0);
         }
     }
     let refines = areas * REFINES_PER_AREA + usize::from(chunks > 0);
@@ -455,20 +677,19 @@ pub fn estimate(
     // first hint), counted as such (tile sizes are per zoom).
     let near_z = near_zoom(lat);
     let mut tiles: Vec<(u8, usize)> = Vec::new();
-    for (z, n) in [
-        (coarse_zoom, if chunks > 0 { wide_tiles } else { 0 }),
-        (near_z, coarse11.len() + chunks * RECHECK_TILES_PER_CHUNK),
-        (13, refines * REFINE_TILES),
-    ] {
-        match tiles.iter_mut().find(|t| t.0 == z) {
-            Some(t) => t.1 += n,
-            None => tiles.push((z, n)),
-        }
+    let mut add = |z: u8, n: usize| match tiles.iter_mut().find(|t| t.0 == z) {
+        Some(t) => t.1 += n,
+        None => tiles.push((z, n)),
+    };
+    for t in wide_tiles.iter().chain(&coarse) {
+        add(t.z, 1);
     }
+    add(near_z, chunks * RECHECK_TILES_PER_CHUNK);
+    add(13, refines * REFINE_TILES);
     tiles.retain(|t| t.1 > 0);
+    tiles.sort_by_key(|t| t.0);
     let bytes: f64 = tiles.iter().map(|&(z, n)| tile_bytes(z) * n as f64).sum();
-    let per_mcell = if scale_known { SEARCH_S_PER_MCELL_SCALE_KNOWN } else { SEARCH_S_PER_MCELL };
-    let compute_s = (mcells * per_mcell + refines as f64 * REFINE_S) * IPHONE_FACTOR;
+    let compute_s = (compute + refines as f64 * REFINE_S) * IPHONE_FACTOR;
     let download_s = bytes / DOWNLOAD_BYTES_PER_S + rounds as f64 * ROUND_LATENCY_S;
     Estimate { coarse_zoom, tiles, bytes, compute_s, download_s, rounds, chunks }
 }
@@ -529,7 +750,10 @@ pub fn search_estimate_json(json: &str) -> String {
             v.round().clamp(crate::georef::MAX_TILES_RANGE.0 as f64, crate::georef::MAX_TILES_RANGE.1 as f64) as usize
         });
     let known = req.scale_known.unwrap_or(false);
-    let e = estimate(radius, crate::georef::NEAR_RADIUS_M, gps, &hints, TYPICAL_IMAGE, TYPICAL_SCALE, known, max_tiles);
+    // A scale label narrows the search to a sheet's scale; without one the
+    // default range of the typical sheet is searched, small-scale bands too.
+    let scale = if known { TYPICAL_SCALE } else { default_scale_range(TYPICAL_IMAGE.0, TYPICAL_IMAGE.1) };
+    let e = estimate(radius, crate::georef::NEAR_RADIUS_M, gps, &hints, TYPICAL_IMAGE, scale, known, max_tiles);
     let mb = |b: f64| (b / 1e5).round() / 10.0;
     json!({
         "status": "ok",
@@ -554,6 +778,60 @@ mod tests {
 
     fn origin() -> (f64, f64) {
         latlon_to_merc(-29.86, 31.03)
+    }
+
+    #[test]
+    fn scale_bands_by_map_size() {
+        let lat = -29.3;
+        // A 300-dpi A3 page: the default range stops at 150 km across (30 m/px);
+        // up to 12 m/px on zoom 11 as always, beyond on zoom 8.
+        let (lo, hi) = default_scale_range(3507, 4960);
+        assert!((hi - 150_000.0 / 4960.0).abs() < 1e-9 && lo == 0.4, "{hi}");
+        let b = scale_bands(lo, hi, 3507, 4960, lat);
+        assert_eq!(b, vec![ScaleBand { zoom: 11, lo: 0.4, hi: 12.0 }, ScaleBand { zoom: 8, lo: 12.0, hi }]);
+        assert!(b[0].is_fine() && !b[1].is_fine());
+        // A Gaia export of 1 118 × 791 px: the whole default range, zoom 10 beyond 12 m/px.
+        let (lo, hi) = default_scale_range(1118, 791);
+        assert_eq!((lo, hi), crate::georef::DEFAULT_SCALE_RANGE);
+        assert_eq!(scale_bands(lo, hi, 1118, 791, lat)[1].zoom, 10);
+        // A scale label's range lies in one band; one straddling 12 m/px in two.
+        assert_eq!(scale_bands(1.43, 2.65, 3507, 4960, lat).len(), 1);
+        assert_eq!(scale_bands(15.0, 28.7, 1118, 791, lat), vec![ScaleBand { zoom: 10, lo: 15.0, hi: 28.7 }]);
+        assert_eq!(scale_bands(10.4, 26.5, 2400, 1800, lat).len(), 2);
+        // Coarse bands' boxes hold as many cells as zoom 11's; re-checks one zoom finer.
+        assert_eq!(ScaleBand { zoom: 9, lo: 12.0, hi: 50.0 }.max_box_half_m(lat), 240_000.0);
+        assert_eq!(recheck_zoom(1.9, 3507, 4960, lat), 11);
+        assert_eq!(recheck_zoom(23.0, 1118, 791, lat), 10);
+        assert!(scale_bands(f64::NAN, 2.0, 100, 100, lat).is_empty());
+        // A 1:5 000 plan at 300 dpi (0.42 m/px ±25 %) is too fine for zoom 11:
+        // zoom 12, in a box of ±30 km.
+        let plan = scale_bands(0.32, 0.53, 2480, 3508, lat);
+        assert_eq!(plan, vec![ScaleBand { zoom: 12, lo: 0.32, hi: 0.53 }]);
+        assert_eq!(plan[0].max_box_half_m(lat), 30_000.0);
+        assert_eq!(recheck_zoom(0.42, 2480, 3508, lat), 12);
+    }
+
+    #[test]
+    fn merged_plans_release_tiles_after_their_last_use() {
+        let o = origin();
+        let (olat, _) = merc_to_latlon(o.0, o.1);
+        let k = 1.0 / olat.to_radians().cos();
+        let fine = plan_wide(o, 300_000.0, 50_000.0, 9, (21_000.0 * k, 30_000.0 * k), 64, None);
+        let coarse = plan_wide(o, 300_000.0, 50_000.0, 9, (60_000.0 * k, 85_000.0 * k), 64, None);
+        let (nf, nc) = (fine.chunks.len(), coarse.chunks.len());
+        let m = merge_plans(vec![fine, coarse]);
+        assert_eq!(m.chunks.len(), nf + nc);
+        // Nearest first, both bands interleaved.
+        for w in m.chunks.windows(2) {
+            assert!(w[0].min_dist_m <= w[1].min_dist_m + 1e-6);
+        }
+        assert!(m.chunks.iter().any(|c| c.scale_band == 1) && m.chunks.iter().any(|c| c.scale_band == 0));
+        // Every tile's last use is the last chunk (of either band) that needs it.
+        for (t, &last) in &m.last_use {
+            assert!(m.chunks[last].tiles.contains(t));
+            assert!(m.chunks[last + 1..].iter().all(|c| !c.tiles.contains(t)));
+        }
+        assert_eq!(m.unique_tiles, m.last_use.len());
     }
 
     #[test]

@@ -53,15 +53,20 @@ use crate::hints::{
     DEFAULT_HINT_RADIUS_M, HINT_RADIUS_RANGE_M,
 };
 use crate::image::Rgb8;
-use crate::labels::{classify_pois, parse_coordinate, parse_scale, CoordValue, OcrObservation, PoiKind, PoiLabel};
+use crate::labels::{
+    classify_pois, height_unit, parse_coordinate, parse_scale, CoordValue, OcrObservation, PoiKind, PoiLabel, FOOT_M,
+};
 use crate::refine::{
     confidence, evaluate_prepared, evaluate_prepared_homography, fit_confidence, fit_evidence, fit_quality,
     refine_dem_box, refine_prepared_with, select_refined, PreparedDem, RefineOptions, RefineResult,
 };
-use crate::search::{coarse_search, map_field, required_dem_box, rotation_sweep, Candidate, MapField, SearchParams};
+use crate::scalebar::{find_scale_bar, ScaleBar};
+use crate::search::{
+    coarse_search, map_field, required_dem_box_capped, rotation_sweep, Candidate, MapField, SearchParams,
+};
 use crate::skeleton::{contour_samples, default_sampling, ContourSamples};
 use crate::warp::{fit_warp, ContourInput, GridLines, Warp, WarpFit, WarpInput};
-use crate::wide::near_zoom;
+use crate::wide::{default_scale_range, near_zoom, scale_bands, ScaleBand, FINE_MAX_SCALE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -85,6 +90,14 @@ pub const MAX_REFINE_CANDIDATES: usize = 3;
 /// Peak ratio from which the best coarse candidate is refined alone first
 /// (`refine::confidence` gives full search evidence from 1.6).
 const DISTINCT_PEAK_RATIO: f32 = 1.6;
+/// A scale bar's ground m/px (`scalebar`) is searched within this factor
+/// either way: its label is good to ~0.2 %, its measurement to a few pixels,
+/// and a PDF page drawn at another aspect ratio (Gaia: 1.6 %) or a photo's
+/// flattening skews it.
+const SCALE_BAR_TOLERANCE: f64 = 1.15;
+/// Candidates of a coarser scale band (`wide::scale_bands`) are refined only
+/// from this peak ratio (`refine::confidence` gives search evidence from 1.15).
+const COARSE_BAND_MIN_RATIO: f32 = 1.15;
 /// Search evidence credited to a labels-only fit that the contours agree with.
 const LABELS_PEAK_RATIO: f32 = 1.6;
 /// Fewer contour segments than this: the map has no usable contours.
@@ -95,8 +108,11 @@ pub const COARSE_ZOOM: u8 = crate::wide::NEAR_ZOOM;
 pub const FINE_ZOOM: u8 = 13;
 /// One refinement may need at most this many tiles; coarser zooms are used beyond.
 const MAX_FINE_TILES: u64 = 36;
-/// Scale range (ground m/px) searched without a scale prior.
-pub const DEFAULT_SCALE_RANGE: (f64, f64) = (0.4, 12.0);
+/// Scale range (ground m/px) searched without a scale prior: from 1:5 000
+/// plans at 300 dpi to large-area exports and 1:250 000 sheets, in bands
+/// (`wide::scale_bands`): up to `wide::FINE_MAX_SCALE` on zoom-11 tiles,
+/// beyond it on coarser ones.
+pub const DEFAULT_SCALE_RANGE: (f64, f64) = (0.4, 50.0);
 /// Search radius around the GPS fix without one in the request (ground metres).
 pub const DEFAULT_RADIUS_M: f64 = 50_000.0;
 /// Allowed search radius (ground metres).
@@ -551,6 +567,25 @@ struct SearchKey {
     tiles_present: usize,
 }
 
+/// Refinement starts this close (Mercator metres at every image corner, or
+/// two map pixels) converge to the same fit: the refinement scans ±450 m
+/// around either on its coarsest level.
+const REFINE_REUSE_M: f64 = 100.0;
+
+/// Whether refining from `b` would repeat the refinement from `a`.
+fn starts_agree(a: &Affine, b: &Affine, w: usize, h: usize) -> bool {
+    let tol = REFINE_REUSE_M.max(2.0 * b.mean_scale());
+    [(0.0, 0.0), (w as f64, 0.0), (w as f64, h as f64), (0.0, h as f64)].iter().all(|&(x, y)| {
+        let (p, q) = (a.apply(x, y), b.apply(x, y));
+        (p.0 - q.0).hypot(p.1 - q.1) <= tol
+    })
+}
+
+fn affine_from_bits(m: &[u64; 6]) -> Affine {
+    let [a, b, c, d, e, f] = m.map(f64::from_bits);
+    Affine { a, b, c, d, e, f }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct RefineKey {
     contour: ContourKey,
@@ -860,6 +895,8 @@ struct Run<'a> {
     /// The radius the wide search covers when the map is too small to be
     /// searched out to `radius_m` (`wide::wide_reach`; 50 km: no wide search).
     wide_limit: Option<f64>,
+    /// The map's scale bar, once looked for (`scale_bar`).
+    scale_bar: Option<Option<ScaleBar>>,
 }
 
 impl<'a> Run<'a> {
@@ -901,6 +938,7 @@ impl<'a> Run<'a> {
             areas: Vec::new(),
             band: None,
             wide_limit: None,
+            scale_bar: None,
         }
     }
 
@@ -989,8 +1027,29 @@ impl<'a> Run<'a> {
             }
             Some((lo, hi))
         };
+        let fits = |e: f64, (lo, hi): (f64, f64)| {
+            e >= lo - SPOT_HEIGHT_DEM_TOLERANCE_M && e <= hi + SPOT_HEIGHT_DEM_TOLERANCE_M
+        };
+        // Heights in feet on a map that does not say so ("6316" on a Gaia
+        // raster): read as metres they are off the terrain, as feet they fit.
+        if height_unit(&self.req.ocr).is_none() {
+            let spots: Vec<(f64, (f64, f64))> = pois
+                .iter()
+                .filter(|p| p.kind == PoiKind::SpotHeight)
+                .filter_map(|p| Some((p.elevation_m?, range(p.x, p.y)?)))
+                .collect();
+            let agree = |k: f64| spots.iter().filter(|(e, r)| fits(e * k, *r)).count();
+            let (metres, feet) = (agree(1.0), agree(FOOT_M));
+            if feet >= 2 && feet > 2 * metres {
+                for p in pois.iter_mut() {
+                    if let Some(e) = p.elevation_m.as_mut() {
+                        *e = (*e * FOOT_M * 10.0).round() / 10.0;
+                    }
+                }
+            }
+        }
         let off = |p: &PoiLabel| match (p.elevation_m, range(p.x, p.y)) {
-            (Some(e), Some((lo, hi))) => e < lo - SPOT_HEIGHT_DEM_TOLERANCE_M || e > hi + SPOT_HEIGHT_DEM_TOLERANCE_M,
+            (Some(e), Some(r)) => !fits(e, r),
             _ => false,
         };
         let before = pois.len();
@@ -1331,6 +1390,7 @@ impl<'a> Run<'a> {
                     "inlier_fraction": r.inlier_fraction,
                     "explained_variance": r.explained_variance,
                     "interval_snr": r.interval_snr,
+                    "gradient_alignment": round_dp(r.gradient_alignment, 3),
                     "contour_interval_m": r.contour_interval_m,
                     "dem_coverage": r.dem_coverage,
                     "n_segments": r.n_segments,
@@ -1460,43 +1520,96 @@ impl<'a> Run<'a> {
     }
 
     /// Ground scale range (m/px) to search at latitude `lat`: from an OCR'd
-    /// scale and the dpi, a labels-only fit, or the default range.
+    /// scale and the dpi, a scale bar, a labels-only fit, or the default range.
     fn scale_range(&mut self, lat: f64, init: Option<&GridResult>) -> (f64, f64) {
+        self.scale_range_source(lat, init).0
+    }
+
+    /// The map's scale bar (`scalebar::find_scale_bar`: a distance label
+    /// read and its bar measured), found once per call.
+    fn scale_bar(&mut self) -> Option<ScaleBar> {
+        if self.scale_bar.is_none() {
+            let found = if self.req.ocr.is_empty() { None } else { find_scale_bar(&self.s.image, &self.req.ocr) };
+            if let Some(b) = &found {
+                self.diag.insert("scale_bar".into(), serde_json::to_value(b).unwrap_or(Value::Null));
+            }
+            self.scale_bar = Some(found);
+        }
+        self.scale_bar.clone().flatten()
+    }
+
+    /// `scale_range` with its source: "scale_label", "scale_bar", "labels" or
+    /// "default".
+    fn scale_range_source(&mut self, lat: f64, init: Option<&GridResult>) -> ((f64, f64), &'static str) {
         let (w, h) = self.size();
         let cos_lat = lat.to_radians().cos();
+        let default = default_scale_range(w, h);
         // Maps drawn in Web Mercator print at the nominal scale in Mercator
         // metres, so the ground scale can be up to cos(lat) smaller.
         let (lo, hi, source) = if let Some((denom, prior)) = self.scale_prior() {
             self.diag.insert("scale_denominator".into(), json!(denom));
             (0.75 * prior * cos_lat, 1.25 * prior, "scale_label")
+        } else if let Some(b) = self.scale_bar() {
+            // A bar is drawn for the ground at the map's latitude.
+            (b.m_per_px / SCALE_BAR_TOLERANCE, b.m_per_px * SCALE_BAR_TOLERANCE, "scale_bar")
         } else if let Some(g) = init {
             let (s, _) = scale_and_rotation(&g.transform, w as f64 / 2.0, h as f64 / 2.0);
             if s.is_finite() && s > 0.0 {
                 (s / 1.25, s * 1.25, "labels")
             } else {
-                (DEFAULT_SCALE_RANGE.0, DEFAULT_SCALE_RANGE.1, "default")
+                (default.0, default.1, "default")
             }
         } else {
-            (DEFAULT_SCALE_RANGE.0, DEFAULT_SCALE_RANGE.1, "default")
+            (default.0, default.1, "default")
         };
         let (lo, hi) = (lo.clamp(PLAUSIBLE_SCALE.0, PLAUSIBLE_SCALE.1), hi.clamp(PLAUSIBLE_SCALE.0, PLAUSIBLE_SCALE.1));
         self.diag
             .insert("scale_range".into(), json!({"min": round_dp(lo, 3), "max": round_dp(hi, 3), "source": source}));
-        (lo, hi)
+        ((lo, hi), source)
     }
 
-    /// Coarse search parameters for the area of `radius_m` around `centre`.
-    fn search_params(&mut self, centre: LatLon, radius_m: f64, init: Option<&GridResult>) -> SearchParams {
-        let (lo, hi) = self.scale_range(centre.lat, init);
+    /// The scale range at latitude `lat` as bands searched in turn, finest
+    /// first (`wide::scale_bands`): the wide search's.
+    fn bands(&mut self, lat: f64, init: Option<&GridResult>) -> Vec<ScaleBand> {
+        let (w, h) = self.size();
+        let (lo, hi) = self.scale_range(lat, init);
+        scale_bands(lo, hi, w, h, lat)
+    }
+
+    /// The bands of a hint or near area: `bands`, and after a scale bar's
+    /// range (a prior, not a constraint: a bar misread or mismeasured must
+    /// not hide the map) the default range's.
+    fn area_bands(&mut self, lat: f64, init: Option<&GridResult>) -> Vec<ScaleBand> {
+        let (w, h) = self.size();
+        let ((lo, hi), source) = self.scale_range_source(lat, init);
+        let mut bands = scale_bands(lo, hi, w, h, lat);
+        if source == "scale_bar" {
+            let (dlo, dhi) = default_scale_range(w, h);
+            bands.extend(scale_bands(dlo, dhi, w, h, lat));
+        }
+        bands
+    }
+
+    /// Coarse search parameters for the area of `radius_m` around `centre`
+    /// in one scale band.
+    fn search_params(&self, centre: LatLon, radius_m: f64, band: &ScaleBand) -> SearchParams {
         SearchParams {
             center_merc: latlon_to_merc(centre.lat, centre.lon),
             search_radius_m: radius_m,
-            scale_min: lo,
-            scale_max: hi,
+            scale_min: band.lo,
+            scale_max: band.hi,
             rotations_deg: if self.req.allow_rotation { rotation_sweep(10.0) } else { vec![0.0] },
             top_k: MAX_REFINE_CANDIDATES,
             region: None,
         }
+    }
+
+    /// The coarse DEM box and its tiles for an area search in `band`.
+    fn area_box(&self, params: &SearchParams, band: &ScaleBand) -> (MercBox, Vec<TileId>) {
+        let (w, h) = self.size();
+        let (lat, _) = merc_to_latlon(params.center_merc.0, params.center_merc.1);
+        let b = required_dem_box_capped(params, w, h, band.max_box_half_m(lat));
+        (b, tiles_covering(band.zoom, &b))
     }
 
     fn search(
@@ -1560,6 +1673,25 @@ impl<'a> Run<'a> {
         };
         if let Some(r) = lock(&self.s.refinements).get(&rkey).cloned() {
             return Some((r, zoom));
+        }
+        // The same peak found again (by the whole near disc after its inner
+        // disc, or by the default scale range after a scale bar's): its
+        // start next to one refined before converges to the same fit.
+        if !evaluate_only {
+            let (w, h) = self.size();
+            let again = lock(&self.s.refinements)
+                .iter()
+                .find(|(k, _)| {
+                    k.contour == key
+                        && k.zoom == zoom
+                        && k.dem_valid == rkey.dem_valid
+                        && !k.evaluate_only
+                        && starts_agree(&affine_from_bits(&k.transform), t, w, h)
+                })
+                .map(|(_, r)| r.clone());
+            if let Some(r) = again {
+                return Some((r, zoom));
+            }
         }
         let prep = PreparedDem::new_cropped(&dem, &plan.bbox);
         self.time("fine_dem", tm);
@@ -1674,20 +1806,26 @@ impl<'a> Run<'a> {
             }
         };
 
-        // 3. Hint areas, at the near resolution.
+        // 3. Hint areas, at the near resolution: each scale band in turn
+        //    (the near zoom's first, then coarser tiles for small-scale maps).
         for i in 0..self.hints.len() {
             let hint = self.hints[i].clone();
-            self.set_progress(SearchStage::Hints, near_zoom(hint.lat), 0.0);
-            let area = Area::Hint(&hint);
             let r = hint.radius_m.clamp(HINT_RADIUS_RANGE_M.0, HINT_RADIUS_RANGE_M.1);
-            let outcome = self.area_search(area, hint.latlon(), r, init, labelled.as_ref())?;
-            self.hints_tried = i + 1;
-            match outcome {
-                AreaResult::Located(resp, conf) if conf >= CONFIDENT => return Ok(Found::Located(resp)),
-                AreaResult::Located(resp, conf) => keep(&mut fallback, conf, resp),
-                AreaResult::NoContours => return Ok(Found::NotFound(no_contours.into())),
-                AreaResult::NotFound => {}
+            for band in self.area_bands(hint.lat, init) {
+                self.set_progress(SearchStage::Hints, band.zoom, 0.0);
+                let area = Area::Hint(&hint);
+                let outcome = self.area_search(area, hint.latlon(), r, labelled.as_ref(), &band)?;
+                match outcome {
+                    AreaResult::Located(resp, conf) if conf >= CONFIDENT => {
+                        self.hints_tried = i + 1;
+                        return Ok(Found::Located(resp));
+                    }
+                    AreaResult::Located(resp, conf) => keep(&mut fallback, conf, resp),
+                    AreaResult::NoContours => return Ok(Found::NotFound(no_contours.into())),
+                    AreaResult::NotFound => {}
+                }
             }
+            self.hints_tried = i + 1;
         }
 
         // 4. The near disc around the fix (the whole search up to 50 km).
@@ -1700,10 +1838,20 @@ impl<'a> Run<'a> {
             // axis put the map elsewhere (their band): one misread label
             // must not hide a map lying next to the user. The inner disc
             // first (where the map usually is: as fast as a 20 km search),
-            // then the whole near disc.
-            let steps: Vec<f64> = if near > NEAR_FIRST_RADIUS_M { vec![NEAR_FIRST_RADIUS_M, near] } else { vec![near] };
-            for r in steps {
-                match self.area_search(Area::Near, gps, r, init, labelled.as_ref())? {
+            // then the whole near disc; then the coarser scale bands over
+            // the whole near disc at once (on coarse tiles: cheap). After a
+            // scale bar's band, the default range (the fallback for a
+            // misread bar) searches the whole disc at once.
+            let mut steps: Vec<(f64, ScaleBand)> = Vec::new();
+            for (i, band) in self.area_bands(gps.lat, init).into_iter().enumerate() {
+                if i == 0 && band.is_fine() && near > NEAR_FIRST_RADIUS_M {
+                    steps.push((NEAR_FIRST_RADIUS_M, band));
+                }
+                steps.push((near, band));
+            }
+            for (r, band) in steps {
+                self.set_progress(SearchStage::Near, band.zoom, 0.0);
+                match self.area_search(Area::Near, gps, r, labelled.as_ref(), &band)? {
                     AreaResult::Located(resp, conf) => keep(&mut fallback, conf, resp),
                     AreaResult::NoContours => return Ok(Found::NotFound(no_contours.into())),
                     AreaResult::NotFound => {}
@@ -1711,7 +1859,9 @@ impl<'a> Run<'a> {
                 if fallback.as_ref().is_some_and(|f| f.0 >= CONFIDENT) {
                     break;
                 }
-                self.set_progress(SearchStage::Near, nz, r);
+                if r < near {
+                    self.set_progress(SearchStage::Near, band.zoom, r);
+                }
             }
             self.set_progress(SearchStage::Near, nz, near);
             if let Some((conf, _)) = &fallback {
@@ -1722,8 +1872,8 @@ impl<'a> Run<'a> {
             // 5. The wide area, chunk by chunk, nearest first.
             if wide {
                 let prod = self.products(self.contour_key())?;
-                let (lo, hi) = self.scale_range(gps.lat, init);
-                if let Some(r) = self.wide_search(&prod, gps, (lo, hi))? {
+                let bands = self.bands(gps.lat, init);
+                if let Some(r) = self.wide_search(&prod, gps, &bands)? {
                     return Ok(Found::Located(r));
                 }
             }
@@ -1751,7 +1901,11 @@ impl<'a> Run<'a> {
                 })
                 .or(self.gps.map(|g| g.lat))
                 .unwrap_or(0.0);
-            let scale = self.scale_range(lat, None);
+            // Coordinate labels are printed on sheets: without a printed
+            // scale the label hint assumes the near zoom's band (a disc
+            // around the offset at 50 m/px would reach far past 50 km).
+            let (scale, source) = self.scale_range_source(lat, None);
+            let scale = if source == "default" { (scale.0, scale.1.min(FINE_MAX_SCALE)) } else { scale };
             let labels = label_hints(&self.req.ocr, w, h, scale);
             if !labels.is_empty() {
                 self.diag.insert("label_hints".into(), serde_json::to_value(&labels).unwrap_or(Value::Null));
@@ -1790,13 +1944,15 @@ impl<'a> Run<'a> {
             .chain(self.gps.map(|g| (g, self.radius_m.min(NEAR_RADIUS_M))))
             .collect();
         for (c, r) in areas {
-            let p = self.search_params(c, r, init);
-            planned.extend(tiles_covering(near_zoom(c.lat), &required_dem_box(&p, w, h)));
+            for band in self.area_bands(c.lat, init) {
+                let p = self.search_params(c, r, &band);
+                planned.extend(self.area_box(&p, &band).1);
+            }
         }
         self.pinned = planned;
         if let Some(g) = self.gps.filter(|_| self.radius_m > NEAR_RADIUS_M) {
-            let scale = self.scale_range(g.lat, init);
-            self.plan_wide_progress(g, scale);
+            let bands = self.bands(g.lat, init);
+            self.plan_wide_progress(g, &bands);
         }
         let first_lat = self.hints.first().map(|h| h.lat).or(self.gps.map(|g| g.lat)).unwrap_or(0.0);
         self.progress_info = Some(SearchProgress {
@@ -1867,8 +2023,8 @@ impl<'a> Run<'a> {
         area: Area,
         centre: LatLon,
         radius_m: f64,
-        init: Option<&GridResult>,
         labelled: Option<&Refined>,
+        band: &ScaleBand,
     ) -> Step<AreaResult> {
         let (w, h) = self.size();
         let key = self.contour_key();
@@ -1876,10 +2032,9 @@ impl<'a> Run<'a> {
             Area::Hint(_) => "hint",
             Area::Near => "coarse",
         };
-        let params = self.search_params(centre, radius_m, init);
-        let coarse_box = required_dem_box(&params, w, h);
-        let zoom = near_zoom(centre.lat);
-        let coarse_tiles = tiles_covering(zoom, &coarse_box);
+        let params = self.search_params(centre, radius_m, band);
+        let (coarse_box, coarse_tiles) = self.area_box(&params, band);
+        let zoom = band.zoom;
         self.need(&coarse_tiles, stage, key)?;
         let present: Vec<TileId> = {
             let store = lock(&self.s.dem);
@@ -1893,6 +2048,7 @@ impl<'a> Run<'a> {
             "radius_km": round_dp(radius_m / 1000.0, 1),
             "tiles": coarse_tiles.len(),
             "tiles_present": present.len(),
+            "band": {"zoom": band.zoom, "min": round_dp(band.lo, 3), "max": round_dp(band.hi, 3)},
         });
         if let Area::Hint(hint) = area {
             record["source"] = json!(hint.source);
@@ -1924,11 +2080,19 @@ impl<'a> Run<'a> {
                 })
             })
             .collect();
+        record["candidate_list"] = Value::Array(cdiag.clone());
         self.diag.insert("candidates".into(), Value::Array(cdiag));
         record["candidates"] = json!(cands.len());
 
         // Refinement: the best candidate alone when it stands out, else the top few.
-        let n = cands.len().min(MAX_REFINE_CANDIDATES);
+        // A coarser band's candidates must stand out a little (small-scale maps
+        // found there peak at 3–8 its runner-up): refining three wrong ones costs
+        // ~2 s in every search the map is not in.
+        let n = if band.is_fine() {
+            cands.len().min(MAX_REFINE_CANDIDATES)
+        } else {
+            cands.iter().take(MAX_REFINE_CANDIDATES).take_while(|c| c.peak_ratio >= COARSE_BAND_MIN_RATIO).count()
+        };
         if n == 0 && labelled.is_none() {
             record["outcome"] = json!("no candidates");
             self.areas.push(record);
@@ -1978,6 +2142,24 @@ impl<'a> Run<'a> {
             }
         }
         let fits: Vec<f64> = pairs.iter().map(|(_, r)| round_dp(fit_confidence(r), 3)).collect();
+        record["refined_list"] = pairs
+            .iter()
+            .map(|(_, r)| {
+                json!({
+                    "fit": round_dp(fit_confidence(r), 3),
+                    "seg_std_m": round_dp(r.median_seg_std_m, 2),
+                    "interval_m": round_dp(r.contour_interval_m, 1),
+                    "snr": round_dp(r.interval_snr, 2),
+                    "explained": round_dp(r.explained_variance, 4),
+                    "relief_m": round_dp(r.relief_m, 0),
+                    "segments": r.n_segments,
+                    "coverage": round_dp(r.dem_coverage, 2),
+                    "m_per_px": round_dp(r.px_ground_m, 3),
+                    "alignment": round_dp(r.gradient_alignment, 3),
+                    "affine": r.affine,
+                })
+            })
+            .collect();
         let sel = json!({"candidate": best, "refined": results.len(), "fit_confidences": fits,
                          "confidence": round_dp(conf, 3), "recheck": recheck});
         record["selected"] = sel.clone();
@@ -2095,6 +2277,7 @@ impl<'a> Run<'a> {
                 "inlier_fraction": r.inlier_fraction,
                 "explained_variance": r.explained_variance,
                 "interval_snr": r.interval_snr,
+                "gradient_alignment": round_dp(r.gradient_alignment, 3),
                 "contour_interval_m": r.contour_interval_m,
                 "relief_m": r.relief_m,
                 "dem_coverage": r.dem_coverage,
