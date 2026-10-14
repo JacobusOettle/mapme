@@ -843,7 +843,12 @@ exact lists, checked against the images.
    labels), −400…8 850 m; on a map in feet (`labels::height_unit`, see *Any
    map*) three to five digits, up to 29 100 ft, converted to metres at the
    end (the printed text stays the name); also with the triangle read beside it ("1501 A",
-   "▲ 1720"; an "A" in front is a road's: "A 470"). A height with fewer digits than nearly all others and under
+   "▲ 1720"; an "A" in front is a road's: "A 470"), with the summit's mark read
+   in front or a stroke behind ("$10807", "=10876", "'10348", "10305L"; a minus
+   only where no land lies that low: "-10876" ft, not "-348" m), or with one
+   digit read as the letter it looks like, not in front ("108Q7" → 10807: O,
+   Q, D for 0, I, l for 1); the box is then that of the digits, to centre the
+   height under its name. A height with fewer digits than nearly all others and under
    half their median is a misread ("112" for a "1412" a grid line cuts); so is
    a three-digit one well under a sheet of four-digit heights in one thousand
    when the thousand added falls among them ("478" for 1478), unless other
@@ -854,7 +859,8 @@ exact lists, checked against the images.
    the nearest spot height within six text heights.
 4. *Names*. A trailing height becomes the elevation ("Sugarbush Hill 1523m"),
    a trailing route distance goes ("STILE 1.7Km", "2,3 km"), symbols at the
-   ends go. Not a name: under three letters or 60 % letters, letters and
+   ends go. "Main" and a feature that is no line is a name, not legend text
+   ("Main Cave", "Main Camp"; "Main road" is). Not a name: under three letters or 60 % letters, letters and
    digits run together in most words ("GISV1$eet20x"), three letters or fewer
    with no vowel or with vowels only (Y aside: "EYE" is a name), or read up or
    down the map ("ERN", a piece of a turned label; four letters are a name as
@@ -888,20 +894,34 @@ exact lists, checked against the images.
    * A name the OCR was unsure of (confidence under 0.5; Vision gives 0.3 to
      its guesses) stays only when all its words are known ("PHANL GULLI"
      goes).
-6. *Pieces and misreads* (`drop_fragments`). A name is a piece of a read next
+6. *Out of place* (`drop_out_of_place`): names that do not fit the map's
+   lettering. A read with a letter no map holds but by the dozen (the dotless
+   ı of Turkish, the stacked accents of Vietnamese) where few reads hold one
+   (under 15 % of ten or more): "nDệ Dickı", "guide pickı", Vision's reads of
+   the small italic "(guide pickup)" on Gaia map A. On a map whose names start
+   with a capital, a name whose first word is in lower case, with no capital
+   ("uKhahlamba") and no particle before a capitalised word ("de Hoop", "van
+   Reenen's Pass"): pieces of italic lettering ("ance", "ince" of "entrance",
+   "picku", "lain Cave" of "Main Cave" half under the north arrow). On a map in
+   mixed case, three capitals or fewer: amenity icons read as letters ("LAA").
+7. *Pieces and misreads* (`drop_fragments`). A name is a piece of a read next
    to it when that read holds its text (exactly, or within one edit from five
-   characters) or their boxes all but coincide and they share most of their
-   text; the longer read stays ("KUDUKONA" over "UDU", "1283" over "283"),
-   and a piece of legend text goes with it. Two reads of one label (boxes
-   that all but coincide, lengths within one letter, neither a piece of the
-   other, at most a quarter of the letters apart: "MIDDLE RIDGE KLOOF" /
-   "MIODLE RIDGEKIOOF", "HAMERKOP KLOOF" / "UAMERKOD KI OOF") keep the
-   better read: the clearly more confident one (by 0.25), else the one with
-   more letters in known words ("KEEP RIGHT" over "KEED RIGHT", "LONG POOL"
-   over "KONG POOL"), more words, more confident, longer. An unreadable read
-   ("21728") absorbs nothing; names numbered apart are two places ("RAND
-   WATER BOX 1" one line over "RAND WATER BOX 2").
-7. *Garbled turned labels* (`drop_garbled_turned`). Labels printed up, down
+   characters when the boxes overlap: the next line of a wrapped label is
+   another word, "Ts'oana" under "Ntloana-") or their boxes all but coincide
+   and they share most of their text; the longer read stays ("KUDUKONA" over
+   "UDU", "1283" over "283"), and a piece of legend text goes with it. Two
+   reads of one label (boxes that all but coincide, lengths within one
+   letter, neither a piece of the other, at most a quarter of the letters
+   apart: "MIDDLE RIDGE KLOOF" / "MIODLE RIDGEKIOOF", "HAMERKOP KLOOF" /
+   "UAMERKOD KI OOF") keep the better read: the clearly more confident one (by
+   0.25), else the one with more letters in known words ("KEEP RIGHT" over
+   "KEED RIGHT", "LONG POOL" over "KONG POOL"), read alike by more reads
+   ("10348" read twice over "10548"), in more words, the likelier printed of
+   two spellings a confusion apart (see 10: "Oribi" over "Oribl", "Ntloana"
+   over "Ntloano"), more confident, longer. An unreadable read ("21728")
+   absorbs nothing; names numbered apart are two places ("RAND WATER BOX 1"
+   one line over "RAND WATER BOX 2").
+8. *Garbled turned labels* (`drop_garbled_turned`). Labels printed up, down
    or slanting along a stream are read worst: such a read with no known word
    whose box (widened by a quarter of the text height) meets another such
    read with no known word, that it shares no three characters with and that
@@ -912,7 +932,7 @@ exact lists, checked against the images.
    apart from its feature word ("HLOBANE" of HLOBANE KLOOF) and two names
    printed side by side along a border, whose boxes overlap
    ("KWAZULU-NATAL", "LESOTHO").
-8. *Wrapped labels* (`join_stacked`). Screen maps wrap names over lines,
+9. *Wrapped labels* (`join_stacked`). Screen maps wrap names over lines,
    centred ("Giant's" / "Castle", "Thaba-" / "Putsoa", "Bannerman" / "Hut"
    on Gaia GPS): lines across the map of about the same letter height (within
    0.7×), centred on each other within 0.6 letter heights, the lower one
@@ -924,16 +944,59 @@ exact lists, checked against the images.
    elevation and makes it a peak. Words a read ran together are split at a
    capital when one is a feature word ("MountDurnford" → "Mount Durnford";
    not "KaMasihlenga", "uKhahlamba").
+10. *Italic misreads* (`mend_feature_words`, `unify_spellings`). Gaia Topo
+   letters its names in an italic sans whose one-storey "a" Vision reads as
+   "o", its "l" as "i" or "f", its "rn" as "m". `labels::CONFUSIONS` lists
+   such confusions as (read, printed, cost), by direction: 1 for a common one
+   ("o" for "a", "m" for "rn", "l" for "i"), 1.25 for a plausible one ("i" for
+   "l"), 2 for a rare one ("a" for "o"); never a free edit distance ("Boss" is
+   no misread of "Pass"). In a name of two words or more, a word of four
+   letters or more that is no lexicon word and one confusion (≤ 1.25) from
+   exactly one feature word (`MENDABLE_FEATURES`: pass, castle, cave, peak,
+   mount, bush, ridge, kloof, river, falls, lake, valley, gorge, hill, point,
+   camp, …) becomes it: "Langalibalele Poss", "Giant's POss", "Giant's
+   Costle", "Castie", "Castfe" → "… Pass", "… Castle"; "Poss" alone, "Cove"
+   (a lexicon word), "Red Paint", "Gregory Peck", "Howgill Fells", "Castell y
+   Bere" stay. A feature noun with a "y" behind a proper name lost the "y" to
+   a mark beside it ("Grysbok Bushy" → "Grysbok Bush"; "BIG ROCKY", "Rocky
+   Point" stay). Two spellings a confusion apart of one word in two names
+   ("Dumford", "Durnford") become the likelier printed one. The confusions
+   seen mending and dropping misreads tell which glyphs Vision misreads on
+   this map; one misread more than once (the italic "a" of "Poss" twice and
+   "Costle") makes a name with that glyph in a word outside the lexicon
+   *doubtful* (`PoiRead::doubtful`: "Mount Dumford", "Songebethu",
+   "KaMasihlengo Pass" on map B): it may be spelled wrong, and
+   `hint_queries` asks it after the sure names of its group. Proper names
+   are never mended: there is no gazetteer to mend them by.
 
 On the RapidOCR stand-ins of the Gaia pages the POIs are "Mount Durnford"
 (peak, 3 294 m, printed 10807), "Langalibalele Pass", "Grysbok Bush",
-"Bannerman Hut", "Ntubeni Pass", "Giant's Castie" (a misread; peak, 3 315 m)
-…, the heights in feet as metres; the hint queries start "Mount Durnford",
-"Grysbok Bush", "Langalibalele Pass" (map A) and "Bannerman Hut",
-"Bannerman's Pass", "KaMasihlenga Pass", "Grysbok Bush", "Ntubeni Pass",
-"Langalibalele Pass" (map B); before, "Gaia GPS", "Gaia Topo Gaia GPS",
-"OpenStreetMap" and "Web Mercator" led both, "Web Mercator|EPSG:3857" was a
-place and the heights (10807 → 10 807 m) were dropped or kept in feet.
+"Bannerman Hut", "Ntubeni Pass", "Giant's Castle" (read "Giant's Castie",
+mended; peak, 3 315 m) …, the heights in feet as metres; the hint queries
+start "Mount Durnford", "Langalibalele Pass", "Grysbok Bush" (map A) and
+"Mount Durnford", "Giant's Castle", "Ntubeni Pass", "KaMasihlenga Pass" (map
+B); before, "Gaia GPS", "Gaia Topo Gaia GPS", "OpenStreetMap" and "Web
+Mercator" led both, "Web Mercator|EPSG:3857" was a place and the heights
+(10807 → 10 807 m) were dropped or kept in feet.
+
+Apple Vision's own reads of the Gaia pages (`fixtures/gaia-*/vision-ocr.json`,
+the app's OCRService on the page as MapImporter renders it, iOS 26.2
+simulator; `tests/names.rs` pins them): map B (Giant's Castle) gives "Giant's
+Castle" (peak, 3 315 m, its height read "=10876" and "-10876"),
+"Langalibalele Pass", "Giant's Pass", "Bannerman's Pass", "Bannerman Hut",
+"Ntubeni Pass", "Mount Dumford" (3 294 m, "108Q7"), "Ntloana-Ts'oana"
+(3 262 m), "Thaba-Putsoa", "Legheku", "Songebethu", "KaMasihlengo Pass",
+"Grysbok Bush", "Oribi Ridge Rte"; map A (Langalibalele) "Langalibalele
+Pass", "Mount Durnford" (3 294 m, "$10807"), "Main Cave", "Grysbok Bush",
+"Kambule" (3 154 m: "10348" read twice over "10548"), "Potterill" (3 141 m,
+"10305L"), "Erskine", "Bond", "Katana", "Lango-le-Balele", "Umtshezi". Before,
+map B read "Bannerman's Poss", "Langalibalele Poss", "Giant's POss", "Giant's
+Costle" (no height), "Ntloano" (its second line taken for a misread of it)
+and "LAA"; map A "Grysbok Bushy", "nDệ Dickı", "guide pickı", "ance", lost
+"Main Cave" as legend text and gave Mount Durnford, Potterill and Kambule no
+or the wrong height. Still misread, with no second read to tell: "Songebethu"
+(Sangebethu), "Mount Dumford" (map A reads it right), "KaMasihlengo Pass"
+(KaMasihlenga), "Lango-le-Balele" (Langa-le-Balele), "Legheku" (Leqheku).
 
 On Vision's reads this leaves 54 POIs on Grootkloof (56 before), 53 on Castle
 Gorge (57) and the same 33 on Mhlabatini; on the RapidOCR stand-ins no name
@@ -945,7 +1008,9 @@ MIDDLE RIDGE (taken for a piece of MIDDLE RIDGE KLOOF), CAVE (a legend word),
 and turned labels lettered nearly title size (CAVE KLOOF, FERN KLOOF).
 
 `hints::hint_queries` picks the names worth geocoding for a wide search
-(`hints`), best first, at most 12; the app looks up the first 8:
+(`hints`), best first, at most 12; the app looks up the first 8 for hints, and
+the "Search wider" sheet the first 4 to say how far away they are and pick a
+radius, so the first four decide whether a far map is found:
 
 1. *Titles*: lettering at least 1.6× the median font size across the map, and
    furniture lines ("MCSA MAGALIESBERG SHEET 7 OF 10" → "MAGALIESBERG"; their
@@ -958,14 +1023,22 @@ and turned labels lettered nearly title size (CAVE KLOOF, FERN KLOOF).
    beside "GROOTKLOOF"; "KLEIN WINTERHOEK" beside "GROOT WINTERHOEK" and
    "DRAKENSBERG SOUTH" beside "DRAKENSBERG NORTH" are other places).
 2. *Names*: the place, peak and water names of `classify_pois` (so none of
-   its pieces, misreads or furniture), names of several words before single
-   words, then by font size and confidence (turned labels count 0.6×). Route
+   its pieces, misreads or furniture), in groups: names of several words with
+   a feature word a gazetteer files places by (`FEATURE_WORDS`: pass, peak,
+   mount, hut, cave, lodge, hotel, school, falls, kloof, gorge, gully, …) or
+   of a summit with its height ("Giant's Castle" over "10876"); other names
+   of several words; single words; routes ("Oribi Ridge Rte": rte, route,
+   trail, track, path); lexicon words with a qualifier, a place name as often
+   as a description ("LITTLE ROCK", "GREAT FALLS", "NEW FOREST", "GROOT
+   RIVIER"; "LONG POOL"), last. In each group the names that may be
+   misspelled (`doubtful`, item 10 above) come after the others, then
+   summits first, then by letter size (a line across the map: its box's
+   height, unless its letters are narrower than 0.4 of it; a wrapped label:
+   the mean of its lines') and confidence; turned labels count 0.6×. Route
    notes ("KEEP LEFT", "TURN RIGHT AT SIGN"), names of lexicon words only
-   ("KRAAL", "FARM GATE": they find no place), credits, coordinates and
-   heights are left out; lexicon words with a qualifier are a place name as
-   often as a description ("LITTLE ROCK", "GREAT FALLS", "NEW FOREST", "GROOT
-   RIVIER"; "LONG POOL") and come last. An article in front stays ("DE AAR",
-   "LA PAZ"); connectives at the ends go.
+   ("KRAAL", "FARM GATE": they find no place; "Main Cave" is a name),
+   credits, coordinates and heights are left out. An article in front stays
+   ("DE AAR", "LA PAZ"); connectives at the ends go.
 3. The same letters read twice are one query, spaced as some read spaces
    them ("CASTLEGORGE" → "CASTLE GORGE"); a query inside a longer one in text
    at least as large, or inside a word of one ranked as high ("ABATINI" of
@@ -973,14 +1046,23 @@ and turned labels lettered nearly title size (CAVE KLOOF, FERN KLOOF).
    another query is a glued read ("MCSAMAGALIESBERG").
 
 On Vision's reads: Grootkloof `["HAMERKOP", "GROOTKLOOF", "MAGALIESBERG",
-"EASY GULLY", "WOODY GULLY", "HAMERKOR GATE", "PARAMOUNT CONFERENCE",
-"SUGARBUSH HILL COUNTRY COTTAGE", "GROOTKLOOF PEDESTRIAN GATE", "BARTLETT FARM
-PARKING", "KWAMI LODGE", "RIETFONTEIN VALLEY"]`, Castle Gorge `["CASTLE
-GORGE", "MAGALIESBERG", "GRASSY POOL", "MARETLWANE BUSH SCHOOL", "RAND WATER
-BOX", …]`, Mhlabatini `["MAGALIESBERG", "MHLABATINI", "FERN KLOOF",
-"OLIFANTSHOEK PRIMARY SCHOOL", …]`; before, "DOTKLOOF", "KDO8PROPERTY", "ual
-Change per year West", "HTA FAHIN", "ARIG BEACON" and "B KONG POOL" were among
-them, "DOTKLOOF" first.
+"EASY GULLY", "GROOTKLOOF PEDESTRIAN GATE", "HAMERKOR GATE", "SUGARBUSH HILL
+COUNTRY COTTAGE", "WOODY GULLY", "RIETFONTEIN VALLEY", "KWAMI LODGE",
+"MILORHO LODGE", "SPARKLING WATERS HOTEL"]`, Castle Gorge `["CASTLE GORGE",
+"MAGALIESBERG", "SHOOP MOUNTAIN LODGE", "GRASSY POOL", "MAGALIESBERG MOUNTAIN
+LODGE", "CASTLE GORGE WATERFALL", "MARETLWANE BUSH SCHOOL", …]`, Mhlabatini
+`["MAGALIESBERG", "MHLABATINI", "FERN KLOOF", "OLIFANTSHOEK PRIMARY SCHOOL",
+"AASVOËL GULLY", "AASVOELKRANS RESORT", "MOUNT SERENE", …]`; Gaia map B
+`["Giant's Castle", "Langalibalele Pass", "Ntubeni Pass", "Bannerman's Pass",
+"Giant's Pass", "Bannerman Hut", "Mount Dumford", "KaMasihlengo Pass", …]`,
+map A `["Mount Durnford", "Langalibalele Pass", "Main Cave", "Grysbok Bush",
+"Kambule", …]`. Before the feature-word groups, lodges, hotels and resorts
+came after "PARAMOUNT CONFERENCE", "BARTLETT FARM PARKING", "RAND WATER BOX"
+and "BUSSHBREAK ACCOMMODATION", and the Gaia lists started "Grysbok Bush",
+"Bannerman's Poss" (map B) and "Mount Durnford", "nDệ Dickı", "guide pickı"
+(map A). Before the clean-up of Vision's misreads, "DOTKLOOF",
+"KDO8PROPERTY", "ual Change per year West", "HTA FAHIN", "ARIG BEACON" and "B
+KONG POOL" were among them, "DOTKLOOF" first.
 
 ### Control point request/response
 

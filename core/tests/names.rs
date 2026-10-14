@@ -1,0 +1,163 @@
+//! Names on the map (`labels::classify_pois`, `hints::hint_queries`) on every
+//! fixture's OCR: Apple Vision's reads (`vision-ocr.json`, iOS 26.2
+//! simulator) and the RapidOCR stand-ins (`ocr.json`).
+
+use mapme_core::hints::hint_queries;
+use mapme_core::labels::{classify_pois, OcrObservation, PoiKind};
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+
+fn fixtures() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures")
+}
+
+fn ocr_file(path: &Path) -> Vec<OcrObservation> {
+    let v: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    serde_json::from_value(v.get("observations").cloned().unwrap_or(v)).unwrap()
+}
+
+/// Every OCR file of the fixtures, labelled by its path under `fixtures/`.
+fn every_ocr_file() -> Vec<(String, PathBuf)> {
+    let root = fixtures();
+    let mut out = Vec::new();
+    let mut dirs = vec![root.clone()];
+    while let Some(d) = dirs.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("ocr.json")) {
+                out.push((p.strip_prefix(&root).unwrap().display().to_string(), p));
+            }
+        }
+    }
+    let data = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    for n in ["castle-gorge-ocr.json", "grootkloof-rapidocr.json", "mhlabatini-ocr.json"] {
+        out.push((format!("core/tests/data/{n}"), data.join(n)));
+    }
+    out.sort();
+    out
+}
+
+/// Apple Vision on the user's Gaia GPS exports (italic sans lettering: "Costle", "Poss",
+/// "Songebethu" for Sangebethu, "Dumford" for Durnford): the app looks the first four hint
+/// queries up when the map is not found near the user, so they must be prominent places,
+/// spelled as printed.
+#[test]
+fn gaia_vision_hint_queries_start_with_prominent_places_spelled_right() {
+    let want: [(&str, [&str; 4]); 2] = [
+        ("gaia-giants-castle", ["Giant's Castle", "Langalibalele Pass", "Ntubeni Pass", "Bannerman's Pass"]),
+        ("gaia-langalibalele", ["Mount Durnford", "Langalibalele Pass", "Main Cave", "Grysbok Bush"]),
+    ];
+    for (dir, first) in want {
+        let obs = ocr_file(&fixtures().join(dir).join("vision-ocr.json"));
+        let q = hint_queries(&obs);
+        println!("{dir}: {q:?}");
+        assert_eq!(&q[..4], &first, "{dir}: {q:?}");
+        // Misreads Vision makes of the italic lettering, and pieces of small print: never asked.
+        for bad in [
+            "Poss",
+            "POss",
+            "Costle",
+            "Castie",
+            "Bushy",
+            "nDệ",
+            "pickı",
+            "picku",
+            "lain Cave",
+            "ance",
+            "ince",
+            "LAA",
+            "Oribl",
+            "Ntloano",
+            "Gaia",
+            "Mercator",
+        ] {
+            assert!(!q.iter().any(|x| x.contains(bad)), "{dir}: {bad} in {q:?}");
+        }
+    }
+}
+
+/// The Nearby list of the Gaia pages as Apple Vision reads them: the names printed, wrapped
+/// lines joined, the feature words mended, the summits with their heights (printed in feet,
+/// "=10876" and "$10807" with the summit's mark, "108Q7", "10305L"), and nothing else. What
+/// stays misread has no second read to tell: "Songebethu" (Sangebethu), "Mount Dumford" (map B;
+/// map A reads it right), "KaMasihlengo Pass" (KaMasihlenga), "Lango-le-Balele" (Langa-le-),
+/// "Legheku" (Leqheku).
+#[test]
+fn gaia_vision_pois_are_the_names_printed() {
+    /// A name and its elevation (metres).
+    type Named<'a> = (&'a str, Option<f64>);
+    let want: [(&str, &[Named]); 2] = [
+        (
+            "gaia-giants-castle",
+            &[
+                ("Bannerman's Pass", None),
+                ("Bannerman Hut", None),
+                ("Songebethu", Some(3301.0)),
+                ("Langalibalele Pass", None),
+                ("Grysbok Bush", None),
+                ("Oribi Ridge Rte", None),
+                ("Mount Dumford", Some(3294.0)),
+                ("Thaba-Putsoa", None),
+                ("Giant's Castle", Some(3315.0)),
+                ("Giant's Pass", None),
+                ("Legheku", Some(3329.9)),
+                ("Ntloana-Ts'oana", Some(3262.0)),
+                ("Ntubeni Pass", None),
+                ("KaMasihlengo Pass", None),
+            ],
+        ),
+        (
+            "gaia-langalibalele",
+            &[
+                ("Langalibalele Pass", None),
+                ("Main Cave", None),
+                ("Grysbok Bush", None),
+                ("Erskine", Some(3148.0)),
+                ("Bond", Some(3155.9)),
+                ("Lango-le-Balele", None),
+                ("Potterill", Some(3141.0)),
+                ("Mount Durnford", Some(3294.0)),
+                ("Kambule", Some(3154.1)),
+                ("Katana", Some(3076.0)),
+                ("Umtshezi", None),
+            ],
+        ),
+    ];
+    for (dir, names) in want {
+        let pois = classify_pois(&ocr_file(&fixtures().join(dir).join("vision-ocr.json")));
+        let got: Vec<(&str, Option<f64>)> = pois
+            .iter()
+            .filter(|p| p.kind != PoiKind::SpotHeight)
+            .map(|p| (p.name.as_str(), p.elevation_m.map(|e| (e * 10.0).round() / 10.0)))
+            .collect();
+        assert_eq!(got, names, "{dir}");
+    }
+}
+
+/// The POIs and hint queries of every fixture, printed (`--nocapture`) for review.
+#[test]
+fn names_of_every_fixture() {
+    for (label, path) in every_ocr_file() {
+        let obs = ocr_file(&path);
+        let pois = classify_pois(&obs);
+        let q = hint_queries(&obs);
+        println!("== {label}");
+        println!("   hint_queries: {q:?}");
+        let names: Vec<String> = pois
+            .iter()
+            .filter(|p| p.kind != PoiKind::SpotHeight)
+            .map(|p| match p.elevation_m {
+                Some(e) => format!("{} ({:?} {e} m)", p.name, p.kind),
+                None => format!("{} ({:?})", p.name, p.kind),
+            })
+            .collect();
+        println!("   names: {names:?}");
+        let heights: Vec<&str> =
+            pois.iter().filter(|p| p.kind == PoiKind::SpotHeight).map(|p| p.name.as_str()).collect();
+        println!("   heights: {heights:?}");
+        assert!(q.len() <= 12, "{label}: {q:?}");
+    }
+}

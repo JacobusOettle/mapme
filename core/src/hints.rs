@@ -15,7 +15,7 @@
 use crate::geo::{destination, latlon_to_merc, merc_to_latlon, LatLon};
 use crate::labels::{
     classify_pois_reads, credit_text, has_angle_mark, imprint_text, is_measure, legend_members, lexicon_word,
-    longest_common_run, median, mend_name, parse_coordinate, parse_height, parse_scale, reads_across,
+    longest_common_run, main_feature, median, mend_name, parse_coordinate, parse_height, parse_scale, reads_across,
     scale_bar_members, words_of, CoordValue, OcrObservation, PoiKind, Vocabulary, LEGEND_WORDS, META_WORDS, NOTE_WORDS,
 };
 use serde::{Deserialize, Serialize};
@@ -306,6 +306,116 @@ const QUALIFIER_WORDS: &[&str] = &[
     "long", "short", "big", "little", "great", "middle", "high", "old", "new", "groot", "klein", "rooi", "wit",
     "swart", "blou", "hoog", "nuwe", "saint", "upper", "lower", "north", "south", "east", "west",
 ];
+/// Words that say what kind of place a name is, the way a gazetteer files it: passes and
+/// summits, huts, caves and lodges, water, valleys and gorges. A name with one and a name of its
+/// own ("Langalibalele Pass", "Bannerman Hut", "Mount Durnford", "KWAMI LODGE") is asked first:
+/// a geocoder knows such places, and the feature word keeps a name from matching a person or a
+/// street.
+const FEATURE_WORDS: &[&str] = &[
+    "pass",
+    "nek",
+    "neck",
+    "poort",
+    "col",
+    "saddle",
+    "gap",
+    "peak",
+    "mount",
+    "mt",
+    "mountain",
+    "kop",
+    "kopje",
+    "koppie",
+    "berg",
+    "hill",
+    "summit",
+    "castle",
+    "dome",
+    "spitz",
+    "piek",
+    "pic",
+    "pico",
+    "cerro",
+    "monte",
+    "mont",
+    "ben",
+    "bluff",
+    "crag",
+    "tor",
+    "hut",
+    "cave",
+    "caves",
+    "shelter",
+    "camp",
+    "lodge",
+    "hotel",
+    "chalet",
+    "refuge",
+    "hostel",
+    "resort",
+    "school",
+    "church",
+    "mission",
+    "falls",
+    "waterfall",
+    "waterval",
+    "dam",
+    "lake",
+    "loch",
+    "lago",
+    "laguna",
+    "river",
+    "rivier",
+    "rio",
+    "río",
+    "spruit",
+    "creek",
+    "stream",
+    "spring",
+    "fontein",
+    "pool",
+    "tarn",
+    "glacier",
+    "glaciar",
+    "bay",
+    "cove",
+    "kloof",
+    "gorge",
+    "gully",
+    "canyon",
+    "ravine",
+    "valley",
+    "vallei",
+    "glen",
+    "krans",
+    "point",
+    "lookout",
+    "plateau",
+    "gate",
+    "rivulet",
+    "paso",
+    "arroyo",
+    "aguja",
+    "quebrada",
+    "nevado",
+    "volcán",
+    "volcan",
+    "punta",
+    "lac",
+    "aiguille",
+    "pointe",
+    "spitze",
+    "horn",
+    "joch",
+    "hütte",
+    "see",
+    "fjell",
+    "tind",
+    "fjord",
+];
+/// Words of a route's name ("Oribi Ridge Rte", "Giant's Cup Trail"): a geocoder rarely knows a
+/// route, asked after the places.
+const ROUTE_WORDS: &[&str] = &["rte", "route", "trail", "track", "path", "footpath", "traverse", "loop"];
 
 /// Runs of letters in a word ("sheet2" → ["sheet"]), lowercase.
 fn letter_runs(w: &str) -> Vec<String> {
@@ -443,7 +553,7 @@ fn clean_name(part: &str) -> Option<String> {
     }
     let name = kept.join(" ");
     let words: Vec<String> = kept.iter().flat_map(|w| words_of(w)).collect();
-    if words.iter().all(|w| generic_word(w) || w.len() <= 2) {
+    if words.iter().all(|w| generic_word(w) || w.len() <= 2) && !main_feature(&words) {
         return None;
     }
     let letters = name.chars().filter(|c| c.is_alphabetic()).count();
@@ -479,9 +589,15 @@ const TITLE_FONT: f64 = 1.6;
 ///    sheet confirms (the title "CASTLE GORGE" and the "CASTLE GORGE WATERFALL" on the map),
 ///    then the others, less a misread of a confirmed one ("DOTKLOOF" beside "GROOTKLOOF");
 /// 2. the names of `classify_pois` (place, peak and water names, cleaned of legend entries,
-///    pieces and misreads), names of several words first, larger lettering first;
+///    pieces and misreads, their feature words mended): first names of several words with a
+///    feature word (`FEATURE_WORDS`: "Langalibalele Pass", "Bannerman Hut", "KWAMI LODGE") or of
+///    a summit with its height ("Giant's Castle" over "10876"), then other names of several
+///    words, single words, routes ("Oribi Ridge Rte"); in each, names that may be misspelled
+///    (`PoiRead::doubtful`: "Mount Dumford" on a map where Vision read an italic "a" as "o"
+///    twice) after the others, summits first, then larger lettering (of a wrapped label, the
+///    mean of its lines');
 /// 3. names of lexicon words with a qualifier ("LITTLE ROCK", "GREAT FALLS", "LONG POOL"): place
-///    names as often as descriptions.
+///    names as often as descriptions. "Main" and a feature ("Main Cave") is a name.
 ///
 /// Route notes, words that only say what a place is ("KRAAL", "TENTED CAMP"), credits,
 /// coordinates and heights are left out; the same name read twice (or a partial read of it in
@@ -508,9 +624,12 @@ pub fn hint_queries(obs: &[OcrObservation]) -> Vec<String> {
     struct Query {
         name: String,
         key: String,
-        /// 0: confirmed title, 1: other title, 2: name of several words, 3: one word, 4: lexicon
-        /// words with a qualifier.
+        /// 0: confirmed title, 1: other title, 2: name of several words with a feature word
+        /// (`FEATURE_WORDS`) or of a summit, 3: other name of several words, 4: one word, 5: a
+        /// route, 6: lexicon words with a qualifier.
         group: u8,
+        /// The name may be spelled wrong (`PoiRead::doubtful`).
+        doubtful: bool,
         score: f64,
         font: f64,
     }
@@ -544,8 +663,8 @@ pub fn hint_queries(obs: &[OcrObservation]) -> Vec<String> {
             let key = letters_key(&name);
             let confirmed = keys.iter().enumerate().any(|(j, k)| j != i && k.contains(key.as_str()));
             let score = size.clamp(0.3, 4.0) + 0.3 * o.confidence as f64;
-            titles
-                .push((Query { name, key, group: if confirmed { 0 } else { 1 }, score, font: font_px(o) }, confirmed));
+            let group = if confirmed { 0 } else { 1 };
+            titles.push((Query { name, key, group, doubtful: false, score, font: font_px(o) }, confirmed));
         }
     }
     for (t, confirmed) in &titles {
@@ -567,37 +686,70 @@ pub fn hint_queries(obs: &[OcrObservation]) -> Vec<String> {
         }
     }
     // Names on the map.
-    for (p, o) in classify_pois_reads(obs) {
+    for r in classify_pois_reads(obs) {
+        let p = &r.poi;
         if p.kind == PoiKind::SpotHeight {
             continue;
         }
-        let size = (font_px(&o) / font_med).clamp(0.3, 4.0);
+        // The letter size of the label: of a line across the map its box's height, however
+        // narrow its letters (Gaia's italics are 0.45 em wide), unless its letters are narrower
+        // than 0.4 of it (two lines in one read: "GROOTKLOOF PEDESTRIAN GATE"); of a wrapped
+        // label the mean of its lines'.
+        let line_font = |o: &OcrObservation| {
+            let n = o.text.chars().filter(|c| !c.is_whitespace()).count().max(1) as f64;
+            if reads_across(o) {
+                o.text_height().min(o.bbox[2] / (0.4 * n))
+            } else {
+                font_px(o)
+            }
+        };
+        let font = r.lines.iter().map(line_font).sum::<f64>() / r.lines.len().max(1) as f64;
+        let across = r.lines.iter().all(reads_across);
+        let size = (font / font_med).clamp(0.3, 4.0);
+        // A summit with its height printed under or beside the name.
+        let summit = p.kind == PoiKind::Peak && p.elevation_m.is_some();
         for part in name_parts(&p.name) {
             let Some(name) = clean_name(&part) else { continue };
             let n_words = name.split_whitespace().count();
-            // Words that only say what a place is ("KRAAL", "FARM GATE") find no place; with a
-            // qualifier they may ("LITTLE ROCK"), asked last.
             let words = words_of(&name);
-            let mut group = if n_words >= 2 { 2 } else { 3 };
-            if words.iter().all(|w| w.chars().count() <= 2 || lexicon_word(w)) {
+            let lexicon_only = words.iter().all(|w| w.chars().count() <= 2 || lexicon_word(w));
+            let feature = words.iter().any(|w| FEATURE_WORDS.contains(&w.as_str()));
+            let route = words.iter().any(|w| ROUTE_WORDS.contains(&w.as_str()));
+            let main = main_feature(&words);
+            let group = if lexicon_only && !main {
+                // Words that only say what a place is ("KRAAL", "FARM GATE") find no place; with
+                // a qualifier they may ("LITTLE ROCK"), asked last.
                 let qualified = words.iter().any(|w| QUALIFIER_WORDS.contains(&w.as_str()))
                     && words.iter().any(|w| w.chars().count() > 2 && !QUALIFIER_WORDS.contains(&w.as_str()));
                 if !qualified {
                     continue;
                 }
-                group = 4;
-            }
-            let mut score = size + 0.3 * o.confidence as f64;
-            if !reads_across(&o) {
+                6
+            } else if route {
+                5
+            } else if n_words >= 2 && (feature || summit) {
+                2
+            } else if n_words >= 2 {
+                3
+            } else {
+                4
+            };
+            let mut score = size + 0.3 * r.read.confidence as f64;
+            if !across {
                 // Turned labels (ridges, kloofs, boundaries) read poorly.
                 score *= 0.6;
             }
+            if summit {
+                // A summit's name with its height before the passes and huts around it.
+                score += 1.0;
+            }
             let key = letters_key(&name);
-            found.push(Query { name, key, group, score, font: font_px(&o) });
+            found.push(Query { name, key, group, doubtful: r.doubtful, score, font });
         }
     }
-    // Best first; the same name read twice: keep the best, the spaced reading.
-    found.sort_by(|a, b| a.group.cmp(&b.group).then(b.score.total_cmp(&a.score)));
+    // Best first (a name that may be misspelled after the sure ones of its group); the same name
+    // read twice: keep the best, the spaced reading.
+    found.sort_by(|a, b| a.group.cmp(&b.group).then(a.doubtful.cmp(&b.doubtful)).then(b.score.total_cmp(&a.score)));
     let mut out: Vec<Query> = Vec::new();
     for f in found {
         if let Some(o) = out.iter_mut().find(|o| o.key == f.key) {
