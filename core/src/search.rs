@@ -55,9 +55,17 @@ const MAP_BLUR_SIGMA: f64 = 1.0;
 
 /// Build the map field from the full-resolution contour mask.
 pub fn map_field(mask: &Mask) -> MapField {
-    let ppc = field_px_per_cell(mask.w, mask.h);
+    map_field_at(mask, field_px_per_cell(mask.w, mask.h), 1)
+}
+
+/// Build the map field from a contour mask with `ppc` mask pixels per field
+/// cell, the mask having `level` base-image pixels per pixel (a mask made at
+/// a downsampled analysis level).
+pub fn map_field_at(mask: &Mask, ppc: usize, level: usize) -> MapField {
+    let ppc = ppc.max(1);
+    let px_per_cell = (ppc * level.max(1)) as f64;
     if mask.w == 0 || mask.h == 0 {
-        return MapField { w: 0, h: 0, px_per_cell: ppc as f64, re: Vec::new(), im: Vec::new() };
+        return MapField { w: 0, h: 0, px_per_cell, re: Vec::new(), im: Vec::new() };
     }
     let density = box_downsample_mask(mask, ppc);
     let g = density.gaussian_blur(MAP_BLUR_SIGMA);
@@ -70,7 +78,7 @@ pub fn map_field(mask: &Mask) -> MapField {
         *r = x * x - y * y;
         *m = 2.0 * x * y;
     });
-    MapField { w: g.w, h: g.h, px_per_cell: ppc as f64, re, im }
+    MapField { w: g.w, h: g.h, px_per_cell, re, im }
 }
 
 /// Mean of each `f`×`f` pixel block (blocks past the edge count missing pixels as 0).

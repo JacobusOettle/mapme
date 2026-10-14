@@ -20,12 +20,14 @@
 //! `--missing-out` appends every tile the core asked for that is not in
 //! `--dem-dir` (`z x y` per line) to a file, so a benchmark can fetch them.
 
-use mapme_core::contour::{auto_mask, extract_mask, model_from_rgb, normalize_illumination, photo_mask};
+use mapme_core::contour::normalize_illumination;
+use mapme_core::contour_lines::contour_mask;
 use mapme_core::dem::TileId;
 use mapme_core::georef::{ContourProducts, GeorefRequest, GpsFix, Session, Status};
 use mapme_core::hints::{HintSource, SearchHint, DEFAULT_HINT_RADIUS_M};
 use mapme_core::image::Rgb8;
 use mapme_core::labels::OcrObservation;
+use mapme_core::skeleton::default_sampling;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -200,13 +202,20 @@ fn write_missing(path: &Path, tiles: &[TileId]) -> Result<(), String> {
 fn dump_contours(img: &Rgb8, req: &GeorefRequest, path: &Path) -> Result<(), String> {
     let t = Instant::now();
     let src = if req.photo { normalize_illumination(img) } else { img.clone() };
-    let mask = match (req.contour_rgb, req.photo) {
-        (Some(rgb), false) => extract_mask(&src, &model_from_rgb(rgb)),
-        (None, false) => auto_mask(&src).0,
-        (rgb, true) => photo_mask(&src, rgb.map(model_from_rgb).as_ref()).0,
-    };
+    let (min_len, _) = default_sampling(src.w, src.h);
+    let lm = contour_mask(&src, req.contour_rgb, req.photo, min_len);
     let prod = ContourProducts::compute_with(&src, req.contour_rgb, req.photo);
-    let mut px: Vec<u8> = mask.data.iter().map(|&m| if m != 0 { 128 } else { 0 }).collect();
+    // The mask at its analysis level, each pixel over the base pixels it covers.
+    let f = lm.level.max(1);
+    let mut px = vec![0u8; img.w * img.h];
+    for (y, row) in px.chunks_exact_mut(img.w).enumerate() {
+        for (x, o) in row.iter_mut().enumerate() {
+            let (mx, my) = (x / f, y / f);
+            if mx < lm.mask.w && my < lm.mask.h && lm.mask.get(mx, my) {
+                *o = 128;
+            }
+        }
+    }
     for p in &prod.samples.pts {
         let (x, y) = (p[0].floor() as usize, p[1].floor() as usize);
         if x < img.w && y < img.h {
@@ -220,12 +229,18 @@ fn dump_contours(img: &Rgb8, req: &GeorefRequest, path: &Path) -> Result<(), Str
     let mut wr = enc.write_header().map_err(|e| e.to_string())?;
     wr.write_image_data(&px).map_err(|e| e.to_string())?;
     eprintln!(
-        "dumped contour mask to {} (mask fraction {:.4}, {} samples in {} segments, {:.0} ms)",
+        "dumped contour mask to {} (level {}, mask fraction {:.4}, {} samples in {} segments, {:.0} ms; \
+         products: mask {:.0} ms, skeleton {:.0} ms, field {:.0} ms)\n  extraction {}",
         path.display(),
+        lm.level,
         prod.mask_fraction,
         prod.samples.len(),
         prod.samples.n_segs,
-        t.elapsed().as_secs_f64() * 1e3
+        t.elapsed().as_secs_f64() * 1e3,
+        prod.timings_ms[0],
+        prod.timings_ms[1],
+        prod.timings_ms[2],
+        prod.extraction
     );
     Ok(())
 }

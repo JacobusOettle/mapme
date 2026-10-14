@@ -77,16 +77,21 @@ order:
    If labels exist but no lines are found, label centres are used directly as
    a coarse fit, which is then refined with contours when a DEM is available.
    See *Grid labels as a phone reads them* for the rules.
-2. **Contour matching against a DEM** (`contour.rs`, `skeleton.rs`,
-   `search.rs`, `refine.rs`). This needs somewhere to look: the GPS position
+2. **Contour matching against a DEM** (`contour_lines.rs`, `contour.rs`,
+   `skeleton.rs`, `search.rs`, `refine.rs`). This needs somewhere to look: the GPS position
    (the map is assumed to lie within `search_radius_m` of you, 50 km by
    default, up to 2 000 km) and/or hints (places named on the map that the app
    geocoded, the map's own coordinate labels). Hint areas are searched first,
    then the near disc around the fix, then the wide area beyond 50 km chunk by
    chunk (see *Wide search*):
-   * *Contour mask*: classify pixels by colour (default: the brown/tan/orange
-     contour hues used by most topo maps; the user can override by picking a
-     contour colour).
+   * *Contour mask*: the thin lines of the contour ink, found at the raster's
+     effective resolution (a smoothly or blockily upsampled PDF image is
+     analysed at its native size): pixels darker than the background on both
+     sides, classified by their ink (colour divided by the background, so
+     hillshade, tints and yellowed paper drop out) with the warm or, on maps
+     without coloured lines, the grey/black ink model whose lines hang together
+     best; the user can override by picking a contour colour. See *Contour
+     lines of any map style*.
    * *Coarse search*: build a doubled-angle orientation field from the mask
      (structure tensor of the blurred mask; contour lines run perpendicular to
      the terrain gradient) and the same field from DEM gradients. Then do an
@@ -188,6 +193,63 @@ misses others. The grid path copes, and rejects the fits misreads could make:
 phone OCR does (seeded) and replays the app's request 60 km away without
 terrain: with two whole labels per axis 99.5–100 % are located within 5 m,
 and no answer is off by more than 50 m with confidence ≥ 0.5.
+
+### Contour lines of any map style (`contour_lines.rs`)
+
+The contour mask was a colour threshold on the raw pixels (`contour::auto_mask`, three
+brown HSV boxes chosen by how thin their masks are). That works on clean scans with brown
+contours on white paper and fails elsewhere: a contour pixel's colour is a blend of the ink
+and whatever lies under it (hillshade, park and forest tints, yellowed paper), grey and black
+contours have no hue, and a PDF whose 100 ppi raster the app renders at 300 dpi spreads every
+line over 3–4 soft pixels, which the thinness test took for area fills (both Gaia GPS exports
+gave "No contour lines found"). `contour_lines::contour_mask` (every non-photo request; photos
+keep `photo_mask`) instead:
+
+1. **Analysis level** (`estimate_level`, ~10–60 ms on 16 windows of 192 px). The integer box
+   downsampling factor at which the map's lines are as thin as on a native raster:
+   * *Pixel repetition* (`block_factor`): a raster upsampled by repeating pixels (a PDF image
+     drawn without interpolation) has edges only between its blocks, so the gaps between
+     consecutive edges (luminance steps > 24 levels) along rows and columns are multiples of
+     the block size; on a native raster they take every length (the two edges of a 1-px
+     line are 1 apart). ≥ 90 % of ≥ 1 000 gaps multiples of k (the largest k ≤ 4) → level k.
+   * *Smooth upsampling*: per line pixel the smallest radius (1–6) whose valley depth (below)
+     reaches 75 % of its deepest; the *thin share* is the share of line contrast resolved
+     within 2 px. Native rasters: 0.12–0.80 (blurry scans and photocopies included); rasters
+     upsampled 2–3× smoothly: 0.00–0.06. Level 1 while ≥ 0.10; else level 2 if the share
+     there is ≥ 0.30 (2× upsampling: 0.33–0.55), else level 3 (4 if still < 0.15 there).
+   The level image is the box average of f × f blocks (`downsample_box`): for a 3× upsampled
+   raster, close to the raster itself. Sharp 300 dpi sheets stay at level 1 (thin share
+   0.42–0.51 on the MCSA sheets).
+2. **Line pixels** (`ink_lines`): a pixel is on a line when it is darker than the background
+   on *both* sides, along x, y or a diagonal, 1–3 px away (1.4/2.8 diagonally): depth =
+   min(side luminances) − pixel ≥ max(6 levels, 5 % of the side). The deepest offset is
+   kept. Area edges, tints and hillshade gradients are darker on one side at most, so they
+   never count; dense contours ~2.5 px apart stay separate (the side lands in the gap).
+3. **Ink**: each line pixel's colour divided by its background (per channel, the brighter of
+   the two sides), i.e. the colour the line would have on white paper, averaged over the line
+   pixels of its 3 × 3 neighbourhood weighted by depth. Hillshade, tints and yellowed paper
+   divide out (a Gaia contour (197,185,159) on its green-grey ground has the ink of a tan
+   line); grey and black stay neutral.
+4. **Ink model** (`ink_models`, `select_model`): five warm boxes (brown, tan, orange,
+   red-brown, purple-brown: hue 330°–62°) that admit inks from faded (absolute chroma
+   (max − min)/255 ≥ 0.015) to strong (≥ 0.10), and neutral (chroma < 0.05, value ≤ 0.93) for
+   the pixels no warm box takes. Each is scored by its 8-connected components
+   (`RunComponents`, by runs): pixels in pieces of at least the segment length minus pixels
+   in shorter ones (text, specks, noise); the best warm model wins unless the neutral
+   one scores higher, the warm lines are under 5 % of its long lines *and* its lines look
+   like contours: ≥ 80 % of its pixels in long lines, covering ≥ 1.5 % of the image (black
+   and grey ink is on every map: a sheet's roads, grid and text alone are ~60 % long and
+   cover ~0.5 %; photocopied and grey contours ≥ 89 %, 2–40 %). Otherwise a map without
+   coloured lines has no contours, as before. Components under 8 px are dropped.
+   A picked contour colour (`contour_rgb`) keeps `model_from_rgb` on the raw colours of the
+   line pixels.
+
+The mask is at the analysis level: `skeleton::contour_samples` runs there with the segment
+length and step divided by the level (`level_sampling`), and `scale_samples` maps sample
+(i + 0.5) to base position (i + 0.5)·level, the centre of the block it averages (exact for the
+box average); the orientation field uses cells of about `field_px_per_cell` base pixels
+(`search::map_field_at`). `diagnostics.contours.extraction` reports the level, thin shares,
+block size, chosen ink and every model's score.
 
 ### Photo mode (`"photo": true`)
 
@@ -1121,6 +1183,9 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
   src/dem.rs          Terrarium decode, tile math, DemStore, DemMosaic sampling
   src/contour.rs      contour colour model + mask extraction, photo illumination
                       normalisation and hysteresis masks
+  src/contour_lines.rs  the contour mask of any map style: analysis level (upsampling,
+                      pixel repetition), two-sided line detector, ink colour, ink model
+                      choice, run-based components
   src/skeleton.rs     thinning, junction removal, segment extraction, sampling
   src/search.rs       coarse orientation-field FFT search
   src/refine.rs       contour-constancy least-squares refinement (similarity, affine,
