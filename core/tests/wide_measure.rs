@@ -410,7 +410,7 @@ fn refine_z13(c: &Case, t: &Affine) -> (f64, usize, f64) {
     let dem = s.mosaic(13, &b);
     let tm = Instant::now();
     let prep = PreparedDem::new_cropped(&dem, &b);
-    let r = refine_prepared_with(&c.prod.samples, &prep, t, &RefineOptions { photo: c.photo });
+    let r = refine_prepared_with(&c.prod.samples, &prep, t, &RefineOptions { photo: c.photo, ..Default::default() });
     (fit_confidence(&r), n, tm.elapsed().as_secs_f64())
 }
 

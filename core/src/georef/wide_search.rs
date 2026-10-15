@@ -80,10 +80,12 @@ pub(crate) struct RecheckKey {
     transform: [u64; 6],
 }
 
-/// Ground distance (metres) between two candidates' map centres.
-fn cand_dist_m(a: &Candidate, b: &Candidate, w: usize, h: usize) -> f64 {
+/// Ground distance (metres) between two candidates' map centres (the
+/// centre of `rect`, the map's rectangle of the raster).
+fn cand_dist_m(a: &Candidate, b: &Candidate, rect: &MapRect) -> f64 {
+    let (cx, cy) = ((rect.x0 + rect.x1) as f64 / 2.0, (rect.y0 + rect.y1) as f64 / 2.0);
     let ll = |c: &Candidate| {
-        let (mx, my) = c.center_merc(w, h);
+        let (mx, my) = c.transform.apply(cx, cy);
         let (la, lo) = merc_to_latlon(mx, my);
         LatLon::new(la, lo)
     };
@@ -100,7 +102,7 @@ impl Run<'_> {
         gps: LatLon,
         bands: &[ScaleBand],
     ) -> Step<Option<Box<GeorefResponse>>> {
-        let (w, h) = self.size();
+        let (w, h) = self.map_size();
         let key = self.contour_key();
         let near = NEAR_RADIUS_M.min(self.radius_m);
         let origin = latlon_to_merc(gps.lat, gps.lon);
@@ -168,7 +170,7 @@ impl Run<'_> {
     /// The bands' chunks are searched in one sweep, nearest first
     /// (`wide::merge_plans`).
     fn wide_setup(&mut self, gps: LatLon, bands: &[ScaleBand]) -> Option<(WideKey, Arc<WidePlan>, Vec<SearchParams>)> {
-        let (w, h) = self.size();
+        let (w, h) = self.map_size();
         let near = NEAR_RADIUS_M.min(self.radius_m);
         let mut reaches: Vec<Option<(u8, f64)>> =
             bands.iter().map(|b| wide_band_reach(self.radius_m, b, w, h, gps.lat)).collect();
@@ -288,7 +290,7 @@ impl Run<'_> {
         origin: (f64, f64),
         near: f64,
     ) -> Step<Arc<ChunkResult>> {
-        let (w, h) = self.size();
+        let (w, h) = self.map_size();
         let chunk = &plan.chunks[ci];
         let (present, missing): (Vec<TileId>, Vec<TileId>) = {
             let store = lock(&self.s.dem);
@@ -322,7 +324,7 @@ impl Run<'_> {
             });
             drop(dem);
             self.time("wide_search", t);
-            c
+            c.into_iter().map(|c| self.cand_to_page(c)).collect::<Vec<_>>()
         };
         // A cancelled search returns partial results: never cache them.
         self.check_cancel()?;
@@ -352,9 +354,9 @@ impl Run<'_> {
     /// of the re-check: zoom 11 for the near zoom's band, one zoom finer than
     /// its own band for a small-scale map (`wide::recheck_zoom`).
     fn recheck_params(&self, c: &Candidate) -> (SearchParams, MercBox, u8) {
-        let (w, h) = self.size();
+        let (w, h) = self.map_size();
         let p = SearchParams {
-            center_merc: c.center_merc(w, h),
+            center_merc: self.map_centre(&c.transform),
             search_radius_m: RECHECK_RADIUS_M,
             scale_min: c.scale_m_per_px / RECHECK_SCALE_TOL,
             scale_max: c.scale_m_per_px * RECHECK_SCALE_TOL,
@@ -378,13 +380,16 @@ impl Run<'_> {
         if let Some(r) = lock(&self.s.rechecks).get(&rk).cloned() {
             return Ok(r);
         }
-        let (w, h) = self.size();
+        let (w, h) = self.map_size();
         let (p, b, z) = self.recheck_params(c);
         self.need(&tiles_covering(z, &b), "recheck", self.contour_key())?;
         let t = Instant::now();
         let dem = lock(&self.s.dem).mosaic(z, &b);
         let s = self.s;
-        let r = coarse_search(&prod.field, &dem, w, h, &p, &|| s.cancelled(), &|_| {}).into_iter().next();
+        let r = coarse_search(&prod.field, &dem, w, h, &p, &|| s.cancelled(), &|_| {})
+            .into_iter()
+            .next()
+            .map(|c| self.cand_to_page(c));
         self.time("recheck", t);
         self.check_cancel()?;
         lock(&self.s.rechecks).insert(rk, r.clone());
@@ -428,7 +433,8 @@ impl Run<'_> {
         lookahead: &[TileId],
         log: &mut Vec<Value>,
     ) -> Step<Option<Box<GeorefResponse>>> {
-        let (w, h) = self.size();
+        let (w, h) = self.map_size();
+        let rect = self.map_rect();
         let key = self.contour_key();
         let zoom = wkey.bands.first().map_or(crate::wide::NEAR_ZOOM, |b| b.0);
         // 1. Zoom-11 re-checks (coarser far north or south: `near_zoom`, and
@@ -465,7 +471,10 @@ impl Run<'_> {
                     let t = Instant::now();
                     let dem = lock(&self.s.dem).mosaic(*z, b);
                     let s = self.s;
-                    let r = coarse_search(&prod.field, &dem, w, h, p, &|| s.cancelled(), &|_| {}).into_iter().next();
+                    let r = coarse_search(&prod.field, &dem, w, h, p, &|| s.cancelled(), &|_| {})
+                        .into_iter()
+                        .next()
+                        .map(|c| self.cand_to_page(c));
                     self.time("wide_recheck", t);
                     self.check_cancel()?;
                     used.extend(tiles_covering(*z, b));
@@ -488,7 +497,7 @@ impl Run<'_> {
         strong.sort_by(|a, b| b.score.total_cmp(&a.score));
         // Candidates apart by the distinct distance of the larger map extent.
         let apart = |a: &Candidate, b: &Candidate| {
-            cand_dist_m(a, b, w, h) >= distinct_m(a.scale_m_per_px.max(b.scale_m_per_px), w, h)
+            cand_dist_m(a, b, &rect) >= distinct_m(a.scale_m_per_px.max(b.scale_m_per_px), w, h)
         };
         let mut distinct: Vec<Candidate> = Vec::new();
         for c in strong {
@@ -501,7 +510,7 @@ impl Run<'_> {
             self.check_cancel()?;
             let other = pool.iter().filter(|p| apart(p, &g)).map(|p| p.score).fold(0.0f32, f32::max);
             let margin = g.score / other.max(0.05);
-            let Some(fp) = fine_plan(&g.transform, w, h) else { continue };
+            let Some(fp) = self.fine_plan(&g.transform) else { continue };
             let rk = self.recheck_key(&g);
             let cached = lock(&self.s.wide_refined).get(&rk).cloned();
             let refined = match cached {
@@ -517,7 +526,7 @@ impl Run<'_> {
             };
             let Some((r, fzoom)) = refined else { continue };
             let conf = confidence(&g, &r);
-            let (mx, my) = g.center_merc(w, h);
+            let (mx, my) = self.map_centre(&g.transform);
             let (lat, lon) = merc_to_latlon(mx, my);
             let accepted = conf >= CONFIDENT && margin >= WIDE_NCC_MARGIN;
             if !accepted {

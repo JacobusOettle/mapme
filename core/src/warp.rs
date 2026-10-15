@@ -217,6 +217,28 @@ impl Warp {
         Affine { a, b, c: cx - a * x - b * y, d, e: ee, f: cy - d * x - ee * y }
     }
 
+    /// A smooth pixel → Mercator `model` over a `w` × `h` image as the
+    /// response carries it: the homography fitting it best (least squares on
+    /// a 9 × 9 grid of image points), so a client ignoring the warp gets the
+    /// best flat answer, plus the lattice of what it leaves
+    /// (`LONG_SIDE_NODES` along the long side). None unless the warp is
+    /// fold-free (`MAX_DERIVATIVE_RATIO`).
+    pub fn from_model(w: usize, h: usize, model: impl Fn(f64, f64) -> (f64, f64)) -> Option<(Homography, Warp)> {
+        let src: Vec<(f64, f64)> =
+            (0..81).map(|k| (w as f64 * (k % 9) as f64 / 8.0, h as f64 * (k / 9) as f64 / 8.0)).collect();
+        let dst: Vec<(f64, f64)> = src.iter().map(|&(x, y)| model(x, y)).collect();
+        let hom = Homography::fit(&src, &dst)?.normalized();
+        let mut warp = Warp::zero(w, h);
+        for k in 0..warp.n_nodes() {
+            let (x, y) = warp.node_px(k);
+            let ((mx, my), (hx, hy)) = (model(x, y), hom.apply(x, y));
+            warp.offsets_m[2 * k] = mx - hx;
+            warp.offsets_m[2 * k + 1] = my - hy;
+        }
+        let warp = warp.rounded();
+        (warp.is_valid() && warp.derivative_ratio(&hom) < MAX_DERIVATIVE_RATIO).then_some((hom, warp))
+    }
+
     /// Offsets rounded to centimetres (compact JSON).
     pub fn rounded(mut self) -> Warp {
         for o in self.offsets_m.iter_mut() {

@@ -129,26 +129,31 @@ order:
 The contour path was built on 1:25 000 MCSA sheets (brown 5 m contours on white paper,
 300 dpi, 1.9 m/px). It has to locate any map with contour lines: Gaia GPS and OpenTopoMap
 exports, USGS, Swiss, OS, Kompass and N50 sheets, photocopies, faded prints, bare grey
-contours, 1:250 000 maps over hypsometric tints. Four things make that work:
+contours, 1:250 000 maps over hypsometric tints, small maps on large pages. Five things
+make that work:
 
-1. **Effective resolution** (`contour_lines::estimate_level`). A PDF whose 100 ppi raster
+1. **The map, not the page** (`content.rs`). A map smaller than its page (an export placed
+   unscaled on an A4 sheet, a sheet reduced onto a page) is found as the block of ink on the
+   paper and everything the contour path sizes by the image is sized by it. See *A map
+   smaller than its page*.
+2. **Effective resolution** (`contour_lines::estimate_level`). A PDF whose 100 ppi raster
    the app renders at 300 dpi spreads every 1 px line over 3–4 soft pixels (or 3 × 3
    blocks). The mask is made on the raster box-averaged back to about its native size
    (level 2–4) and its samples mapped back to page pixels exactly; sharp scans and the
    MCSA sheets stay at level 1.
-2. **Lines first, then ink** (`ink_lines`, `model_bits`, `select_model`). A contour pixel
+3. **Lines first, then ink** (`ink_lines`, `model_bits`, `select_model`). A contour pixel
    is darker than the background on both sides 1–3 px away (tints, hillshade and area
    edges never are). Its ink is the colour divided by the background (printed inks) or
    white-balanced by the paper (digital maps); of five warm ink models, faded to strong,
    and a grey/black one (only on maps without coloured lines), the one whose lines hang
    together best wins. See *Contour lines of any map style*.
-3. **Scale range and priors** (`wide::scale_bands`, `scalebar.rs`). 0.4–50 m/px in bands
+4. **Scale range and priors** (`wide::scale_bands`, `scalebar.rs`). 0.4–50 m/px in bands
    (zoom-11 tiles up to 12 m/px, a coarser zoom beyond); a printed ratio with the dpi is a
    constraint (a scale bar that disagrees with it is searched after it), a scale bar ("1
    mi", "0 1 2 km") a ±15 % prior searched first, never the only range searched. Maps of
-   more than 40 km get a small perspective term for their projection. See *Any map:
-   scales, priors, units*.
-4. **Units and names** (`labels::height_unit`, `hints::hint_queries`). Heights are in feet
+   more than 40 km get their projection's bend (UTM, national grids). See *Any map:
+   scales, priors, units* and *Large sheets: the projection's bend*.
+5. **Units and names** (`labels::height_unit`, `hints::hint_queries`). Heights are in feet
    when the map says so or the terrain agrees; attribution and projection notes are no
    places; the names on the map are what the app geocodes into hints when the user is
    far from it ("Search wider").
@@ -163,14 +168,19 @@ Contour benchmark (`fixtures/tools/bench_contours.py`, contour path only): 88 sy
 maps of 14 styles (the 76-map corpus and fixtures/styles) and 9 real ones (the three MCSA
 sheets; the user's two Gaia exports as the app renders the page, rendered blockily, and
 as their native rasters), with the GPS at the map centre, 10–30 km off and 90–110 km off.
-The core before this work (c66236b) and now:
+The core before this work (c66236b), after it (9913526) and now:
 
-| | before | now |
-|---|---|---|
-| synthetic, GPS at the centre / 10–30 km off | 52 / 51 of 88 | 78 / 77 of 88 |
-| real, GPS at the centre and 10–30 km off | 6 of 9 | 9 of 9 |
-| confidently wrong (any run) | 3 | 0 |
-| GPS 90–110 km off: located / confident | 0 / 0 | 0 / 0 |
+| | before | then | now |
+|---|---|---|---|
+| synthetic, GPS at the centre / 10–30 km off | 52 / 51 of 88 | 78 / 77 of 88 | 80 / 79 of 88 |
+| real, GPS at the centre and 10–30 km off | 6 of 9 | 9 of 9 | 9 of 9 |
+| confidently wrong (any run) | 3 | 0 | 0 |
+| GPS 90–110 km off: located / confident | 0 / 0 | 0 / 0 | 0 / 0 |
+
+("now": with the map found on its page and large sheets' projection bend, 9913526 →
+this change; the two maps gained are 1:250 000 UTM sheets that were 112 and 172 m off at
+their edges, and every other 1:100 000–1:250 000 UTM sheet is closer: see *Large
+sheets: the projection's bend*. The real maps' errors are unchanged to the decimetre.)
 
 By style (centre, before → now): photocopies 0 → 5 of 5, grey contours 0 → 5 of 6,
 Gaia-like pages 1 → 8 of 10, 1:250 000 hypsometric 0 → 5 of 9, Kompass 3 → 5 of 5, the
@@ -183,10 +193,9 @@ map (`tests/gaia_contours.rs`); the MCSA sheets 2–7 m as before. What still fa
 * flat terrain (Kansas, the Free State: 6 maps, tens of metres of relief): the
   orientation field holds no pattern to find, or the right fit has too few contour
   levels for the interval check (20 m contours over 36 m of relief): no answer;
-* 1:200 000–1:250 000 sheets in UTM at 17–40 m/px (3 maps): over 40–90 km their
-  projection is no projective image of Web Mercator; two are placed 26 and 53 m off
-  (median) but 112 and 170 m at the edges (beyond 4 px), the third fits too loosely
-  to be accepted;
+* a 1:250 000 sheet in UTM rendered blockily at 17 m/px: its fit stays too loose to be
+  accepted (the other sheets of 40–110 km in UTM now get their projection's bend and
+  lie within 2 px at their edges: *Large sheets: the projection's bend*);
 * faint 1 px lines on a native 18 m/px Gaia raster, 11 % of them sampled: 36/82 m;
 * a raster upsampled 3× after its dense contours had merged into solid areas: located
   from the centre only.
@@ -253,9 +262,10 @@ differ in scale, contour interval, units and furniture:
   map whose samples span more than 40 km (ground diagonal) therefore gets a
   projective stage after the affine one (`refine::REGIONAL_SPAN_M`), kept
   if it lowers the cost by 1 % with perspective terms ≤ 0.02 over the
-  samples' extent and a near-conformal local part: that sheet 118 → 59 m,
-  a 1:100 000 Norway sheet at 20 m/px 41 → 29 m; Web Mercator exports
-  (OpenTopoMap at 20 m/px) keep their affine fit.
+  samples' extent and a near-conformal local part, and then its
+  projection's bend (`ConformalStage`), which takes out the rest: see
+  *Large sheets: the projection's bend*. Web Mercator exports (OpenTopoMap
+  at 20–40 m/px) keep their affine fit.
 * **Gradient alignment** (`RefineResult::gradient_alignment`, Σ|g·t̂| / Σ|g|
   over the samples, g the DEM gradient, t̂ the contour's direction mapped to
   the ground): contour lines run across the slope, so right fits stay low
@@ -477,6 +487,136 @@ runs, scored against their `contour_mask.png`): skeleton samples on true contour
 0.97, true contour lines sampled 0.37 → 0.79 (photocopies and grey contours 0 → 0.95,
 Gaia-like PDF pages 0.01 → 0.50, Kompass 0.13 → 0.72, MCSA-like 0.13 → 0.81). The located
 counts of the whole pipeline are in *Contours on any map: what makes it work*.
+
+### A map smaller than its page (`content.rs`)
+
+A PDF can hold a map smaller than its page: a 1 118 × 791 px Gaia export placed unscaled
+on an A4 sheet the app renders at 300 dpi (2 480 × 3 508 px), a 1:25 000 sheet reduced to
+a third of an A3 page, a printout with a wide margin, a title and a legend. Everything the
+contour path sizes by the image is sized by the map instead: the shortest contour segment
+and the sampling step (`skeleton::default_sampling`: 54 px for the A4 page, 30 px for the
+map), the analysis level's windows, the ink model's cover test, the orientation field's
+cells, the coarse search's templates, its scale range and bands, the distinct-place
+distance and the coarse and fine DEM boxes (the page's footprint pushed the refinement of
+a 9 m/px map onto zoom-11 tiles: 31/35 m instead of 4/8 m).
+
+`content::map_content` finds the map as the block of ink on the paper: cells of 1/160 of the
+long side holding ≥ 2 % ink pixels (a channel 24 levels darker than the paper), closed over
+3 cells (sparse contours, lakes) and opened over 4 (a frame round the page, lines of text
+and the scale bar are thinner than a map), the bounding box of the largest group and of
+those at least a fifth its size, plus a cell (5–90 ms on 1–17 MP). The contour path works
+on that rectangle (`diagnostics.contours.map_area`) when it covers at most 75 % of the
+page, is ≥ 300 px a side and at most 8 % of the cells outside it hold ink (a full-bleed map
+whose flat part has contours too far apart to close keeps the whole raster: 19 % on the
+grey Kansas map); otherwise, and for photos, the whole raster as before. The mask, skeleton
+and field are made on the rectangle (`ContourProducts::compute_in`; samples in page pixels),
+the coarse search places the rectangle (`Run::to_page` turns its candidates into page
+transforms), the scale bands, DEM boxes, fine plans and refinement reuse use its size and
+corners, and the label hints measure offsets to its centre. Grid fits, photos and the
+response (corners, warp lattice) stay in page pixels.
+
+Maps on pages (`fixtures/tools/page_compose.py`: the real maps resized onto a white A4/A3
+sheet at 300 dpi under a title, with legend lines under them; `synth_topo.py suite pages`:
+synthetic rasters placed unscaled on A4/A3 PDF pages with their title, legend and scale
+bar), GPS at the map centre, median/max error and confidence, before → after (the runs
+10–30 km off are the same; from 90–110 km away none is located in either build):
+
+| page | map | before | after |
+|---|---|---|---|
+| Gaia raster, Langalibalele, on A4 (real) | 1 118 × 791, 9.1 m/px, 10 % | 31/35 m | 4/8 m |
+| Gaia raster, Giant's Castle, on A4 landscape (real) | 1 118 × 791, 23 m/px, 10 % | 67/122 m | 11/13 m |
+| Grootkloof × 0.6 on A3 (real) | 3.2 m/px, 36 % | 15/19 m | 6/8 m |
+| Castle Gorge × 0.45 on A4 (real) | 4.2 m/px, 41 % | 13/14 m | 6/8 m |
+| Mhlabatini × 0.7 on A3 (real) | 2.7 m/px, 49 % | 21/24 m | 5/7 m |
+| Gaia-like raster on A4, two places | 9 m/px, 10 % | 8/14, 6/10 m | 7/15, 6/13 m |
+| Gaia-like raster on A4 landscape | 12 m/px, 10 % | 33/49 m | 12/26 m |
+| Gaia-like raster on A4 landscape | 18 m/px, 20 % | no contours found | 50/89 m, 0.57 |
+| OpenTopoMap-like on A3 | 15 m/px, 9 % | 17/26 m, 0.85 | 14/22 m, 0.59 |
+| Swiss-like on A4 | 10.6 m/px, 15 % | 28/55 m | 19/29 m |
+| USGS-like on A3 | 6.35 m/px, 12 % | 12/25 m | 3/6 m |
+
+Confidence 1.00 or 0.98 except where given. Located (benchmark tolerance) 8 → 11 of 12;
+the 18 m/px raster's faint 1 px lines are its own limit (the raster alone: 36/82 m, 0.83),
+and the OpenTopoMap page now refines on zoom 12 as the map alone does (13/20 m, 0.66;
+the page's footprint had pushed it to zoom 10, whose looser spread floor gave 0.85). A
+blank page, a page of text and a page with a photo-like picture still fail at once ("No
+contour lines found", 0.3–0.7 s; `tests/map_on_page.rs`). Of the 97 benchmark maps, 11
+work on a rectangle (the MCSA-like A3 pages, Kompass, Swiss, USGS and OS pages with their
+legends, 45–71 % of the page; a Gaia-like page, 52 %): no verdict changes, one Kompass
+page 20/32 → 10/24 m.
+
+### Large sheets: the projection's bend
+
+A sheet in UTM, a national transverse Mercator grid or a Lambert conic is a conformal
+image of Web Mercator, so pixel → Mercator is an analytic function of the complex pixel
+position w: an affine part plus c₂w² + c₃w³ + …. Its quadratic term is the Mercator
+scale sec(lat) growing northward by tan(lat) / R per metre while the sheet's stays (plus
+a little where its central meridian is off the map); over 40–110 km that bends the sheet
+by 20–600 m against the best affine fit (the most at 70° N), of which a homography takes
+out about half. A complex polynomial fitted to the contours could take
+out the rest, but the data cannot place it: on the 1:250 000 benchmark sheets the fitted
+c₂ lands tens of metres from the truth's (generalised contours on 76–306 m DEM cells), and
+on one sheet in the wrong direction altogether (96 m off). The bend is therefore
+predicted, not fitted (`refine::ConformalStage`, `tm_bend`): around the affine fit's
+centroid the transverse Mercator → Web Mercator map is evaluated exactly
+(`geo::latlon_to_tm`, `tm_to_latlon`, any central meridian) and its quadratic and cubic
+coefficients taken by least squares over the map's extent, turned into pixel units
+through the affine's complex scale; only the affine is then refitted under it. The
+meridian is the map's UTM zone's, or the map's own when that fits better (a national
+grid's is near it: OS GB −2°, the Lo system's odd degrees). For a Lambert conic, an
+oblique Mercator or a polar stereographic sheet the scale against Web Mercator changes
+about as fast (n / cos lat against tan lat for a conic at its standard parallel; sec lat
+for the stereographic), so the same bend is the first-order answer. Web Mercator maps
+have none.
+
+It runs after the affine and projective stages for a map whose samples span more than
+40 km, when they cover ≥ 60 % of the map's rectangle along both axes (2nd–98th
+percentile) and the map does not print "Web Mercator"/"EPSG:3857" (Gaia GPS pages do);
+it is kept when its coefficients are within 1.5× what a conformal projection can do at
+that latitude and size (+2 m), its cost is at most 3 % above the affine's (Web Mercator
+exports: 17–23 % above), the fit explains anything at all (a wrong place is not
+cross-validated), and in spatial 4-fold cross validation (segments by the block of their
+centroid in a 4 × 4 grid, folds of four blocks spread over the map; each model refitted
+without them and costed on them, ≤ 20 000 samples, 10 LM iterations) its held-out cost,
+taken 1 % lower as the prior for a physical bend, is the lowest of the affine, the kept
+projective fit and itself. Kept, `RefineResult::conformal` holds it, `transform` stays its
+affine part at the centroid, and the response carries it as `pixel_to_mercator` (the best
+homography over the image) plus a `warp` (`Warp::from_model`, fold-free by construction;
+`diagnostics.refined.conformal`: |c₂|, |c₃|, meridian). It adds 0.3–0.9 s to the
+refinement of such a map (the cross validation); smaller maps never run it.
+
+Large sheets of the benchmark (`synth_topo.py suite regional`: UTM, a TM national grid,
+Kompass and USGS 1:100 000 at 31–70°, and Web Mercator exports of the same size), GPS at
+the centre, median/max error at the truth points and confidence, before → after (the
+10–30 km offset runs are the same, the 90–110 km ones fail honestly in both):
+
+| sheet | m/px, lat, extent | best affine / homography of the truth | before | after |
+|---|---|---|---|---|
+| 1:250 000 Rockies (UTM) | 50, 40°, 112 km | 103/199, 53/99 | 65/170 m, 0.97 | 25/61 m, 0.98 |
+| 1:250 000 High Atlas | 40, 31°, 90 km | 48/93, 25/47 | 53/172 m, 0.96 | 29/65 m, 0.96 |
+| 1:250 000 Garhwal | 30, 31°, 81 km | 38/73, 19/38 | 37/110 m, 0.83 | 22/43 m, 0.82 |
+| 1:250 000 Aurlandsfjord | 20, 61°, 54 km | 51/99, 26/49 | 26/112 m, 0.68 | 15/33 m, 0.78 |
+| 1:250 000 Cradle Mountain | 25, −42°, 56 km | 28/53, 14/27 | 33/87 m, 0.96 | 27/34 m, 0.96 |
+| 1:250 000 Drakensberg | 25, −29°, 68 km | 25/49, 13/25 | 17/51 m, 0.94 | 11/33 m, 0.95 |
+| 1:250 000 Lyngen Alps | 40, 70°, 108 km | 307/596, 159/293 | no answer | 44/65 m, 0.90 |
+| 1:250 000 Bernese Oberland | 35, 47°, 94 km | 93/179, 48/89 | 46/145 m, 0.85 | 10/21 m, 0.91 |
+| 1:250 000 Glen Coe (TM, meridian −2°) | 30, 57°, 81 km | 98/189, 49/96 | 52/175 m, 0.97 | 12/18 m, 0.99 |
+| 1:250 000 Fitz Roy | 45, −49°, 101 km | 117/226, 60/114 | 61/218 m, 0.89 | 23/39 m, 0.89 |
+| Kompass 1:200 000 Norway | 25, 61°, 68 km | 83/160, 43/80 | 61/93 m, 0.58 | 16/43 m, 0.93 |
+| USGS 1:100 000 Rockies | 10, 40°, 36 km | 11/19, 6/11 | 19/37 m, 1.00 | 16/24 m, 1.00 |
+| USGS 1:100 000 High Atlas | 20, 31°, 67 km | 27/51, 14/26 | 29/69 m, 1.00 | 28/44 m, 1.00 |
+| USGS 1:100 000 Blue Ridge | 12, 39°, 46 km | 16/30, 9/17 | 19/35 m, 1.00 | the same (projective kept) |
+| OpenTopoMap, Bernese Oberland | 40, 47°, 90 km | Web Mercator | 11/19 m, 0.97 | the same (no bend) |
+| OpenTopoMap, Lyngen Alps | 30, 70°, 67 km | Web Mercator | 43/49 m, 0.63 | the same (no bend) |
+| Gaia page, High Atlas (EPSG:3857 printed) | 12, 31°, 44 km | Web Mercator | 11/23 m, 0.82 | the same (no bend) |
+
+Every UTM/TM sheet located now lies within 2 px or 60 m at its worst truth point (the
+bend itself is right to the decimetre there: what remains is an affine error, the
+translation and scale noise of a generalised sheet on coarse DEM cells); none of the 22
+large maps is confidently wrong or off at its edges in any run. Still without an answer:
+the flat Free State sheet (its contours hold no pattern) and a 1:250 000 sheet rendered
+blockily at 17 m/px whose fit stays too loose (0.49); a 35 m/px Gaia raster whose 1 px
+lines the extraction misses.
 
 ### Photo mode (`"photo": true`)
 
@@ -773,11 +913,15 @@ image's pixels, like everything else.
 * `pois` are map labels classified as place names, peaks, water or spot
   heights, in base-image pixels, without the labels the grid used (see *Names
   on the map*).
-* `warp` (photo mode only; absent or `null` otherwise) is a smooth correction
-  for paper that does not lie flat (fold creases, curl). No single homography
-  fits a folded sheet: on `fixtures/grootkloof/photo` (a phone photo of the
-  printed sheet, folded in four) the best one is off by ~37 m median and
-  ~180 m at the corners. With a warp the full model is
+* `warp` (absent or `null` unless one of these) is a smooth correction: in
+  photo mode for paper that does not lie flat (fold creases, curl), and for a
+  sheet of more than 40 km in a regional projection (UTM, a national grid)
+  the bend of that projection against Web Mercator (see *Large sheets: the
+  projection's bend*; then `pixel_to_mercator` is the homography that fits
+  the bent model best over a 9 × 9 grid of the image, `Warp::from_model`).
+  No single homography fits a folded sheet: on `fixtures/grootkloof/photo` (a
+  phone photo of the printed sheet, folded in four) the best one is off by
+  ~37 m median and ~180 m at the corners. With a warp the full model is
 
   ```
   merc(p) = H(p) + B(p)
@@ -809,9 +953,10 @@ image's pixels, like everything else.
   `p₀ = H⁻¹(m)`, `pₖ₊₁ = H⁻¹(m − B(pₖ))` (6 iterations reach < 0.01 px).
   `rms_m`, `corners`, `scale_m_per_px` and `rotation_deg` include the warp.
   `pixel_to_mercator` alone is still the best homography, so a client that
-  ignores `warp` gets the flat-model answer. `diagnostics.warp` says how the
-  warp was fitted (`source`: `"grid"` or `"contours"`, constraint counts, RMS
-  before and after, largest offset).
+  ignores `warp` gets the flat-model answer. `diagnostics.warp` says how a
+  photo's warp was fitted (`source`: `"grid"` or `"contours"`, constraint
+  counts, RMS before and after, largest offset), `diagnostics.refined.conformal`
+  a projection's bend (|c₂|, |c₃| in Mercator metres, the central meridian).
 
 ### Names on the map (`pois`, `hint_queries`)
 
@@ -1452,13 +1597,15 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
   src/dem.rs          Terrarium decode, tile math, DemStore, DemMosaic sampling
   src/contour.rs      contour colour model + mask extraction, photo illumination
                       normalisation and hysteresis masks
+  src/content.rs      the map's content area on its page (a small map on a large sheet)
   src/contour_lines.rs  the contour mask of any map style: analysis level (upsampling,
                       pixel repetition), two-sided line detector, ink colour, ink model
                       choice, run-based components
   src/skeleton.rs     thinning, junction removal, segment extraction, sampling
   src/search.rs       coarse orientation-field FFT search
   src/refine.rs       contour-constancy least-squares refinement (similarity, affine,
-                      projective for photos) + scoring
+                      projective for photos and large maps, a large sheet's projection
+                      bend) + scoring
   src/warp.rs         photo warp: offset lattice for paper that is not flat, fitted to
                       traced grid lines and contours, held-out checks, inverse
   src/page.rs         page (paper sheet) finder for photos: mm_detect_page
@@ -1485,7 +1632,9 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
                       user's Gaia GPS exports, smooth and blocky page renders and the
                       native raster, the app's requests near and from 450 km; gaia.rs:
                       their scale bars, names, feet, the 23 m/px raster; styles.rs:
-                      the synthetic maps of many styles in fixtures/styles)
+                      the synthetic maps of many styles in fixtures/styles;
+                      map_on_page.rs: a Gaia raster unscaled on an A4 page, blank
+                      and text pages)
 fixtures/grootkloof/  the real map (PDF + extracted JPEG), DEM tiles, OCR fixture, truth
 fixtures/castle-gorge/, fixtures/mhlabatini/  two more sheets of the series: PDF, JPEG,
                       DEM tiles, truth, RapidOCR (ocr.json) and Apple Vision OCR
@@ -1494,7 +1643,9 @@ fixtures/gaia-langalibalele/, fixtures/gaia-giants-castle/  the user's Gaia GPS 
                       exports: page renders, native rasters, OCR, truth, DEM tiles
 fixtures/styles/      synthetic maps of 12 styles with exact truth (case.json in the
                       common benchmark format); fixtures/tools/synth_topo.py renders
-                      them and the 76-map corpus, bench_contours.py runs the benchmark
+                      them, the 76-map corpus and the regional and pages suites,
+                      page_compose.py puts a case's map on a larger page,
+                      bench_contours.py runs the benchmark
 ios/                  XcodeGen project (project.yml), app, unit tests, UI tests
 scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
 .github/workflows/    core.yml (Linux), ios.yml (macOS build, test, IPA)
@@ -1663,7 +1814,12 @@ library card.
   Linux box (4 cores), < 6 s even when three candidates must be refined. The
   warp adds ~0.5 s of fit, plus the contour products in the grid path (one
   more `need_dem` round) and the line detection in the contour path: ~1.3–1.5 s
-  grid and ~2.4–2.7 s contour path on the real photo.
+  grid and ~2.4–2.7 s contour path on the real photo. Finding the map on its
+  page (`content.rs`) takes 5–90 ms (one pass over the pixels, 1–17 MP), once
+  per session; a small map on a page then costs what the map alone costs
+  (a Gaia raster on an A4 page: 1.1 s instead of 1.6 s, the page's footprint
+  no longer refined). A large sheet's projection bend adds 0.3–0.9 s to its
+  refinements (mostly the cross validation, which a wrong place skips).
 * Map interaction at 60/120 fps, because tiles are drawn off the main thread
   by CATiledLayer and overlays are cheap CAShapeLayers.
 * Release core: `opt-level=3`, LTO, `codegen-units=1`, `panic=unwind` (needed

@@ -103,6 +103,31 @@ def apply_h(m, x, y):
     return X / W, Y / W
 
 
+def warp_offset(wp, x, y):
+    """The response's warp B(p) (Mercator metres; docs/ARCHITECTURE.md, Georeference response)."""
+    if not wp:
+        return 0.0, 0.0
+    cols, rows, o = wp["cols"], wp["rows"], wp["offsets_m"]
+    u = min(max((x - wp["origin"][0]) / wp["spacing"][0], 0.0), cols - 1)
+    v = min(max((y - wp["origin"][1]) / wp["spacing"][1], 0.0), rows - 1)
+    i, j = min(int(u), cols - 2), min(int(v), rows - 2)
+    fu, fv = u - i, v - j
+    out = [0.0, 0.0]
+    for (ii, jj, wgt) in ((i, j, (1 - fu) * (1 - fv)), (i + 1, j, fu * (1 - fv)), (i, j + 1, (1 - fu) * fv),
+                          (i + 1, j + 1, fu * fv)):
+        k = 2 * (jj * cols + ii)
+        out[0] += wgt * o[k]
+        out[1] += wgt * o[k + 1]
+    return out[0], out[1]
+
+
+def apply_model(resp, x, y):
+    """pixel -> Mercator through the response's full model: homography plus warp."""
+    mx, my = apply_h(resp["pixel_to_mercator"], x, y)
+    dx, dy = warp_offset(resp.get("warp"), x, y)
+    return mx + dx, my + dy
+
+
 def model_name(m):
     if not m:
         return None
@@ -316,7 +341,8 @@ def run_case(case, variant, opts):
     rec["scale_range"] = diag.get("scale_range")
     ref = diag.get("refined") or {}
     rec["refined"] = {k: ref.get(k) for k in ("fit_confidence", "cost_m", "inlier_fraction", "contour_interval_m",
-                                              "dem_zoom", "affine", "source") if k in ref} or None
+                                              "dem_zoom", "affine", "projective", "conformal", "source")
+                      if k in ref} or None
     if diag.get("search"):
         rec["search"] = diag.get("search")
     elif resp.get("search"):
@@ -342,10 +368,11 @@ def run_case(case, variant, opts):
             c["dist_km"] * 1000 < max(1000.0, 0.15 * span) and c["scale_ratio"] and abs(c["scale_ratio"] - 1) < 0.15
             for c in cands)
     m = resp.get("pixel_to_mercator")
+    rec["warp"] = bool(resp.get("warp"))
     if m and tp:
         errs = []
         for p in tp:
-            lat, lon = unmerc(*apply_h(m, p["x"], p["y"]))
+            lat, lon = unmerc(*apply_model(resp, p["x"], p["y"]))
             errs.append(haversine(lat, lon, p["lat"], p["lon"]))
         errs.sort()
         rec["err_median_m"] = round(statistics.median(errs), 1)

@@ -115,8 +115,9 @@ struct GeorefResponse: Codable {
     var pois: [CorePOI]?
     var message: String?
     var timingsMs: [String: Double]?
-    /// Photo mode: correction for paper that does not lie flat (absent or null otherwise). The full
-    /// model is `pixelToMercator` plus this warp; see `MeshWarp`.
+    /// Photo mode: correction for paper that does not lie flat; a sheet of more than 40 km: the bend
+    /// of its projection (absent or null otherwise). The full model is `pixelToMercator` plus this
+    /// warp; see `MeshWarp`.
     var warp: MeshWarp?
     /// Names on the map worth looking up (title, places, peaks, water), best first; present
     /// whenever the request carried OCR text.
