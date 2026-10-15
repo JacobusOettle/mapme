@@ -93,6 +93,8 @@ REGIONS = {
                            flat=True, notes="Free State highveld plains, a few tens of metres of relief"),
     "flat_kansas": dict(lat=38.45, lon=-98.25, lang="us", treeline=9999, forest=0.02, snowline=None, tm=None,
                         flat=True, notes="Great Plains, near-flat"),
+    "lyngen": dict(lat=69.60, lon=20.25, lang="no", treeline=500, forest=0.2, snowline=1100, tm=None,
+                   notes="Lyngen Alps, sea level to 1830 m, fjords and glaciers"),
 }
 
 NAME_PARTS = {
@@ -1255,9 +1257,12 @@ def render_case(spec, out_dir, dem_cache, dem_dir_rel, prefetch=True, verbose=Tr
         ml = mr = mt = mb = 0
     elif page_kind == "pdf":
         l_in, t_in, r_in, b_in = style["page_margins"]
-        land = CW > CH
+        land = spec.get("landscape", CW > CH)
         PWp, PHp = CW + (l_in + r_in) * fppi, CH + (t_in + b_in) * fppi
-        for _, pw_in, ph_in in PAPERS:
+        # A forced paper (spec "paper": "A4", "A3", ...): the map placed unscaled on a sheet larger
+        # than it, below the top margin, the rest of the sheet blank.
+        papers = [p for p in PAPERS if p[0] == spec["paper"]] if spec.get("paper") else PAPERS
+        for _, pw_in, ph_in in papers:
             if land:
                 pw_in, ph_in = ph_in, pw_in
             if PWp <= pw_in * fppi + 0.5 and PHp <= ph_in * fppi + 0.5:
@@ -1690,6 +1695,36 @@ def bench_suite():
     ]
 
 
+def regional_suite():
+    """Large-area sheets (40-100 km across) in UTM or a national transverse Mercator, at several
+    latitudes (31-70 degrees), and Web Mercator exports of the same size: the projection's bend
+    (refine.rs, the conformal stage) must be taken out of the first and kept out of the second."""
+    return [
+        C("regional-lyngen-utm", "sparse", "lyngen", 40.0, (2400, 1800)),
+        C("regional-norway-kompass", "kompass", "norway_fjords", 25.0, (2400, 1800)),
+        C("regional-alps-utm", "sparse", "alps", 35.0, (2400, 1800)),
+        C("regional-scottish-tm", "sparse", "scottish_highlands", 30.0, (2400, 1800), proj="tm"),
+        C("regional-patagonia-utm", "sparse", "patagonia", 45.0, (2000, 1500)),
+        C("regional-atlas-usgs100k", "usgs100k", "atlas", 20.0, (3000, 2200)),
+        C("regional-alps-otm", "opentopo", "alps", 40.0, (2000, 1500)),
+        C("regional-lyngen-otm", "opentopo", "lyngen", 30.0, (2000, 1500)),
+        C("regional-norway-gaia", "gaia", "norway_fjords", 35.0, (1800, 1300), page="screen"),
+    ]
+
+
+def pages_suite():
+    """Small maps on large pages: native rasters placed unscaled on A4/A3 sheets at 300 dpi with
+    title, legend and scale bar around them and the rest of the sheet blank (the app's render of
+    a PDF that holds a small map)."""
+    return [
+        C("page-gaia-a4", "gaia", "rockies", 9.0, (1118, 791), 1, page="pdf", paper="A4", landscape=False),
+        C("page-gaia-a4-land", "gaia", "drakensberg", 12.0, (1118, 791), 1, page="pdf", paper="A4"),
+        C("page-otm-a3", "opentopo", "alps", 15.0, (1500, 1100), 1, page="pdf", paper="A3", landscape=False),
+        C("page-swiss-a4", "swiss", "patagonia", 10.0, (1300, 1000), 1, page="pdf", paper="A4", landscape=False),
+        C("page-usgs-a3", "usgs", "tasmania", 6.0, (1600, 1300), 1, page="pdf", paper="A3", landscape=False),
+    ]
+
+
 def regression_suite():
     """Small cases committed under fixtures/styles: 4 regions x 3 styles, one DEM directory per
     region (regions whose Terrarium source is SRTM: small tiles)."""
@@ -1724,7 +1759,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("suite")
-    s.add_argument("which", choices=["bench", "regression"])
+    s.add_argument("which", choices=["bench", "regression", "regional", "pages"])
     s.add_argument("out")
     s.add_argument("--dem-cache", default=None, help="Terrarium tile cache (default OUT/../dem)")
     s.add_argument("--only", default=None, help="only cases whose name contains this")
@@ -1760,9 +1795,10 @@ def main():
         return
     out = os.path.abspath(a.out)
     os.makedirs(out, exist_ok=True)
-    if a.which == "bench":
+    if a.which in ("bench", "regional", "pages"):
         cache = a.dem_cache or os.path.join(os.path.dirname(out), "dem")
-        specs = [sp for sp in bench_suite() if not a.only or a.only in sp["name"]]
+        suite = {"bench": bench_suite, "regional": regional_suite, "pages": pages_suite}[a.which]
+        specs = [sp for sp in suite() if not a.only or a.only in sp["name"]]
         jobs = [(sp, out, cache, os.path.relpath(cache, os.path.join(out, sp["name"])), True) for sp in specs]
         with ProcessPoolExecutor(max(1, a.j)) as ex:
             for name, err in ex.map(_run_one, jobs):

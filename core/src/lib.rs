@@ -5,6 +5,7 @@
 //! map's contour lines against a digital elevation model. See
 //! `docs/ARCHITECTURE.md`.
 
+pub mod content;
 pub mod contour;
 pub mod contour_lines;
 pub mod control_points;

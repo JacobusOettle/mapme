@@ -488,12 +488,27 @@ pub fn latlon_to_utm(lat: f64, lon: f64) -> Utm {
     latlon_to_utm_zone(lat, lon, utm_zone_for(lat, lon))
 }
 
+/// Central meridian (degrees) of a UTM zone.
+pub fn utm_central_meridian(zone: u8) -> f64 {
+    (zone as f64 - 1.0) * 6.0 - 180.0 + 3.0
+}
+
 /// lat/lon → UTM in a forced zone (Snyder, USGS PP 1395).
 pub fn latlon_to_utm_zone(lat: f64, lon: f64, zone: u8) -> Utm {
+    let (x, y) = latlon_to_tm(lat, lon, utm_central_meridian(zone));
+    let north = lat >= 0.0;
+    Utm { zone, north, easting: x + 500_000.0, northing: if north { y } else { y + 10_000_000.0 } }
+}
+
+/// lat/lon → transverse Mercator (WGS84, scale `UTM_K0` on the central
+/// meridian `lon0` degrees, origin on the equator, no false easting or
+/// northing): metres east and north (Snyder, USGS PP 1395; mm-accurate
+/// within ~4° of the meridian).
+pub fn latlon_to_tm(lat: f64, lon: f64, lon0: f64) -> (f64, f64) {
     let e2 = WGS84_F * (2.0 - WGS84_F);
     let ep2 = e2 / (1.0 - e2);
     let phi = lat.to_radians();
-    let lon0 = ((zone as f64 - 1.0) * 6.0 - 180.0 + 3.0).to_radians();
+    let lon0 = lon0.to_radians();
     let n = WGS84_A / (1.0 - e2 * phi.sin().powi(2)).sqrt();
     let t = phi.tan().powi(2);
     let c = ep2 * phi.cos().powi(2);
@@ -508,8 +523,7 @@ pub fn latlon_to_utm_zone(lat: f64, lon: f64, zone: u8) -> Utm {
             * (a * a / 2.0
                 + (5.0 - t + 9.0 * c + 4.0 * c * c) * a.powi(4) / 24.0
                 + (61.0 - 58.0 * t + t * t + 600.0 * c - 330.0 * ep2) * a.powi(6) / 720.0));
-    let north = lat >= 0.0;
-    Utm { zone, north, easting: x + 500_000.0, northing: if north { y } else { y + 10_000_000.0 } }
+    (x, y)
 }
 
 fn meridian_arc(phi: f64, e2: f64) -> f64 {
@@ -524,10 +538,15 @@ fn meridian_arc(phi: f64, e2: f64) -> f64 {
 
 /// UTM → lat/lon (Snyder inverse).
 pub fn utm_to_latlon(u: &Utm) -> LatLon {
-    let e2 = WGS84_F * (2.0 - WGS84_F);
-    let ep2 = e2 / (1.0 - e2);
     let x = u.easting - 500_000.0;
     let y = if u.north { u.northing } else { u.northing - 10_000_000.0 };
+    tm_to_latlon(x, y, utm_central_meridian(u.zone))
+}
+
+/// Transverse Mercator (`latlon_to_tm`) → lat/lon.
+pub fn tm_to_latlon(x: f64, y: f64, lon0: f64) -> LatLon {
+    let e2 = WGS84_F * (2.0 - WGS84_F);
+    let ep2 = e2 / (1.0 - e2);
     let m = y / UTM_K0;
     let mu = m / (WGS84_A * (1.0 - e2 / 4.0 - 3.0 * e2 * e2 / 64.0 - 5.0 * e2.powi(3) / 256.0));
     let e1 = (1.0 - (1.0 - e2).sqrt()) / (1.0 + (1.0 - e2).sqrt());
@@ -545,7 +564,6 @@ pub fn utm_to_latlon(u: &Utm) -> LatLon {
         - (n1 * phi1.tan() / r1)
             * (d * d / 2.0 - (5.0 + 3.0 * t1 + 10.0 * c1 - 4.0 * c1 * c1 - 9.0 * ep2) * d.powi(4) / 24.0
                 + (61.0 + 90.0 * t1 + 298.0 * c1 + 45.0 * t1 * t1 - 252.0 * ep2 - 3.0 * c1 * c1) * d.powi(6) / 720.0);
-    let lon0 = (u.zone as f64 - 1.0) * 6.0 - 180.0 + 3.0;
     let lon = lon0
         + ((d - (1.0 + 2.0 * t1 + c1) * d.powi(3) / 6.0
             + (5.0 - 2.0 * c1 + 28.0 * t1 - 3.0 * c1 * c1 + 8.0 * ep2 + 24.0 * t1 * t1) * d.powi(5) / 120.0)

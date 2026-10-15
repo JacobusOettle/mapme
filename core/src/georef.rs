@@ -40,6 +40,7 @@
 //! `georeference` takes `&self`; `progress` and `cancel` may be called from
 //! other threads while it runs. See docs/ARCHITECTURE.md for the JSON.
 
+use crate::content::{map_content, MapContent, MapRect};
 use crate::contour::{normalize_illumination, ContourColorModel};
 use crate::contour_lines::{contour_mask, level_field_cell, level_sampling, scale_samples};
 use crate::control_points::{self, ControlPoint};
@@ -538,6 +539,8 @@ pub struct ContourProducts {
     pub extraction: Value,
     /// How contour-like the sampled lines are arranged.
     pub organisation: LineOrganisation,
+    /// The map's rectangle of the raster the products were made on.
+    pub rect: MapRect,
 }
 
 impl ContourProducts {
@@ -548,25 +551,45 @@ impl ContourProducts {
     /// `compute`; with `photo`, `img` is the normalised photo
     /// (`normalize_illumination`) and the mask is `photo_mask`'s.
     pub fn compute_with(img: &Rgb8, contour_rgb: Option<[u8; 3]>, photo: bool) -> ContourProducts {
+        ContourProducts::compute_in(img, contour_rgb, photo, MapRect::whole(img.w, img.h))
+    }
+
+    /// `compute_with` on the map's rectangle of the raster (`content.rs`):
+    /// the mask, the segment length, the sampling step and the field are
+    /// those of the map alone; the samples are in raster pixels, the field
+    /// covers the rectangle (the coarse search places it, `Run::to_page`).
+    pub fn compute_in(img: &Rgb8, contour_rgb: Option<[u8; 3]>, photo: bool, rect: MapRect) -> ContourProducts {
+        let cropped;
+        let img = if rect.is_whole(img.w, img.h) {
+            img
+        } else {
+            cropped = rect.crop(img);
+            &cropped
+        };
         let t = Instant::now();
         let (min_len, step) = default_sampling(img.w, img.h);
         let lm = contour_mask(img, contour_rgb, photo, min_len);
         let t_mask = ms_since(t);
         let (level, mask) = (lm.level, &lm.mask);
         let (min_len, step) = level_sampling(min_len, step, level);
-        let ((samples, t_skel), (field, t_field)) = rayon::join(
+        let ((samples, organisation, t_skel), (field, t_field)) = rayon::join(
             || {
                 let t = Instant::now();
                 let mut s = contour_samples(mask, min_len, step);
                 scale_samples(&mut s, level);
-                (s, ms_since(t))
+                // Judged on the map's rectangle, before moving to raster pixels.
+                let organisation = line_organisation(&s, img.w, img.h);
+                for p in &mut s.pts {
+                    p[0] += rect.x0 as f32;
+                    p[1] += rect.y0 as f32;
+                }
+                (s, organisation, ms_since(t))
             },
             || {
                 let t = Instant::now();
                 (map_field_at(mask, level_field_cell(img.w, img.h, level), level), ms_since(t))
             },
         );
-        let organisation = line_organisation(&samples, img.w, img.h);
         ContourProducts {
             model: lm.model,
             mask_fraction: mask.fraction(),
@@ -576,6 +599,7 @@ impl ContourProducts {
             level,
             extraction: lm.diag,
             organisation,
+            rect,
         }
     }
 }
@@ -638,6 +662,8 @@ pub struct Session {
     lines: OnceLock<Vec<GridLine>>,
     photo_lines: OnceLock<Vec<GridLine>>,
     contours: Mutex<HashMap<ContourKey, Arc<OnceLock<Arc<ContourProducts>>>>>,
+    /// The map's content area on the raster (`content::map_content`).
+    content: Arc<OnceLock<MapContent>>,
     searches: Mutex<Vec<(SearchKey, Arc<Vec<Candidate>>)>>,
     refinements: Mutex<HashMap<RefineKey, RefineResult>>,
     /// The wide search's plan and the candidates of its searched chunks.
@@ -668,6 +694,7 @@ impl Session {
             lines: OnceLock::new(),
             photo_lines: OnceLock::new(),
             contours: Mutex::new(HashMap::new()),
+            content: Arc::new(OnceLock::new()),
             searches: Mutex::new(Vec::new()),
             refinements: Mutex::new(HashMap::new()),
             wide: Mutex::new(None),
@@ -744,6 +771,21 @@ impl Session {
         }
     }
 
+    /// The map's content area on the raster (`content::map_content`), found once.
+    pub fn map_content(&self) -> &MapContent {
+        self.content.get_or_init(|| map_content(&self.image))
+    }
+
+    /// The rectangle the contour path works on: the map's content area, or
+    /// for photos (flattened by their page borders) the whole raster.
+    fn map_rect(&self, photo: bool) -> MapRect {
+        if photo {
+            MapRect::whole(self.image.w, self.image.h)
+        } else {
+            self.map_content().rect
+        }
+    }
+
     /// Compute the contour products on a background thread (while the app downloads DEM tiles).
     fn prefetch_contours(&self, key: ContourKey) {
         let cell = self.contour_cell(key);
@@ -752,9 +794,12 @@ impl Session {
         }
         let img = Arc::clone(&self.image);
         let norm = Arc::clone(&self.photo_image);
+        let content = Arc::clone(&self.content);
         let _ = std::thread::Builder::new().name("mapme-contours".into()).spawn(move || {
+            let rect =
+                if key.photo { MapRect::whole(img.w, img.h) } else { content.get_or_init(|| map_content(&img)).rect };
             let src = if key.photo { normalized(&norm, &img) } else { img };
-            let _ = cell.get_or_init(|| Arc::new(ContourProducts::compute_with(&src, key.rgb, key.photo)));
+            let _ = cell.get_or_init(|| Arc::new(ContourProducts::compute_in(&src, key.rgb, key.photo, rect)));
         });
     }
 
@@ -983,6 +1028,48 @@ impl<'a> Run<'a> {
         (self.s.image.w, self.s.image.h)
     }
 
+    /// The map's rectangle of the raster (`Session::map_rect`): what the
+    /// contour path sizes its search by.
+    fn map_rect(&self) -> MapRect {
+        self.s.map_rect(self.req.photo)
+    }
+
+    /// The map's size in pixels (the raster's, unless it is a small map on a page).
+    fn map_size(&self) -> (usize, usize) {
+        let r = self.map_rect();
+        (r.w(), r.h())
+    }
+
+    /// A raster pixel → Mercator transform as one of the map's pixels (its
+    /// rectangle's origin at (0, 0)).
+    fn to_map(&self, t: &Affine) -> Affine {
+        let r = self.map_rect();
+        t.compose(&Affine::translation(r.x0 as f64, r.y0 as f64))
+    }
+
+    /// A map pixel → Mercator transform (the coarse search's) as one of the raster's pixels.
+    fn to_page(&self, t: &Affine) -> Affine {
+        let r = self.map_rect();
+        t.compose(&Affine::translation(-(r.x0 as f64), -(r.y0 as f64)))
+    }
+
+    /// A coarse-search candidate (map pixels) with its transform in raster pixels.
+    fn cand_to_page(&self, c: Candidate) -> Candidate {
+        Candidate { transform: self.to_page(&c.transform), ..c }
+    }
+
+    /// Where `t` (raster pixels) puts the map's centre (Mercator).
+    fn map_centre(&self, t: &Affine) -> (f64, f64) {
+        let r = self.map_rect();
+        t.apply((r.x0 + r.x1) as f64 / 2.0, (r.y0 + r.y1) as f64 / 2.0)
+    }
+
+    /// The fine DEM to refine or check `t` (raster pixels) on: under the map's rectangle.
+    fn fine_plan(&self, t: &Affine) -> Option<FinePlan> {
+        let (w, h) = self.map_size();
+        fine_plan(&self.to_map(t), w, h)
+    }
+
     fn time(&mut self, stage: &str, since: Instant) {
         *self.timings.entry(stage.to_string()).or_insert(0.0) += ms_since(since);
     }
@@ -1041,8 +1128,8 @@ impl<'a> Run<'a> {
         if !pois.iter().any(|p| p.elevation_m.is_some()) {
             return None;
         }
-        let (w, h) = self.size();
-        let plan = fine_plan(&t.local_affine(w as f64 / 2.0, h as f64 / 2.0), w, h)?;
+        let r = self.map_rect();
+        let plan = self.fine_plan(&t.local_affine((r.x0 + r.x1) as f64 / 2.0, (r.y0 + r.y1) as f64 / 2.0))?;
         let (dem, zoom) = self.s.fine_dem(&plan)?;
         if zoom < FINE_ZOOM - 1 {
             // Coarse tiles smooth cliffs and summits by more than the tolerance.
@@ -1402,7 +1489,7 @@ impl<'a> Run<'a> {
         let (w, h) = self.size();
         let key = self.contour_key();
         let approx = if t.is_affine() { t.to_affine() } else { t.local_affine(w as f64 / 2.0, h as f64 / 2.0) };
-        let Some(plan) = fine_plan(&approx, w, h) else {
+        let Some(plan) = self.fine_plan(&approx) else {
             return Ok(None);
         };
         // A one-label check runs again on every call before the contour
@@ -1497,10 +1584,11 @@ impl<'a> Run<'a> {
         let fresh = cell.get().is_none();
         let img = if fresh { Some(self.analysed()) } else { None };
         let t = Instant::now();
+        let rect = self.map_rect();
         let p = cell
             .get_or_init(|| {
                 let img = img.unwrap_or_else(|| self.s.analysed(key.photo));
-                Arc::new(ContourProducts::compute_with(&img, key.rgb, key.photo))
+                Arc::new(ContourProducts::compute_in(&img, key.rgb, key.photo, rect))
             })
             .clone();
         if fresh {
@@ -1516,6 +1604,8 @@ impl<'a> Run<'a> {
                 "n_segments": p.samples.n_segs,
                 "n_samples": p.samples.len(),
                 "field_cells": [p.field.w, p.field.h],
+                "map_area": (!p.rect.is_whole(self.s.image.w, self.s.image.h))
+                    .then(|| json!([p.rect.x0, p.rect.y0, p.rect.x1, p.rect.y1])),
                 "extraction": p.extraction,
                 "prep_ms": {"mask": round_dp(p.timings_ms[0], 1), "skeleton": round_dp(p.timings_ms[1], 1),
                             "field": round_dp(p.timings_ms[2], 1)},
@@ -1580,7 +1670,7 @@ impl<'a> Run<'a> {
     /// ("scale_bar"), a labels-only fit ("labels"), or the default range
     /// ("default"). `area_bands` adds the fallbacks.
     fn scale_range_source(&mut self, lat: f64, init: Option<&GridResult>) -> ((f64, f64), &'static str) {
-        let (w, h) = self.size();
+        let (w, h) = self.map_size();
         let cos_lat = lat.to_radians().cos();
         let default = default_scale_range(w, h);
         // Maps drawn in Web Mercator print at the nominal scale in Mercator
@@ -1626,7 +1716,7 @@ impl<'a> Run<'a> {
     /// scale, a scale bar, a labels-only fit; 0 for the default range): the
     /// prior's bands come first, the fallbacks after them.
     fn area_band_plan(&mut self, lat: f64, init: Option<&GridResult>) -> (Vec<ScaleBand>, usize) {
-        let (w, h) = self.size();
+        let (w, h) = self.map_size();
         let ((lo, hi), source) = self.scale_range_source(lat, init);
         let mut bands = scale_bands(lo, hi, w, h, lat);
         let n_prior = if source == "default" { 0 } else { bands.len() };
@@ -1662,7 +1752,7 @@ impl<'a> Run<'a> {
 
     /// The coarse DEM box and its tiles for an area search in `band`.
     fn area_box(&self, params: &SearchParams, band: &ScaleBand) -> (MercBox, Vec<TileId>) {
-        let (w, h) = self.size();
+        let (w, h) = self.map_size();
         let (lat, _) = merc_to_latlon(params.center_merc.0, params.center_merc.1);
         let b = required_dem_box_capped(params, w, h, band.max_box_half_m(lat));
         (b, tiles_covering(band.zoom, &b))
@@ -1676,7 +1766,7 @@ impl<'a> Run<'a> {
         (zoom, coarse_box): (u8, &MercBox),
         tiles_present: usize,
     ) -> Step<Arc<Vec<Candidate>>> {
-        let (w, h) = self.size();
+        let (w, h) = self.map_size();
         let skey = SearchKey {
             contour: key,
             center: [params.center_merc.0.round() as i64, params.center_merc.1.round() as i64],
@@ -1697,6 +1787,7 @@ impl<'a> Run<'a> {
         let s = self.s;
         let cands =
             coarse_search(&prod.field, &dem, w, h, params, &|| s.cancelled(), &|f| s.bump_progress(0.35 + 0.45 * f));
+        let cands: Vec<Candidate> = cands.into_iter().map(|c| self.cand_to_page(c)).collect();
         self.time("coarse_search", t);
         // A cancelled search returns partial results: never cache them.
         self.check_cancel()?;
@@ -1734,7 +1825,8 @@ impl<'a> Run<'a> {
         // disc, or by the default scale range after a scale bar's): its
         // start next to one refined before converges to the same fit.
         if !evaluate_only {
-            let (w, h) = self.size();
+            let (w, h) = self.map_size();
+            let tm = self.to_map(t);
             let again = lock(&self.s.refinements)
                 .iter()
                 .find(|(k, _)| {
@@ -1742,7 +1834,7 @@ impl<'a> Run<'a> {
                         && k.zoom == zoom
                         && k.dem_valid == rkey.dem_valid
                         && !k.evaluate_only
-                        && starts_agree(&affine_from_bits(&k.transform), t, w, h)
+                        && starts_agree(&self.to_map(&affine_from_bits(&k.transform)), &tm, w, h)
                 })
                 .map(|(_, r)| r.clone());
             if let Some(r) = again {
@@ -1755,7 +1847,12 @@ impl<'a> Run<'a> {
         let r = if evaluate_only {
             evaluate_prepared(&prod.samples, &prep, t)
         } else {
-            refine_prepared_with(&prod.samples, &prep, t, &RefineOptions { photo: key.photo })
+            let opts = RefineOptions {
+                photo: key.photo,
+                map_rect: Some(self.map_rect().bounds()),
+                web_mercator: says_web_mercator(&self.req.ocr),
+            };
+            refine_prepared_with(&prod.samples, &prep, t, &opts)
         };
         self.time(if evaluate_only { "verify" } else { "refine" }, tm);
         lock(&self.s.refinements).insert(rkey, r.clone());
@@ -1784,9 +1881,8 @@ impl<'a> Run<'a> {
         key: ContourKey,
         cands: &[Candidate],
     ) -> Step<Vec<Refined>> {
-        let (w, h) = self.size();
         let plans: Vec<(Candidate, FinePlan)> =
-            cands.iter().filter_map(|c| fine_plan(&c.transform, w, h).map(|p| (c.clone(), p))).collect();
+            cands.iter().filter_map(|c| self.fine_plan(&c.transform).map(|p| (c.clone(), p))).collect();
         let mut tiles: Vec<TileId> = plans.iter().flat_map(|(_, p)| p.tiles.iter().copied()).collect();
         tiles.sort();
         tiles.dedup();
@@ -1817,7 +1913,7 @@ impl<'a> Run<'a> {
         // 1. A labels-only fit: refine it directly (no GPS or search needed).
         if let Some((t, plan, rms)) = init
             .filter(|g| g.transform.is_affine())
-            .and_then(|g| fine_plan(&g.transform.to_affine(), w, h).map(|p| (g.transform.to_affine(), p, g.rms_m)))
+            .and_then(|g| self.fine_plan(&g.transform.to_affine()).map(|p| (g.transform.to_affine(), p, g.rms_m)))
         {
             // Refined again on every call: kept from the wide search's releases.
             self.kept.extend(plan.tiles.iter().copied());
@@ -1828,7 +1924,8 @@ impl<'a> Run<'a> {
             }
             if let Some((r, zoom)) = self.refine_one(&prod, key, &plan, &t, false) {
                 let fit = fit_confidence(&r);
-                let agree = transforms_agree(&t, &r.transform, w, h, rms);
+                let (mw, mh) = self.map_size();
+                let agree = transforms_agree(&self.to_map(&t), &self.to_map(&r.transform), mw, mh, rms);
                 let conf = if agree { fit } else { 0.5 * fit };
                 self.diag.insert(
                     "labels_refine".into(),
@@ -1974,7 +2071,6 @@ impl<'a> Run<'a> {
     /// Plan the hint areas (request hints and the map's coordinate labels,
     /// those within the radius of the fix) and the progress counters.
     fn plan_search(&mut self, init: Option<&GridResult>) {
-        let (w, h) = self.size();
         let mut hints: Vec<SearchHint> = self.req.hints.clone();
         // Coordinate labels the grid fit could not use.
         if init.is_none() && !self.req.ocr.is_empty() {
@@ -1993,14 +2089,28 @@ impl<'a> Run<'a> {
             // around the offset at 50 m/px would reach far past 50 km).
             let (scale, source) = self.scale_range_source(lat, None);
             let scale = if source == "default" { (scale.0, scale.1.min(FINE_MAX_SCALE)) } else { scale };
-            let labels = label_hints(&self.req.ocr, w, h, scale);
+            // Offsets to the map's centre (the centre the search places).
+            let r = self.map_rect();
+            let (w, h) = (r.w(), r.h());
+            let ocr: Vec<OcrObservation> = self
+                .req
+                .ocr
+                .iter()
+                .map(|o| {
+                    let mut o = o.clone();
+                    o.bbox[0] -= r.x0 as f64;
+                    o.bbox[1] -= r.y0 as f64;
+                    o
+                })
+                .collect();
+            let labels = label_hints(&ocr, w, h, scale);
             if !labels.is_empty() {
                 self.diag.insert("label_hints".into(), serde_json::to_value(&labels).unwrap_or(Value::Null));
             }
             hints.extend(labels);
             // Labels of one axis only: a band the wide search tries first.
             if self.gps.is_some() {
-                self.band = label_band(&self.req.ocr, w, h, scale, lat);
+                self.band = label_band(&ocr, w, h, scale, lat);
                 if let Some(b) = &self.band {
                     self.diag.insert("label_band".into(), serde_json::to_value(b).unwrap_or(Value::Null));
                 }
@@ -2113,7 +2223,6 @@ impl<'a> Run<'a> {
         labelled: Option<&Refined>,
         band: &ScaleBand,
     ) -> Step<AreaResult> {
-        let (w, h) = self.size();
         let key = self.contour_key();
         let stage = match area {
             Area::Hint(_) => "hint",
@@ -2154,7 +2263,7 @@ impl<'a> Run<'a> {
         let cdiag: Vec<Value> = cands
             .iter()
             .map(|c| {
-                let (mx, my) = c.center_merc(w, h);
+                let (mx, my) = self.map_centre(&c.transform);
                 let (lat, lon) = merc_to_latlon(mx, my);
                 let km = ground_distance_m(centre, LatLon::new(lat, lon)) / 1000.0;
                 json!({
@@ -2373,16 +2482,22 @@ impl<'a> Run<'a> {
     ) -> GeorefResponse {
         let (w, h) = self.size();
         let zoom = dem.0;
-        let t = r.homography.unwrap_or_else(|| r.transform.to_homography());
+        // A large map's conformal fit: its best homography and the rest as a warp.
+        let (t, conformal) = match r.conformal.and_then(|c| Warp::from_model(w, h, |x, y| c.apply(x, y))) {
+            Some((t, wp)) => (t, Some(wp)),
+            None => (r.homography.unwrap_or_else(|| r.transform.to_homography()), None),
+        };
         let (_, cy) = t.apply(w as f64 / 2.0, h as f64 / 2.0);
         let (lat, _) = merc_to_latlon(0.0, cy);
         let mut rms = contour_rms(r, zoom, lat);
         // Paper that does not lie flat: a warp from the contours.
         let warp = if self.req.photo { self.photo_warp(&t, None, Some((prod, dem.0, dem.1))) } else { None };
-        let warp = warp.and_then(|f| {
-            let warped = RefineResult { median_seg_std_m: f.diag.median_seg_std_m?, ..r.clone() };
-            f.warp.inspect(|_| rms = contour_rms(&warped, zoom, lat))
-        });
+        let warp = warp
+            .and_then(|f| {
+                let warped = RefineResult { median_seg_std_m: f.diag.median_seg_std_m?, ..r.clone() };
+                f.warp.inspect(|_| rms = contour_rms(&warped, zoom, lat))
+            })
+            .or(conformal);
         self.diag.insert(
             "refined".into(),
             json!({
@@ -2400,6 +2515,11 @@ impl<'a> Run<'a> {
                 "n_samples": r.n_samples,
                 "affine": r.affine,
                 "projective": r.homography.is_some(),
+                "conformal": r.conformal.map(|c| json!({
+                    "c2_m": round_dp(c.c2[0].hypot(c.c2[1]), 1),
+                    "c3_m": round_dp(c.c3[0].hypot(c.c3[1]), 1),
+                    "meridian": round_dp(c.meridian, 2),
+                })),
                 "iterations": r.iterations,
                 "converged": r.converged,
                 "dem_zoom": zoom,
@@ -2590,6 +2710,15 @@ pub fn line_organisation(s: &ContourSamples, w: usize, h: usize) -> LineOrganisa
         parallel: parallel as f64 / with_nb.max(1) as f64,
         queries,
     }
+}
+
+/// Does the map say it is drawn in Web Mercator? Web maps print it on their
+/// exports ("Web Mercator | EPSG: 3857" on Gaia GPS pages, "Pseudo-Mercator").
+fn says_web_mercator(ocr: &[OcrObservation]) -> bool {
+    ocr.iter().any(|o| {
+        let t: String = o.text.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+        t.contains("webmercator") || t.contains("pseudomercator") || t.contains("epsg3857") || t.contains("epsg900913")
+    })
 }
 
 /// Candidate standing for a labels-only fit in `select_refined`.
@@ -2783,6 +2912,17 @@ mod tests {
         assert_eq!(v["need_tiles"][0]["x"], 1179);
         assert!(v["confidence"].is_null());
         assert!(v["pixel_to_mercator"].is_null());
+    }
+
+    #[test]
+    fn printed_web_mercator_notes() {
+        let ob = |t: &str| OcrObservation { text: t.into(), bbox: [0.0, 0.0, 10.0, 10.0], confidence: 0.9 };
+        for t in ["Web Mercator | EPSG: 3857", "Web Mercator|EPSG:3857", "WGS 84 / Pseudo-Mercator", "EPSG 3857"] {
+            assert!(says_web_mercator(&[ob("Grysbok Bush"), ob(t)]), "{t}");
+        }
+        for t in ["UTM Zone 33N", "Transverse Mercator", "Mercator", "3857 m", "EPSG:32633"] {
+            assert!(!says_web_mercator(&[ob(t)]), "{t}");
+        }
     }
 
     #[test]

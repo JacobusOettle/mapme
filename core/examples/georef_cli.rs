@@ -4,7 +4,7 @@
 //! cargo run --release --example georef_cli -- <image.jpg|png> [--gps lat,lon] [--ocr ocr.json]
 //!     [--dem-dir dir] [--dpi N] [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b]
 //!     [--rotate] [--verify] [--photo] [--hint lat,lon[,radius_m][,name]]... [--max-tiles N]
-//!     [--dump-mask out.png] [--missing-out tiles.txt] [--fit-check a,b,c,d,e,f]
+//!     [--dump-mask out.png] [--missing-out tiles.txt] [--fit-check a,b,c,d,e,f] [--map-area]
 //! cargo run --release --example georef_cli -- --estimate '{"radius_m": 500000, "gps": {...}}'
 //! ```
 //!
@@ -16,10 +16,13 @@
 //!
 //! `--dump-mask` writes the contour extraction of the request as a grey PNG of
 //! the image's size: 255 at the skeleton samples the session matches (computed
-//! by `ContourProducts::compute_with`, as the session does), 128 elsewhere on
+//! by `ContourProducts::compute_in` on the map's rectangle, as the session does), 128 elsewhere on
 //! the colour mask (the same choice of model, recomputed here), 0 off it.
 //! `--missing-out` appends every tile the core asked for that is not in
 //! `--dem-dir` (`z x y` per line) to a file, so a benchmark can fetch them.
+//!
+//! `--map-area` prints the map's content area on the image (`content::map_content`:
+//! the rectangle the contour path works on) and exits.
 //!
 //! `--fit-check a,b,c,d,e,f` (a pixel → Mercator affine, e.g. a case's
 //! truth) georeferences nothing: it prints the fit of that transform to the
@@ -30,6 +33,7 @@
 //! `--estimate JSON` prints `mm_search_estimate` of that request (no image).
 //! Each round's stage times (`timings_ms`) are logged after its line.
 
+use mapme_core::content::{map_content, MapRect};
 use mapme_core::contour::normalize_illumination;
 use mapme_core::contour_lines::contour_mask;
 use mapme_core::dem::{tiles_covering, DemStore, TileId};
@@ -50,7 +54,7 @@ use std::time::Instant;
 const USAGE: &str = "usage: georef_cli <image.jpg|png> [--gps lat,lon] [--ocr ocr.json] [--dem-dir dir] [--dpi N] \
                      [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b] [--rotate] [--verify] [--photo] \
                      [--hint lat,lon[,radius_m][,name]]... [--max-tiles N] [--dump-mask out.png] [--missing-out tiles.txt] \
-                     [--fit-check a,b,c,d,e,f] | --estimate JSON";
+                     [--fit-check a,b,c,d,e,f] [--map-area] | --estimate JSON";
 
 /// Most `need_dem` rounds before giving up (a 2 000 km wide search takes ~100).
 const MAX_ROUNDS: usize = 300;
@@ -86,6 +90,7 @@ fn run() -> Result<bool, String> {
     let mut image: Option<PathBuf> = None;
     let mut dem_dir: Option<PathBuf> = None;
     let mut dump_mask: Option<PathBuf> = None;
+    let mut map_area = false;
     let mut missing_out: Option<PathBuf> = None;
     let mut fit_check: Option<Vec<f64>> = None;
     let mut req = GeorefRequest::default();
@@ -136,6 +141,7 @@ fn run() -> Result<bool, String> {
                 req.max_tiles_per_round = value("--max-tiles")?.parse().map_err(|e| format!("--max-tiles: {e}"))?
             }
             "--dump-mask" => dump_mask = Some(PathBuf::from(value("--dump-mask")?)),
+            "--map-area" => map_area = true,
             "--missing-out" => missing_out = Some(PathBuf::from(value("--missing-out")?)),
             "--fit-check" => fit_check = Some(numbers(&value("--fit-check")?, 6, "--fit-check")?),
             "--estimate" => {
@@ -160,6 +166,13 @@ fn run() -> Result<bool, String> {
     let t = Instant::now();
     let img = load_image(&image)?;
     eprintln!("loaded {} ({}x{}) in {:.0} ms", image.display(), img.w, img.h, t.elapsed().as_secs_f64() * 1e3);
+    if map_area {
+        let t = Instant::now();
+        let c = map_content(&img);
+        println!("{}", serde_json::to_string(&c).map_err(|e| e.to_string())?);
+        eprintln!("map content area in {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+        return Ok(true);
+    }
     if let Some(path) = &dump_mask {
         dump_contours(&img, &req, path)?;
     }
@@ -235,7 +248,8 @@ fn run() -> Result<bool, String> {
 fn check_fit(img: &Rgb8, req: &GeorefRequest, dem_dir: Option<&Path>, t: &Affine) -> Result<bool, String> {
     let dir = dem_dir.ok_or("--fit-check needs --dem-dir")?;
     let src = if req.photo { normalize_illumination(img) } else { img.clone() };
-    let prod = ContourProducts::compute_with(&src, req.contour_rgb, req.photo);
+    let rect = map_rect(&src, req.photo);
+    let prod = ContourProducts::compute_in(&src, req.contour_rgb, req.photo, rect);
     let (w, h) = (img.w, img.h);
     let bbox = refine_dem_box(t, w, h);
     let mut zoom = 13u8;
@@ -295,7 +309,7 @@ fn check_fit(img: &Rgb8, req: &GeorefRequest, dem_dir: Option<&Path>, t: &Affine
         );
     };
     show("given", &evaluate_prepared(&prod.samples, &prep, t));
-    let opts = RefineOptions { photo: req.photo };
+    let opts = RefineOptions { photo: req.photo, ..Default::default() };
     for (dx, dy) in [(0.0, 0.0), (300.0, 0.0), (0.0, -1000.0), (2000.0, 2000.0)] {
         let k = 1.0 / cos;
         let start = Affine { c: t.c + dx * k, f: t.f + dy * k, ..*t };
@@ -319,20 +333,35 @@ fn write_missing(path: &Path, tiles: &[TileId]) -> Result<(), String> {
     Ok(())
 }
 
+/// The map's rectangle of the raster, as the session finds it (photos: the whole raster).
+fn map_rect(img: &Rgb8, photo: bool) -> MapRect {
+    if photo {
+        MapRect::whole(img.w, img.h)
+    } else {
+        map_content(img).rect
+    }
+}
+
 /// The contour extraction of `req` on `img` as a grey PNG: 255 at the skeleton samples the
 /// session matches, 128 elsewhere on the colour mask, 0 off it.
 fn dump_contours(img: &Rgb8, req: &GeorefRequest, path: &Path) -> Result<(), String> {
     let t = Instant::now();
     let src = if req.photo { normalize_illumination(img) } else { img.clone() };
-    let (min_len, _) = default_sampling(src.w, src.h);
-    let lm = contour_mask(&src, req.contour_rgb, req.photo, min_len);
-    let prod = ContourProducts::compute_with(&src, req.contour_rgb, req.photo);
+    // The session works on the map's rectangle of the raster (`content.rs`).
+    let rect = map_rect(&src, req.photo);
+    let map = rect.crop(&src);
+    let (min_len, _) = default_sampling(map.w, map.h);
+    let lm = contour_mask(&map, req.contour_rgb, req.photo, min_len);
+    let prod = ContourProducts::compute_in(&src, req.contour_rgb, req.photo, rect);
     // The mask at its analysis level, each pixel over the base pixels it covers.
     let f = lm.level.max(1);
     let mut px = vec![0u8; img.w * img.h];
     for (y, row) in px.chunks_exact_mut(img.w).enumerate() {
         for (x, o) in row.iter_mut().enumerate() {
-            let (mx, my) = (x / f, y / f);
+            if x < rect.x0 || y < rect.y0 {
+                continue;
+            }
+            let (mx, my) = ((x - rect.x0) / f, (y - rect.y0) / f);
             if mx < lm.mask.w && my < lm.mask.h && lm.mask.get(mx, my) {
                 *o = 128;
             }

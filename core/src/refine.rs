@@ -32,6 +32,9 @@ pub struct RefineResult {
     /// The full projective transform when the photo-mode projective stage
     /// was kept (`RefineOptions::photo`), else None.
     pub homography: Option<Homography>,
+    /// The full model when the conformal stage of a large map was kept
+    /// (`ConformalFit`: `transform` plus a conformal polynomial), else None.
+    pub conformal: Option<ConformalFit>,
     /// Robust mean absolute within-segment elevation residual (metres):
     /// mean of min(|r|, `RESIDUAL_CLIP_M`).
     pub cost_m: f64,
@@ -97,6 +100,37 @@ const REGIONAL_SPAN_M: f64 = 40_000.0;
 /// stay this small (the denominator over the samples' extent).
 const REGIONAL_MIN_GAIN: f64 = 0.01;
 const REGIONAL_MAX_PERSPECTIVE: f64 = 0.02;
+/// Such a map also gets its projection's bend (`ConformalStage`): UTM,
+/// national transverse Mercator grids, Lambert conformal conics and Web
+/// Mercator are all conformal, so a sheet in one is a conformal image of Web
+/// Mercator, an analytic function of the complex pixel position whose
+/// quadratic term is the Mercator scale sec(lat) growing by tan(lat) / R per
+/// metre north while the sheet's stays (`ConformalFit`, `tm_bend`). A
+/// homography matches only part of it (on the 1:100 000–1:250 000 benchmark
+/// sheets the best homography of the truth is 6–53 m off, median; the bend
+/// 0.1–0.8 m). The bend is predicted, not fitted: on these sheets a fitted
+/// quadratic lands tens of metres from the truth's (the contours of a
+/// generalised sheet on 76–153 m DEM cells cannot place it), the predicted
+/// one within a few metres. It is applied when the samples span this share
+/// of the map along both axes (2nd–98th percentile)…
+const CONFORMAL_MIN_COVER: f64 = 0.6;
+/// …its coefficients stay within `CONFORMAL_BOUND` times what a conformal
+/// projection can bend the map (`conformal_bounds`, plus `CONFORMAL_SLACK_M`;
+/// a check on the prediction)…
+const CONFORMAL_BOUND: f64 = 1.5;
+const CONFORMAL_SLACK_M: f64 = 2.0;
+/// …its cost is at most this much above the affine's (Web Mercator exports:
+/// 17–23 % above)…
+const CONFORMAL_PRECHECK: f64 = 0.03;
+/// …and contour segments it was not fitted to agree with it at least as well
+/// as with the affine and the projective fits: in spatial K-fold cross
+/// validation (`conformal_cv`) its held-out cost, taken this much lower (a
+/// prior: the bend is what a regional projection must do, not a fitted
+/// shape), is the lowest.
+const CONFORMAL_PRIOR: f64 = 0.01;
+/// Cross validation: at most this many samples, LM iterations per fold.
+const CONFORMAL_CV_SAMPLES: usize = 20_000;
+const CONFORMAL_CV_ITERATIONS: usize = 10;
 /// Photo mode: a flattened photo's aspect ratio is a guess (a document
 /// scanner sizes the output from the quad's edge lengths, ~10 % off at a 15°
 /// camera tilt), so the affine may be this anisotropic…
@@ -224,6 +258,9 @@ enum Model {
     /// merc = rm + (a·u + b·v + c, d·u + e·v + f) / (1 + g·u + h·v),
     /// parameters [a, b, c, d, e, f, g, h].
     Projective,
+    /// `Affine` plus a given conformal polynomial (`ConformalFit`,
+    /// `Params::poly`): [a, b, d, e, tx, ty] fitted.
+    Conformal,
 }
 
 /// Most parameters of any model.
@@ -235,8 +272,49 @@ impl Model {
             Model::Similarity => 4,
             Model::Affine => 6,
             Model::Projective => 8,
+            Model::Conformal => 6,
         }
     }
+}
+
+/// A large map's fit (`RefineResult::conformal`): the affine `affine` plus a
+/// conformal polynomial of the complex pixel position about the samples'
+/// centroid, w = ((x − cx) − i·(y − cy)) / sn (image y runs down, Mercator
+/// y up): merc = affine(x, y) + (Re, Im)(c₂·w² + c₃·w³), Mercator metres.
+/// Its derivative at the centroid is the affine's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConformalFit {
+    pub affine: Affine,
+    pub cx: f64,
+    pub cy: f64,
+    pub sn: f64,
+    pub c2: [f64; 2],
+    pub c3: [f64; 2],
+    /// The central meridian (degrees) of the transverse Mercator sheet
+    /// whose bend this is (`ConformalStage`).
+    pub meridian: f64,
+}
+
+impl ConformalFit {
+    /// The polynomial part (Mercator metres).
+    pub fn offset(&self, x: f64, y: f64) -> (f64, f64) {
+        poly_offset(self.c2, self.c3, (x - self.cx) / self.sn, (self.cy - y) / self.sn)
+    }
+
+    /// The full model: pixel → Mercator.
+    pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+        let (mx, my) = self.affine.apply(x, y);
+        let (dx, dy) = self.offset(x, y);
+        (mx + dx, my + dy)
+    }
+}
+
+/// (Re, Im) of c₂·w² + c₃·w³ for w = u + i·v.
+#[inline]
+fn poly_offset(c2: [f64; 2], c3: [f64; 2], u: f64, v: f64) -> (f64, f64) {
+    let (w2r, w2i) = (u * u - v * v, 2.0 * u * v);
+    let (w3r, w3i) = (w2r * u - w2i * v, w2r * v + w2i * u);
+    (c2[0] * w2r - c2[1] * w2i + c3[0] * w3r - c3[1] * w3i, c2[0] * w2i + c2[1] * w2r + c3[0] * w3i + c3[1] * w3r)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -248,6 +326,8 @@ struct Params {
     /// Pixel normalisation length and Mercator reference of `Projective`.
     sn: f64,
     rm: (f64, f64),
+    /// `Conformal`: the given polynomial [c₂ re, c₂ im, c₃ re, c₃ im].
+    poly: [f64; 4],
 }
 
 impl Params {
@@ -261,10 +341,46 @@ impl Params {
                 let ss = -0.5 * (t.b + t.d);
                 [(sc * sc + ss * ss).sqrt().max(1e-12).ln(), ss.atan2(sc), tx, ty, 0.0, 0.0, 0.0, 0.0]
             }
-            Model::Affine => [t.a, t.b, t.d, t.e, tx, ty, 0.0, 0.0],
+            Model::Affine | Model::Conformal => [t.a, t.b, t.d, t.e, tx, ty, 0.0, 0.0],
             Model::Projective => [t.a * sn, t.b * sn, 0.0, t.d * sn, t.e * sn, 0.0, 0.0, 0.0],
         };
-        Params { model, p, cx, cy, sn, rm: (tx, ty) }
+        Params { model, p, cx, cy, sn, rm: (tx, ty), poly: [0.0; 4] }
+    }
+
+    /// Conformal parameters of a `ConformalFit` (about its own centroid).
+    fn from_conformal(c: &ConformalFit) -> Params {
+        let (tx, ty) = c.affine.apply(c.cx, c.cy);
+        let t = &c.affine;
+        Params {
+            model: Model::Conformal,
+            p: [t.a, t.b, t.d, t.e, tx, ty, 0.0, 0.0],
+            cx: c.cx,
+            cy: c.cy,
+            sn: c.sn,
+            rm: (tx, ty),
+            poly: [c.c2[0], c.c2[1], c.c3[0], c.c3[1]],
+        }
+    }
+
+    fn to_conformal(self) -> ConformalFit {
+        ConformalFit {
+            affine: self.to_affine(),
+            cx: self.cx,
+            cy: self.cy,
+            sn: self.sn,
+            c2: [self.poly[0], self.poly[1]],
+            c3: [self.poly[2], self.poly[3]],
+            meridian: f64::NAN,
+        }
+    }
+
+    /// Conformal mapping: the affine part plus the polynomial.
+    #[inline]
+    fn conformal(&self, t: &Affine, x: f64, y: f64) -> (f64, f64) {
+        let (mx, my) = t.apply(x, y);
+        let (u, v) = ((x - self.cx) / self.sn, (self.cy - y) / self.sn);
+        let (dx, dy) = poly_offset([self.poly[0], self.poly[1]], [self.poly[2], self.poly[3]], u, v);
+        (mx + dx, my + dy)
     }
 
     /// Affine parameters stretched by `1 + k` along image x and `1 − k`
@@ -297,7 +413,7 @@ impl Params {
             m[6] * sn,
             m[7] * sn,
         ];
-        Some(Params { model: Model::Projective, p, cx, cy, sn, rm })
+        Some(Params { model: Model::Projective, p, cx, cy, sn, rm, poly: [0.0; 4] })
     }
 
     /// Projective mapping: (Mercator x, y, denominator q).
@@ -314,7 +430,7 @@ impl Params {
             Model::Similarity => {
                 Affine::pixel_to_merc_similarity(self.p[0].exp(), self.p[1], self.cx, self.cy, self.p[2], self.p[3])
             }
-            Model::Affine => {
+            Model::Affine | Model::Conformal => {
                 let [a, b, d, e, tx, ty, _, _] = self.p;
                 Affine { a, b, c: tx - a * self.cx - b * self.cy, d, e, f: ty - d * self.cx - e * self.cy }
             }
@@ -346,6 +462,7 @@ impl Params {
 enum Fit {
     Affine(Affine),
     Projective(Homography),
+    Conformal(ConformalFit),
 }
 
 impl Fit {
@@ -353,6 +470,7 @@ impl Fit {
         match self {
             Fit::Affine(t) => t.apply(x, y),
             Fit::Projective(h) => h.apply(x, y),
+            Fit::Conformal(c) => c.apply(x, y),
         }
     }
 }
@@ -381,15 +499,16 @@ struct Eval {
 /// Elevation, gradient and Mercator position of every sample (NaN = off DEM).
 fn sample_all(d: &Data, dem: &DemMosaic, par: &Params) -> Vec<[f64; 5]> {
     let t = par.to_affine();
-    let projective = par.model == Model::Projective;
     (0..d.xs.len())
         .into_par_iter()
         .map(|i| {
-            let (mx, my) = if projective {
-                let (mx, my, _) = par.project(d.xs[i], d.ys[i]);
-                (mx, my)
-            } else {
-                t.apply(d.xs[i], d.ys[i])
+            let (mx, my) = match par.model {
+                Model::Projective => {
+                    let (mx, my, _) = par.project(d.xs[i], d.ys[i]);
+                    (mx, my)
+                }
+                Model::Conformal => par.conformal(&t, d.xs[i], d.ys[i]),
+                _ => t.apply(d.xs[i], d.ys[i]),
             };
             match dem.sample_with_grad(mx, my) {
                 Some((h, gx, gy)) => [h as f64, gx as f64, gy as f64, mx, my],
@@ -456,7 +575,8 @@ fn evaluate_params(d: &Data, dem: &DemMosaic, par: &Params, c: f64, jac: bool) -
                     let (dx, dy) = (mx - p[2], my - p[3]);
                     [gx * dx + gy * dy, gx * dy - gy * dx, gx, gy, 0.0, 0.0, 0.0, 0.0]
                 }
-                Model::Affine => {
+                // The polynomial is given: the affine's derivatives.
+                Model::Affine | Model::Conformal => {
                     let (x, y) = (d.xs[i] - par.cx, d.ys[i] - par.cy);
                     [gx * x, gx * y, gy * x, gy * y, gx, gy, 0.0, 0.0]
                 }
@@ -574,6 +694,17 @@ impl Data {
         Data { xs, ys, seg, n_segs: self.n_segs, cx: self.cx, cy: self.cy, sn: self.sn }
     }
 
+    /// The samples `keep` takes (same centroid and segment ids).
+    fn select(&self, keep: impl Fn(usize) -> bool) -> Data {
+        let (mut xs, mut ys, mut seg) = (Vec::new(), Vec::new(), Vec::new());
+        for i in (0..self.xs.len()).filter(|&i| keep(i)) {
+            xs.push(self.xs[i]);
+            ys.push(self.ys[i]);
+            seg.push(self.seg[i]);
+        }
+        Data { xs, ys, seg, n_segs: self.n_segs, cx: self.cx, cy: self.cy, sn: self.sn }
+    }
+
     fn subset(&self, stride: usize) -> Data {
         let idx = (0..self.xs.len()).step_by(stride.max(1));
         let (mut xs, mut ys, mut seg) = (Vec::new(), Vec::new(), Vec::new());
@@ -634,7 +765,9 @@ fn lm(
             // Step size in Mercator metres at the map extent.
             let step_m = match par.model {
                 Model::Similarity => delta[2].hypot(delta[3]) + 3000.0 * (delta[0].abs() + delta[1].abs()),
-                Model::Affine => delta[4].hypot(delta[5]) + 1500.0 * delta[..4].iter().map(|v| v.abs()).sum::<f64>(),
+                Model::Affine | Model::Conformal => {
+                    delta[4].hypot(delta[5]) + 1500.0 * delta[..4].iter().map(|v| v.abs()).sum::<f64>()
+                }
                 Model::Projective => {
                     let extent = 0.5 * (par.p[0].abs() + par.p[4].abs());
                     delta[2].hypot(delta[5])
@@ -661,12 +794,19 @@ fn lm(
 }
 
 /// Options of `refine_prepared_with`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RefineOptions {
     /// The image is a photo of a paper map flattened by its page borders:
     /// residual perspective and aspect errors are expected, so the affine
     /// stage may be strongly anisotropic and a projective stage follows.
     pub photo: bool,
+    /// The map's extent in pixels [x0, y0, x1, y1] (the image, or the map
+    /// content on a page): the conformal stage needs samples across most of
+    /// it (`CONFORMAL_MIN_COVER`). None: the samples' own extent.
+    pub map_rect: Option<[f64; 4]>,
+    /// The map says it is drawn in Web Mercator ("EPSG:3857" printed on a
+    /// web map's export): it has no projection bend.
+    pub web_mercator: bool,
 }
 
 /// Levenberg–Marquardt on similarity then affine parameters, starting at `init`.
@@ -770,18 +910,36 @@ pub fn refine_prepared_with(
         converged = aff_conv;
         best_cost = aff_cost;
     }
-    // A large map: a little perspective for its projection.
+    // A large map: a little perspective, or its projection's curvature.
     let (_, my) = out.apply(full.cx, full.cy);
-    let span_m = 2.0 * full.sn * out.mean_scale() * crate::geo::merc_to_latlon(0.0, my).0.to_radians().cos();
+    let lat = crate::geo::merc_to_latlon(0.0, my).0;
+    let span_m = 2.0 * full.sn * out.mean_scale() * lat.to_radians().cos();
+    let mut fit = (Fit::Affine(out), best_cost, converged, is_affine);
     if span_m > REGIONAL_SPAN_M {
         let start = Params::from_affine(&out, Model::Projective, &full);
         let (proj, proj_cost, it, proj_conv) = lm(&fine_data, fine, start, LOSS_SCALE_M, 25, bounds);
         iterations += it;
         if proj_cost < best_cost * (1.0 - REGIONAL_MIN_GAIN) && plausible_regional(&proj, &out) {
-            return metrics(&full, dem, &Fit::Projective(proj.to_homography()), iterations, proj_conv, true);
+            fit = (Fit::Projective(proj.to_homography()), proj_cost, proj_conv, true);
+        }
+        if !opts.web_mercator && samples_cover(&full, opts.map_rect, CONFORMAL_MIN_COVER) {
+            let stage = ConformalStage {
+                full: &full,
+                fine_data: &fine_data,
+                prepared: dem,
+                dem: fine,
+                bounds,
+                map_rect: opts.map_rect,
+            };
+            let kept = matches!(fit.0, Fit::Projective(_)).then_some(&proj);
+            let (found, it) = stage.run(&out, best_cost, kept);
+            iterations += it;
+            if let Some((c, cost, conv)) = found {
+                fit = (Fit::Conformal(c), cost, conv, true);
+            }
         }
     }
-    metrics(&full, dem, &Fit::Affine(out), iterations, converged, is_affine)
+    metrics(&full, dem, &fit.0, iterations, fit.2, fit.3)
 }
 
 /// A regional projection's perspective: tiny terms, the local affine part
@@ -796,6 +954,261 @@ fn plausible_regional(p: &Params, t: &Affine) -> bool {
         && local.det() * t.det() > 0.0
         && anisotropy(&local) < AFFINE_MAX_ANISOTROPY
         && (local.mean_scale() / t.mean_scale()).ln().abs() < 0.05
+}
+
+/// Do the samples span `cover` of `rect` along both axes, from their 2nd to
+/// their 98th percentile? (Without a rect: any 100 samples.)
+fn samples_cover(d: &Data, rect: Option<[f64; 4]>, cover: f64) -> bool {
+    if d.xs.len() < 100 {
+        return false;
+    }
+    let Some([x0, y0, x1, y1]) = rect else { return true };
+    let spread = |v: &[f64]| {
+        let mut v = v.to_vec();
+        let n = v.len();
+        let lo = *v.select_nth_unstable_by(n / 50, f64::total_cmp).1;
+        let hi = *v.select_nth_unstable_by(n - 1 - n / 50, f64::total_cmp).1;
+        hi - lo
+    };
+    spread(&d.xs) >= cover * (x1 - x0) && spread(&d.ys) >= cover * (y1 - y0)
+}
+
+/// Complex product.
+#[inline]
+fn cmul(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
+    [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]]
+}
+
+/// The complex derivative of `t`'s conformal part with respect to w =
+/// ((x − cx) − i·(y − cy)) / sn: Mercator metres per unit of w.
+fn complex_scale(t: &Affine, sn: f64) -> [f64; 2] {
+    [sn * 0.5 * (t.a - t.e), sn * 0.5 * (t.d + t.b)]
+}
+
+/// How a transverse Mercator map (central meridian `lon0`, degrees) bends
+/// against Web Mercator around Mercator point `m0`: with ζ the Mercator
+/// offset from `m0` (complex, metres) of the map's best affine image, the
+/// true place is m0 + ζ + d₂ζ² + d₃ζ³ (fitted over |ζ| ≤ `radius`). The map
+/// is a conformal image of both: the quadratic term is the Mercator scale
+/// sec(lat) growing northward (|d₂| ≈ tan(lat) / (2R·sec(lat))), plus a
+/// little from the meridian being off the map; the cubic is the next order.
+fn tm_bend(m0: (f64, f64), lon0: f64, radius: f64) -> Option<([f64; 2], [f64; 2])> {
+    use crate::geo::{latlon_to_merc, latlon_to_tm, merc_to_latlon, tm_to_latlon};
+    let (lat, lon) = merc_to_latlon(m0.0, m0.1);
+    let to_merc = |e: f64, n: f64| {
+        let ll = tm_to_latlon(e, n, lon0);
+        latlon_to_merc(ll.lat, ll.lon)
+    };
+    let t0 = latlon_to_tm(lat, lon, lon0);
+    let h = 50.0;
+    let (ex0, ex1) = (to_merc(t0.0 - h, t0.1), to_merc(t0.0 + h, t0.1));
+    let (ny0, ny1) = (to_merc(t0.0, t0.1 - h), to_merc(t0.0, t0.1 + h));
+    let j = [
+        [(ex1.0 - ex0.0) / (2.0 * h), (ny1.0 - ny0.0) / (2.0 * h)],
+        [(ex1.1 - ex0.1) / (2.0 * h), (ny1.1 - ny0.1) / (2.0 * h)],
+    ];
+    let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
+    if !(det.is_finite() && det.abs() > 1e-12 && radius.is_finite() && radius > 0.0) {
+        return None;
+    }
+    let ji = [[j[1][1] / det, -j[0][1] / det], [-j[1][0] / det, j[0][0] / det]];
+    // Least squares over a 9 × 9 grid of ζ / radius: D = d₀ + d₁ζ + e₁ζ̄ +
+    // d₂ζ² + d₃ζ³ (d₀, d₁, e₁ only take up the rounding of the derivative).
+    let mut ata = vec![vec![0.0f64; 11]; 10];
+    for k in 0..81 {
+        let z = [(k % 9) as f64 / 4.0 - 1.0, (k / 9) as f64 / 4.0 - 1.0];
+        let (dx, dy) = (z[0] * radius, z[1] * radius);
+        let (te, tn) = (t0.0 + ji[0][0] * dx + ji[0][1] * dy, t0.1 + ji[1][0] * dx + ji[1][1] * dy);
+        let (mx, my) = to_merc(te, tn);
+        let (rx, ry) = (mx - (m0.0 + dx), my - (m0.1 + dy));
+        let z2 = cmul(z, z);
+        let terms = [[1.0, 0.0], z, [z[0], -z[1]], z2, cmul(z2, z)];
+        // Re and Im of c·t for c = (re, im): columns re → (t.re, t.im), im → (−t.im, t.re).
+        let (mut row_x, mut row_y) = ([0.0f64; 10], [0.0f64; 10]);
+        for (q, t) in terms.iter().enumerate() {
+            row_x[2 * q] = t[0];
+            row_x[2 * q + 1] = -t[1];
+            row_y[2 * q] = t[1];
+            row_y[2 * q + 1] = t[0];
+        }
+        for (row, rhs) in [(row_x, rx), (row_y, ry)] {
+            for a in 0..10 {
+                for b in 0..10 {
+                    ata[a][b] += row[a] * row[b];
+                }
+                ata[a][10] += row[a] * rhs;
+            }
+        }
+    }
+    let sol = crate::geo::solve_dense(&mut ata)?;
+    let (r2, r3) = (radius * radius, radius * radius * radius);
+    let d2 = [sol[6] / r2, sol[7] / r2];
+    let d3 = [sol[8] / r3, sol[9] / r3];
+    d2.iter().chain(&d3).all(|v| v.is_finite()).then_some((d2, d3))
+}
+
+/// Largest |c₂| and |c₃| (Mercator metres at |w| = 1) a conformal map
+/// projection gives a map whose affine part is `t` over `sn` pixels at
+/// latitude `lat` (degrees): the scale ratio to Web Mercator changing by
+/// at most β = (|tan(lat)| + 0.15) / R per ground metre (the Mercator scale
+/// sec(lat) grows by tan(lat) / R per metre north; a UTM zone's edge adds
+/// ~0.05 / R, a Lambert conic or stereographic map a little more), and its
+/// curvature γ ≈ (sec²(lat) + 1) / (2R²): for f(W) = m₀·∫exp(βW + γW²) over
+/// ground metres W = g·w, |g| = s / m₀ (s Mercator metres per unit of w),
+/// c₂ = m₀βg²/2 and c₃ = m₀(β²/2 + γ)g³/3.
+fn conformal_bounds(t: &Affine, sn: f64, lat: f64) -> (f64, f64) {
+    let r = crate::geo::EARTH_RADIUS;
+    let phi = lat.to_radians().clamp(-1.5, 1.5);
+    let m0 = 1.0 / phi.cos();
+    let s = t.mean_scale() * sn;
+    let beta = (phi.tan().abs() + 0.15) / r;
+    let gamma = (m0 * m0 + 1.0) / (2.0 * r * r);
+    let c2 = beta * s * s / (2.0 * m0);
+    let c3 = (beta * beta / 2.0 + gamma) * s.powi(3) / (3.0 * m0 * m0);
+    (CONFORMAL_BOUND * c2 + CONFORMAL_SLACK_M, CONFORMAL_BOUND * c3 + CONFORMAL_SLACK_M)
+}
+
+/// A conformal fit within what a projection can bend (`conformal_bounds`),
+/// its affine part near-conformal and at the scale of `t`.
+fn plausible_conformal(p: &Params, t: &Affine, lat: f64) -> bool {
+    let local = p.to_affine();
+    let (b2, b3) = conformal_bounds(t, p.sn, lat);
+    p.p.iter().chain(&p.poly).all(|v| v.is_finite())
+        && p.poly[0].hypot(p.poly[1]) <= b2
+        && p.poly[2].hypot(p.poly[3]) <= b3
+        && local.det() * t.det() > 0.0
+        && anisotropy(&local) < AFFINE_MAX_ANISOTROPY
+        && (local.mean_scale() / t.mean_scale()).ln().abs() < 0.05
+}
+
+/// The conformal stage of a large map (`ConformalFit`).
+struct ConformalStage<'a> {
+    full: &'a Data,
+    fine_data: &'a Data,
+    prepared: &'a PreparedDem,
+    dem: &'a DemMosaic,
+    bounds: (f64, f64),
+    map_rect: Option<[f64; 4]>,
+}
+
+impl ConformalStage<'_> {
+    /// The bend of a transverse Mercator sheet (`tm_bend`: UTM and national
+    /// grids; to first order Lambert conics, oblique Mercator and polar
+    /// stereographic sheets too, whose scale against Web Mercator changes
+    /// about as fast) on the affine fit `out` (cost `aff_cost`), the affine
+    /// refitted under it: the meridian of the map's UTM zone, or the map's
+    /// own when that fits better (a national grid's is near the map). Kept
+    /// when plausible, within `CONFORMAL_PRECHECK` of the affine's cost and
+    /// best in cross validation against the affine and the kept projective
+    /// fit `proj` (`CONFORMAL_PRIOR`; a fit that explains nothing, a wrong
+    /// place, is not cross validated). Returns the fit, its cost and
+    /// convergence, and the LM iterations spent.
+    fn run(&self, out: &Affine, aff_cost: f64, proj: Option<&Params>) -> (Option<(ConformalFit, f64, bool)>, usize) {
+        let d = self.full;
+        let m0 = out.apply(d.cx, d.cy);
+        let (lat, lon) = crate::geo::merc_to_latlon(m0.0, m0.1);
+        let c1 = complex_scale(out, d.sn);
+        // |w| at the map's corners (beyond the samples' extent).
+        let reach = match self.map_rect {
+            Some([x0, y0, x1, y1]) => [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+                .iter()
+                .map(|&(x, y)| (x - d.cx).hypot(y - d.cy) / d.sn)
+                .fold(1.0f64, f64::max),
+            None => 1.0,
+        };
+        let radius = c1[0].hypot(c1[1]) * reach * 1.05;
+        let bend = |lon0: f64| {
+            tm_bend(m0, lon0, radius).map(|(d2, d3)| {
+                let (c2, c3) = (cmul(d2, cmul(c1, c1)), cmul(d3, cmul(c1, cmul(c1, c1))));
+                [c2[0], c2[1], c3[0], c3[1]]
+            })
+        };
+        let zone_meridian = crate::geo::utm_central_meridian(crate::geo::utm_zone_for(lat, lon));
+        let Some(poly) = bend(zone_meridian) else { return (None, 0) };
+        let mut start = Params::from_affine(out, Model::Conformal, d);
+        start.poly = poly;
+        let (mut tm, mut tm_cost, mut iterations, mut tm_conv) =
+            lm(self.fine_data, self.dem, start, LOSS_SCALE_M, 25, self.bounds);
+        let mut meridian = zone_meridian;
+        if (lon - zone_meridian).abs() > 0.5 {
+            if let Some(poly) = bend(lon) {
+                let mut alt = tm;
+                alt.poly = poly;
+                if evaluate_params(self.fine_data, self.dem, &alt, LOSS_SCALE_M, false).cost < tm_cost {
+                    let (p, cost, it, conv) = lm(self.fine_data, self.dem, alt, LOSS_SCALE_M, 25, self.bounds);
+                    iterations += it;
+                    if cost < tm_cost {
+                        (tm, tm_cost, tm_conv, meridian) = (p, cost, conv, lon);
+                    }
+                }
+            }
+        }
+        if !(plausible_conformal(&tm, out, lat) && tm_cost <= aff_cost * (1.0 + CONFORMAL_PRECHECK)) {
+            return (None, iterations);
+        }
+        // A fit that explains nothing (a wrong place) needs no cross validation.
+        let fit = ConformalFit { meridian, ..tm.to_conformal() };
+        if fit_quality(&metrics(d, self.prepared, &Fit::Conformal(fit), 0, false, true)) <= 0.0 {
+            return (None, iterations);
+        }
+        let mut models = vec![Params::from_affine(out, Model::Affine, d)];
+        models.extend(proj.copied());
+        let held = conformal_cv(self.fine_data, self.dem, &models, &tm, self.bounds);
+        let (others, bent) = held.split_at(held.len() - 1);
+        if bent[0] * (1.0 - CONFORMAL_PRIOR) <= others.iter().copied().fold(f64::INFINITY, f64::min) {
+            (Some((fit, tm_cost, tm_conv)), iterations)
+        } else {
+            (None, iterations)
+        }
+    }
+}
+
+/// Spatial K-fold cross validation of `models` and `tm` (each refitted from
+/// itself; `tm` keeps its polynomial): the samples' extent cut into 4 × 4
+/// blocks, every segment in the fold of its centroid's block ((col mod 2) +
+/// 2·(row mod 2): four folds of four blocks spread over the map), each
+/// fold's segments left out of the fit and costed under it. Returns each
+/// model's summed held-out robust cost, `tm`'s last.
+fn conformal_cv(d: &Data, dem: &DemMosaic, models: &[Params], tm: &Params, bounds: (f64, f64)) -> Vec<f64> {
+    let models: Vec<Params> = models.iter().chain(std::iter::once(tm)).copied().collect();
+    let d = if d.xs.len() > CONFORMAL_CV_SAMPLES {
+        d.thin_segments(d.xs.len().div_ceil(CONFORMAL_CV_SAMPLES))
+    } else {
+        d.subset(1)
+    };
+    let mut sum = vec![(0.0f64, 0.0f64, 0usize); d.n_segs];
+    let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for i in 0..d.xs.len() {
+        let s = &mut sum[d.seg[i] as usize];
+        s.0 += d.xs[i];
+        s.1 += d.ys[i];
+        s.2 += 1;
+        x0 = x0.min(d.xs[i]);
+        x1 = x1.max(d.xs[i]);
+        y0 = y0.min(d.ys[i]);
+        y1 = y1.max(d.ys[i]);
+    }
+    let block = |v: f64, lo: f64, hi: f64| (((v - lo) / (hi - lo).max(1e-9) * 4.0).floor() as i64).clamp(0, 3);
+    let fold: Vec<u8> = sum
+        .iter()
+        .map(|&(sx, sy, n)| {
+            let n = n.max(1) as f64;
+            ((block(sx / n, x0, x1) % 2) + 2 * (block(sy / n, y0, y1) % 2)) as u8
+        })
+        .collect();
+    let mut held = vec![0.0f64; models.len()];
+    for k in 0..4u8 {
+        let train = d.select(|i| fold[d.seg[i] as usize] != k);
+        let test = d.select(|i| fold[d.seg[i] as usize] == k);
+        if test.xs.is_empty() || train.xs.is_empty() {
+            continue;
+        }
+        for (h, m) in held.iter_mut().zip(&models) {
+            let p = lm(&train, dem, *m, LOSS_SCALE_M, CONFORMAL_CV_ITERATIONS, bounds).0;
+            *h += evaluate_params(&test, dem, &p, LOSS_SCALE_M, false).cost;
+        }
+    }
+    held
 }
 
 /// Photo mode: affine from `PHOTO_AFFINE_LEVEL` down, then projective from
@@ -963,9 +1376,10 @@ pub fn sample_fits(samples: &ContourSamples, dem: &PreparedDem, h: &Homography) 
 }
 
 fn metrics(d: &Data, dem: &PreparedDem, fit: &Fit, iterations: usize, converged: bool, affine: bool) -> RefineResult {
-    let (transform, homography) = match fit {
-        Fit::Affine(t) => (*t, None),
-        Fit::Projective(h) => (h.local_affine(d.cx, d.cy), Some(*h)),
+    let (transform, homography, conformal) = match fit {
+        Fit::Affine(t) => (*t, None, None),
+        Fit::Projective(h) => (h.local_affine(d.cx, d.cy), Some(*h), None),
+        Fit::Conformal(c) => (c.affine, None, Some(*c)),
     };
     // Ground metres per map pixel and per finest DEM cell at the samples' centroid.
     let cos = {
@@ -977,6 +1391,7 @@ fn metrics(d: &Data, dem: &PreparedDem, fit: &Fit, iterations: usize, converged:
     let empty = RefineResult {
         transform,
         homography,
+        conformal,
         cost_m: f64::INFINITY,
         median_seg_std_m: f64::INFINITY,
         inlier_fraction: 0.0,
@@ -1006,6 +1421,7 @@ fn metrics(d: &Data, dem: &PreparedDem, fit: &Fit, iterations: usize, converged:
             Some(p) => p,
             None => return empty,
         },
+        Fit::Conformal(c) => Params::from_conformal(c),
     };
     let e = evaluate_params(d, fine, &par, LOSS_SCALE_M, false);
     let n = d.xs.len();
@@ -1066,6 +1482,7 @@ fn metrics(d: &Data, dem: &PreparedDem, fit: &Fit, iterations: usize, converged:
         contour_interval_m,
         interval_snr,
         homography,
+        conformal,
         px_ground_m,
         dem_cell_m,
         gradient_alignment,
@@ -1375,8 +1792,18 @@ mod tests {
     /// contours traced in a 2000×2400 px image through `truth` (pixel →
     /// Mercator), by marching along each 6th row and recording level crossings.
     fn synthetic_case(truth: &dyn Fn(f64, f64) -> (f64, f64), fp: &MercBox) -> (ContourSamples, DemMosaic) {
+        synthetic_case_at(truth, fp, 13, 6, 10.0)
+    }
+
+    /// `synthetic_case` on DEM tiles of zoom `z`, every `rows`-th row, contours every `interval` metres.
+    fn synthetic_case_at(
+        truth: &dyn Fn(f64, f64) -> (f64, f64),
+        fp: &MercBox,
+        z: u8,
+        rows: usize,
+        interval: f64,
+    ) -> (ContourSamples, DemMosaic) {
         use crate::dem::{DemStore, TILE_SIZE};
-        let z = 13u8;
         let elev = |mx: f64, my: f64| -> f64 {
             let (u, v) = (mx / 900.0, my / 700.0);
             300.0 * (u.sin() * v.cos()) + 80.0 * ((mx + 2.0 * my) / 400.0).sin()
@@ -1397,11 +1824,11 @@ mod tests {
         let dem = store.mosaic(z, fp);
         let mut s = ContourSamples::default();
         let mut seg_of_level = std::collections::HashMap::new();
-        for y in (0..2400).step_by(6) {
+        for y in (0..2400).step_by(rows) {
             let mut prev = None;
             for x in 0..2000 {
                 let (mx, my) = truth(x as f64 + 0.5, y as f64 + 0.5);
-                let lvl = (elev(mx, my) / 10.0).floor() as i64;
+                let lvl = (elev(mx, my) / interval).floor() as i64;
                 if let Some(p) = prev {
                     if p != lvl {
                         let key = (lvl.max(p), y / 240, x / 250);
@@ -1526,7 +1953,7 @@ mod tests {
         };
         let init = Affine::pixel_to_merc_similarity(2.05, 0.0, 1000.0, 1200.0, 3.0e6 + 150.0, -2.98e6 - 120.0);
         let prep = PreparedDem::new(&dem);
-        let photo = refine_prepared_with(&s, &prep, &init, &RefineOptions { photo: true });
+        let photo = refine_prepared_with(&s, &prep, &init, &RefineOptions { photo: true, ..Default::default() });
         let scan = refine_prepared(&s, &prep, &init);
         let hp = photo.homography.expect("projective stage kept");
         let (e_photo, e_scan) = (max_err(&hp), max_err(&scan.transform.to_homography()));
@@ -1578,13 +2005,57 @@ mod tests {
         }
     }
 
+    /// A sheet in transverse Mercator, 60 × 72 km at 60° N with its meridian
+    /// 2° west of it (a UTM sheet near its zone's edge), is no affine image
+    /// of Web Mercator: the affine fit is ~100 m off at the corners. The bend
+    /// of its projection (`ConformalStage`) takes that out; a Web Mercator
+    /// map of the same size keeps its affine fit.
+    #[test]
+    fn large_sheets_get_their_projection_bend() {
+        use crate::geo::{latlon_to_merc, latlon_to_tm, tm_to_latlon};
+        let (lat0, lon0, meridian, mpp) = (60.0, 8.0, 6.0, 30.0);
+        let (w, h) = (2000.0, 2400.0);
+        let t0 = latlon_to_tm(lat0, lon0, meridian);
+        let tm = |x: f64, y: f64| {
+            let ll = tm_to_latlon(t0.0 + (x - w / 2.0) * mpp, t0.1 - (y - h / 2.0) * mpp, meridian);
+            latlon_to_merc(ll.lat, ll.lon)
+        };
+        // Its best affine image: the start, and the Web Mercator map.
+        let grid: Vec<(f64, f64)> = (0..25).map(|k| (w * (k % 5) as f64 / 4.0, h * (k / 5) as f64 / 4.0)).collect();
+        let affine = Affine::fit(&grid, &grid.iter().map(|&(x, y)| tm(x, y)).collect::<Vec<_>>()).unwrap();
+        let max_err = |f: &dyn Fn(f64, f64) -> (f64, f64), truth: &dyn Fn(f64, f64) -> (f64, f64)| {
+            grid.iter().map(|&(x, y)| (f(x, y).0 - truth(x, y).0).hypot(f(x, y).1 - truth(x, y).1)).fold(0.0, f64::max)
+                * lat0.to_radians().cos()
+        };
+        let opts = RefineOptions { map_rect: Some([0.0, 0.0, w, h]), ..Default::default() };
+        let fp = refine_dem_box(&affine, 2000, 2400);
+        // The sheet: its bend found, the corners within a few metres.
+        let (s, dem) = synthetic_case_at(&tm, &fp, 10, 24, 40.0);
+        let r = refine_prepared_with(&s, &PreparedDem::new(&dem), &affine, &opts);
+        let c = r.conformal.expect("the projection's bend");
+        let (e_affine, e_bent) = (max_err(&|x, y| affine.apply(x, y), &tm), max_err(&|x, y| c.apply(x, y), &tm));
+        assert!(e_affine > 80.0 && e_bent < 15.0, "affine {e_affine:.1} m, bent {e_bent:.1} m: {r:?}");
+        assert!((c.meridian - meridian).abs() < 1e-9 || (c.meridian - lon0).abs() < 0.05, "{c:?}");
+        assert!(fit_confidence(&r) > 0.9, "{r:?}");
+        // The Web Mercator map: no bend.
+        let (s, dem) = synthetic_case_at(&|x, y| affine.apply(x, y), &fp, 10, 24, 40.0);
+        let r = refine_prepared_with(&s, &PreparedDem::new(&dem), &affine, &opts);
+        assert!(r.conformal.is_none(), "{r:?}");
+        assert!(max_err(&|x, y| r.transform.apply(x, y), &|x, y| affine.apply(x, y)) < 15.0, "{r:?}");
+    }
+
     /// Photo mode on an exactly similar map: no spurious projective terms.
     #[test]
     fn photo_mode_keeps_similarity_maps_similar() {
         let truth = Affine::pixel_to_merc_similarity(2.0, 0.02, 1000.0, 1200.0, 3.0e6, -2.98e6);
         let (s, dem) = synthetic_case(&|x, y| truth.apply(x, y), &refine_dem_box(&truth, 2000, 2400));
         let init = Affine::pixel_to_merc_similarity(2.04, 0.0, 1000.0, 1200.0, 3.0e6 + 250.0, -2.98e6 - 200.0);
-        let r = refine_prepared_with(&s, &PreparedDem::new(&dem), &init, &RefineOptions { photo: true });
+        let r = refine_prepared_with(
+            &s,
+            &PreparedDem::new(&dem),
+            &init,
+            &RefineOptions { photo: true, ..Default::default() },
+        );
         let m = r.homography.unwrap_or_else(|| r.transform.to_homography());
         for (x, y) in [(0.0, 0.0), (2000.0, 0.0), (2000.0, 2400.0), (0.0, 2400.0), (1000.0, 1200.0)] {
             let (a, b) = (m.apply(x, y), truth.apply(x, y));
