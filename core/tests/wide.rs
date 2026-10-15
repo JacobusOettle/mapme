@@ -1153,3 +1153,51 @@ fn implausible_scale_bar_is_ignored() {
     assert_eq!(r["status"], "ok", "{}", r["message"]);
     assert!(centre_off_m(r, w, h, at) < 60.0);
 }
+
+/// Brown strokes 60–120 px long at random angles on white paper: lines
+/// that do not nest like contour lines (a photo's edges, hachures).
+fn strokes_image(w: usize, h: usize, seed: u64) -> Rgb8 {
+    let mut rng = Rng::new(seed);
+    let mut data = vec![255u8; w * h * 3];
+    for _ in 0..(w * h / 3000) {
+        let (x0, y0) = (rng.next_f64() * w as f64, rng.next_f64() * h as f64);
+        let a = rng.next_f64() * std::f64::consts::PI;
+        let len = 60.0 + 60.0 * rng.next_f64();
+        for i in 0..(len * 2.0) as usize {
+            let t = i as f64 / 2.0;
+            for d in [-0.5, 0.5] {
+                let (x, y) = (x0 + t * a.cos() - d * a.sin(), y0 + t * a.sin() + d * a.cos());
+                if x >= 0.0 && y >= 0.0 && (x as usize) < w && (y as usize) < h {
+                    let k = (y as usize * w + x as usize) * 3;
+                    data[k..k + 3].copy_from_slice(&[150, 100, 60]);
+                }
+            }
+        }
+    }
+    Rgb8::from_rgb(w, h, data).unwrap()
+}
+
+/// An image whose lines do not nest like contour lines, with no scale on
+/// it: with nothing in the inner 20 km the search stops there and says why,
+/// and searches no wider even with a 200 km radius (no zoom-9 or -10 tile
+/// is asked for).
+#[test]
+fn lines_unlike_contours_stop_the_search_at_20_km() {
+    let _g = serial();
+    let fix = LatLon::new(46.5, 8.0);
+    let s = Session::new(strokes_image(1600, 1200, 9));
+    let req = json!({"gps": gps(fix), "methods": ["contours"], "search_radius_m": 200_000.0});
+    let out = serve(&s, &req, 64, 40, &noise_terrain, &mut |_| {});
+    let r = out.last();
+    summary("strokes at random angles, R 200 km", &out.responses, None);
+    eprintln!("    {}", out.log);
+    let c = &r["diagnostics"]["contours"];
+    assert!(c["n_segments"].as_u64().unwrap() > 50, "{c}");
+    assert!(c["organisation"]["parallel"].as_f64().unwrap() < 0.4, "{c}");
+    assert_eq!(r["status"], "failed", "{r}");
+    let m = r["message"].as_str().unwrap();
+    assert!(m.starts_with("No match within 20 km of you (searched ") && m.contains("don't run like contour"), "{m}");
+    assert_eq!(r["search"]["searched_radius_m"], 20_000.0, "{}", r["search"]);
+    assert!(out.served.iter().all(|t| t.z >= 11), "tiles beyond the inner disc asked for");
+    assert_eq!(r["diagnostics"]["search_stopped"]["reason"], "lines unlike contours");
+}

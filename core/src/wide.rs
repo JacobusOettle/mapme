@@ -9,7 +9,9 @@
 use crate::dem::{merc_to_tile, resolution, tile_bounds, tiles_covering, MercBox, TileId, TILE_SIZE};
 use crate::geo::{destination, haversine_m, latlon_to_merc, merc_to_latlon, LatLon, EARTH_RADIUS};
 use crate::hints::SearchHint;
-use crate::search::{map_half_extent, min_searchable_scale, nearest_in_box, required_dem_box_capped, SearchParams};
+use crate::search::{
+    map_half_extent, min_searchable_scale, nearest_in_box, required_dem_box_capped, search_work, SearchParams,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -344,6 +346,35 @@ pub fn merge_plans(plans: Vec<WidePlan>) -> WidePlan {
     WidePlan { zoom, chunks, last_use, unique_tiles, band_chunks }
 }
 
+/// `wide_band_reach` of each band of a wide search, None for a band inside
+/// another one searched on the same zoom at least as far (a scale bar's
+/// inside the default range's): in one sweep nearest first the other finds
+/// what it would, at the same chunks.
+pub fn wide_band_reaches(
+    radius_m: f64,
+    bands: &[ScaleBand],
+    img_w: usize,
+    img_h: usize,
+    lat: f64,
+) -> Vec<Option<(u8, f64)>> {
+    let mut reaches: Vec<Option<(u8, f64)>> =
+        bands.iter().map(|b| wide_band_reach(radius_m, b, img_w, img_h, lat)).collect();
+    for i in 0..bands.len() {
+        let Some((zi, ri)) = reaches[i] else { continue };
+        let covered = (0..bands.len()).any(|j| {
+            j != i
+                && reaches[j].is_some_and(|(zj, rj)| zj == zi && rj >= ri)
+                && bands[j].lo <= bands[i].lo
+                && bands[j].hi >= bands[i].hi
+                && (j < i || bands[j] != bands[i])
+        });
+        if covered {
+            reaches[i] = None;
+        }
+    }
+    reaches
+}
+
 /// Zoom of the wide search for a scale band: `wide_reach`'s for the near
 /// zoom's band; a coarser band (scales over `FINE_MAX_SCALE`) goes up to two
 /// zooms coarser while every scale of it keeps a template of `MIN_SIDE`
@@ -503,27 +534,62 @@ pub fn tile_bytes(z: u8) -> f64 {
     kb * 1024.0
 }
 
-/// The map the estimate assumes: a 300-dpi A3 sheet, any scale from 0.4 to
-/// 12 m/px (no scale label read), north up.
+/// The map the estimate assumes when the request names none: a 300-dpi A3
+/// sheet, no scale read (the default range, 0.4–30 m/px), north up.
 pub const TYPICAL_IMAGE: (usize, usize) = (3507, 4960);
-pub const TYPICAL_SCALE: (f64, f64) = (0.4, 12.0);
 
-/// Zoom-11 re-check tiles per wide chunk (3 candidates, ~4 tiles each) and
-/// zoom-13 tiles per refinement (~16, measured 4–42).
-const RECHECK_TILES_PER_CHUNK: usize = 12;
-const REFINE_TILES: usize = 16;
-/// Refinements per area search (the best candidate and up to two others).
-const REFINES_PER_AREA: usize = 2;
+/// What the estimate knows of the map's scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScalePrior {
+    /// Nothing read: the default range (`default_scale_range`).
+    None,
+    /// A printed scale with the dpi (ground m/px range): a constraint.
+    Label(f64, f64),
+    /// A scale bar's range: searched first in the hint and near areas, the
+    /// default range after it.
+    Bar(f64, f64),
+}
 
-/// Compute time on the reference machine (4-core 2.1 GHz Xeon shared with
-/// other jobs, release), measured by `wide_measure::wide_session`: seconds
-/// per million coarse mosaic cells (one tile is 65 536) searched over the
-/// default scale range (0.4–12 m/px; Durban → Grootkloof, 650 km: 21.7 s
-/// for 42 Mcells) and over a range from an OCR'd scale (±25 %: Windhoek,
-/// 1 000 km: 20.8 s for 107 Mcells), and per zoom-13 refinement.
-const SEARCH_S_PER_MCELL: f64 = 0.47;
-const SEARCH_S_PER_MCELL_SCALE_KNOWN: f64 = 0.17;
-const REFINE_S: f64 = 0.6;
+/// The map whose search is estimated: its size in pixels and scale prior.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EstimateMap {
+    pub size: (usize, usize),
+    pub prior: ScalePrior,
+}
+
+impl EstimateMap {
+    /// The typical sheet (`TYPICAL_IMAGE`), no scale read.
+    pub fn typical() -> EstimateMap {
+        EstimateMap { size: TYPICAL_IMAGE, prior: ScalePrior::None }
+    }
+}
+
+/// Near-zoom re-check tiles per wide chunk (3 candidates; measured 8–11)
+/// and zoom-13 tiles per refinement (measured 8–16 a refinement).
+const RECHECK_TILES_PER_CHUNK: usize = 10;
+const REFINE_TILES: usize = 14;
+
+/// Compute on the reference machine (4-core 2.1 GHz Xeon shared with other
+/// jobs, release build), fitted to `wide_measure::estimate_check` (searches
+/// run to the end, the map outside the radius: five maps of 0.9–17 MP,
+/// 50–2 000 km; the fits within 20 % and 12 %): per hint or near area,
+/// seconds per million FFT cells of coarse search work
+/// (`search::search_work`), plus a fixed part and one per megapixel of the
+/// map (its field pyramid and templates); the same per wide chunk (its
+/// three re-checks included); per megapixel of contour extraction the
+/// search waits for (most of it overlaps the first download); per
+/// refinement. A search that does not find the map refines little (a
+/// candidate must stand out, `georef::REFINE_MIN_RATIO`: 0–3, 1.5 on
+/// average); a search that finds it, once.
+const AREA_S_PER_MWORK: f64 = 0.0049;
+const AREA_S: f64 = 0.033;
+const AREA_S_PER_MP: f64 = 0.0035;
+const CHUNK_S_PER_MWORK: f64 = 0.0062;
+const CHUNK_S: f64 = 0.197;
+const CHUNK_S_PER_MP: f64 = 0.0049;
+const PREP_S_PER_MP: f64 = 0.03;
+const REFINE_S: f64 = 0.35;
+const REFINES: f64 = 1.5;
 /// An iPhone (2 performance + 4 efficiency cores) against the reference box.
 pub const IPHONE_FACTOR: f64 = 1.5;
 /// Download model: bytes per second and latency per need_dem round.
@@ -541,6 +607,12 @@ pub struct Estimate {
     pub download_s: f64,
     pub rounds: usize,
     pub chunks: usize,
+    /// Coarse search work (millions of FFT cells, `search::search_work`)
+    /// and refinements counted.
+    pub work: f64,
+    pub refines: f64,
+    /// Of `work`, the wide chunks'.
+    pub wide_work: f64,
 }
 
 impl Estimate {
@@ -549,10 +621,10 @@ impl Estimate {
     }
 }
 
-/// Coarse tiles of an area search in one scale band around `c` (Mercator)
-/// of radius `r` (as `georef` plans it: the band's zoom and box cap).
-fn area_tiles(c: (f64, f64), r: f64, img: (usize, usize), band: &ScaleBand) -> Vec<TileId> {
-    let p = SearchParams {
+/// Coarse search parameters of an area of radius `r` around `c` (Mercator)
+/// in one scale band, as `georef` plans it.
+fn area_params(c: (f64, f64), r: f64, band: &ScaleBand) -> SearchParams {
+    SearchParams {
         center_merc: c,
         search_radius_m: r,
         scale_min: band.lo,
@@ -560,36 +632,52 @@ fn area_tiles(c: (f64, f64), r: f64, img: (usize, usize), band: &ScaleBand) -> V
         rotations_deg: vec![0.0],
         top_k: 1,
         region: None,
-    };
-    let lat = merc_to_latlon(c.0, c.1).0;
-    tiles_covering(band.zoom, &required_dem_box_capped(&p, img.0, img.1, band.max_box_half_m(lat)))
+    }
 }
 
-/// Scales of a band against the default fine band's (0.4–12 m/px), which the
-/// compute rate per mosaic cell was measured over: a band's search costs in
-/// proportion to its scales.
-fn band_work(band: &ScaleBand) -> f64 {
-    let n = |lo: f64, hi: f64| (hi / lo).ln().max(0.0);
-    (n(band.lo, band.hi) / n(TYPICAL_SCALE.0, FINE_MAX_SCALE)).clamp(0.05, 1.0)
+/// Coarse tiles of an area search (the band's zoom and box cap).
+fn area_tiles(p: &SearchParams, img: (usize, usize), band: &ScaleBand) -> Vec<TileId> {
+    let lat = merc_to_latlon(p.center_merc.0, p.center_merc.1).0;
+    tiles_covering(band.zoom, &required_dem_box_capped(p, img.0, img.1, band.max_box_half_m(lat)))
+}
+
+/// The scale bands of the hint and near areas, the prior's first, with how
+/// many are the prior's (`georef::Run::area_band_plan`).
+fn estimate_bands(map: &EstimateMap, lat: f64) -> (Vec<ScaleBand>, usize) {
+    let (w, h) = map.size;
+    let (dlo, dhi) = default_scale_range(w, h);
+    match map.prior {
+        ScalePrior::None => (scale_bands(dlo, dhi, w, h, lat), 0),
+        ScalePrior::Label(lo, hi) => {
+            let b = scale_bands(lo, hi, w, h, lat);
+            let n = b.len();
+            (b, n)
+        }
+        ScalePrior::Bar(lo, hi) => {
+            let mut b = scale_bands(lo, hi, w, h, lat);
+            let n = b.len();
+            b.extend(scale_bands(dlo, dhi, w, h, lat));
+            (b, n)
+        }
+    }
 }
 
 /// Estimate a search of `radius_m` around `gps` (or of the hints alone)
-/// for the map in `img` at `scale` (ground m/px range; `scale_known` when
-/// it comes from an OCR'd scale, which makes the search ~3× faster), the
-/// way the search plans it: hint areas and the near disc at `near_zoom`, the
-/// rest in chunks at `wide_reach`; candidate checks are an allowance from
-/// the measurements.
-#[allow(clippy::too_many_arguments)]
+/// for `map`, the way the search plans it: hint areas and the near disc at
+/// `near_zoom` (the inner 20 km first, coarser bands before the near zoom's
+/// whole disc), the rest in chunks of each band's wide zoom; the compute of
+/// every coarse search from its planned work (`search::search_work`). An
+/// upper bound: a search that finds the map stops there.
 pub fn estimate(
     radius_m: f64,
     near_m: f64,
     gps: Option<LatLon>,
     hints: &[SearchHint],
-    img: (usize, usize),
-    scale: (f64, f64),
-    scale_known: bool,
+    map: &EstimateMap,
     max_tiles: usize,
 ) -> Estimate {
+    let img = map.size;
+    let max_tiles = max_tiles.max(1);
     // The hints searched: valid, within the radius of the fix, ordered and
     // deduplicated, at most `MAX_HINTS` (as `georef` plans them).
     let hints: Vec<SearchHint> = crate::hints::order_hints(
@@ -603,95 +691,107 @@ pub fn estimate(
     .take(crate::georef::MAX_HINTS)
     .collect();
     let lat = gps.map(|g| g.lat).or(hints.first().map(|h| h.lat)).unwrap_or(0.0);
-    // The scale bands searched in turn (`scale_bands`): the near zoom's
-    // (zoom 11, coarser far north or south) and, without a scale label, the
-    // coarser tiles of small-scale maps.
-    let bands = scale_bands(scale.0, scale.1, img.0, img.1, lat);
-    let rate = |band: &ScaleBand| {
-        if scale_known {
-            SEARCH_S_PER_MCELL_SCALE_KNOWN
-        } else {
-            SEARCH_S_PER_MCELL * band_work(band)
-        }
-    };
-    let mcell = |n: usize| n as f64 * 65_536.0 / 1e6;
-    // Coarse tiles of the hint and near areas.
-    let mut coarse: HashSet<TileId> = HashSet::new();
+    let (bands, n_prior) = estimate_bands(map, lat);
+    let mut work = 0.0;
     let mut areas = 0usize;
-    let mut compute = 0.0;
     let mut rounds = 0usize;
+    let mut coarse: HashSet<TileId> = HashSet::new();
+    // One area search: its work, and a round for the tiles not fetched yet.
+    let mut area = |p: SearchParams, band: &ScaleBand, coarse: &mut HashSet<TileId>| {
+        work += search_work(&p, img.0, img.1, resolution(band.zoom));
+        areas += 1;
+        let fresh = area_tiles(&p, img, band).into_iter().filter(|t| coarse.insert(*t)).count();
+        rounds += fresh.div_ceil(max_tiles);
+    };
     for h in &hints {
+        let c = latlon_to_merc(h.lat, h.lon);
         for band in &bands {
-            let t = area_tiles(latlon_to_merc(h.lat, h.lon), h.radius_m.clamp(1_000.0, near_m), img, band);
-            compute += mcell(t.len()) * rate(band);
-            rounds += t.len().div_ceil(max_tiles.max(1)) + 1;
-            coarse.extend(t);
-            areas += 1;
+            area(area_params(c, h.radius_m.clamp(1_000.0, near_m), band), band, &mut coarse);
         }
     }
     let mut coarse_zoom = near_zoom(lat);
     let mut wide_tiles: Vec<TileId> = Vec::new();
     let mut chunks = 0usize;
+    let mut wide_work = 0.0;
     if let Some(g) = gps {
         let c = latlon_to_merc(g.lat, g.lon);
-        for band in &bands {
-            let t = area_tiles(c, radius_m.min(near_m), img, band);
-            compute += mcell(t.len()) * rate(band);
-            rounds += t.len().div_ceil(max_tiles.max(1)) + 1;
-            coarse.extend(t);
-            areas += 1;
-            // The near zoom's inner disc is searched first (its tiles are among those).
-            let first = crate::georef::NEAR_FIRST_RADIUS_M;
-            if band.is_fine() && radius_m.min(near_m) > first {
-                compute += mcell(area_tiles(c, first, img, band).len()) * rate(band);
-                rounds += 1;
-                areas += 1;
-            }
+        let near = radius_m.min(near_m);
+        // The inner disc first, then the prior's bands, then coarse before fine.
+        let first = crate::georef::NEAR_FIRST_RADIUS_M;
+        if let Some(b) = bands.first().filter(|b| b.is_fine() && near > first) {
+            area(area_params(c, first, b), b, &mut coarse);
         }
-        // The wide search: every band's chunks in one sweep (`merge_plans`).
+        let mut rest = bands[n_prior..].to_vec();
+        rest.sort_by_key(|b| b.is_fine());
+        for b in bands[..n_prior].iter().chain(&rest) {
+            area(area_params(c, near, b), b, &mut coarse);
+        }
+        // The wide search: each band out to its reach, a band inside another
+        // on the same zoom left out (`wide_setup`), their chunks in one sweep.
         if radius_m > near_m {
+            let reaches = wide_band_reaches(radius_m, &bands, img.0, img.1, g.lat);
             let mut plans = Vec::new();
-            let mut work = Vec::new();
-            for band in &bands {
-                let Some((zoom, reach_m)) = wide_band_reach(radius_m, band, img.0, img.1, g.lat) else { continue };
-                let p =
-                    SearchParams { center_merc: c, scale_min: band.lo, scale_max: band.hi, ..SearchParams::default() };
+            let mut bases = Vec::new();
+            for (band, reach) in bands.iter().zip(reaches) {
+                let Some((zoom, reach_m)) = reach else { continue };
+                let p = SearchParams { search_radius_m: reach_m, ..area_params(c, reach_m, band) };
                 plans.push(plan_wide(c, reach_m, near_m, zoom, map_half_extent(&p, img.0, img.1), max_tiles, None));
-                work.push(rate(band));
+                bases.push((p, zoom));
             }
             if let Some(first) = plans.first() {
                 coarse_zoom = first.zoom;
             }
-            for (plan, r) in plans.iter().zip(&work) {
-                compute += mcell(plan.chunks.iter().map(|c| c.tiles.len()).sum::<usize>()) * r;
-            }
             let plan = merge_plans(plans);
+            for ch in &plan.chunks {
+                let Some((base, zoom)) = bases.get(ch.scale_band) else { continue };
+                let region = crate::search::Region {
+                    bounds: ch.placement,
+                    origin: c,
+                    r_min_m: near_m,
+                    r_max_m: base.search_radius_m,
+                    exclude: None,
+                };
+                let p = SearchParams { region: Some(region), ..base.clone() };
+                wide_work += search_work(&p, img.0, img.1, resolution(*zoom));
+            }
             wide_tiles = plan.last_use.keys().copied().collect();
             chunks = plan.chunks.len();
             // One round per chunk (re-checks ride along with the next chunk).
             rounds += chunks + usize::from(chunks > 0);
         }
     }
-    let refines = areas * REFINES_PER_AREA + usize::from(chunks > 0);
-    // Re-checks and refinements: near zoom and zoom 13 at the fix (or the
-    // first hint), counted as such (tile sizes are per zoom).
+    let near_work = work;
+    work += wide_work;
+    let refines = if areas + chunks > 0 { REFINES } else { 0.0 };
+    rounds += refines.ceil() as usize;
     let near_z = near_zoom(lat);
     let mut tiles: Vec<(u8, usize)> = Vec::new();
     let mut add = |z: u8, n: usize| match tiles.iter_mut().find(|t| t.0 == z) {
         Some(t) => t.1 += n,
         None => tiles.push((z, n)),
     };
-    for t in wide_tiles.iter().chain(&coarse) {
+    // A tile of both (a coarse band's near disc and its wide chunks) is
+    // fetched once.
+    coarse.extend(wide_tiles);
+    for t in &coarse {
         add(t.z, 1);
     }
     add(near_z, chunks * RECHECK_TILES_PER_CHUNK);
-    add(13, refines * REFINE_TILES);
+    add(13, (refines * REFINE_TILES as f64).round() as usize);
     tiles.retain(|t| t.1 > 0);
     tiles.sort_by_key(|t| t.0);
     let bytes: f64 = tiles.iter().map(|&(z, n)| tile_bytes(z) * n as f64).sum();
-    let compute_s = (compute + refines as f64 * REFINE_S) * IPHONE_FACTOR;
+    let mp = (img.0 * img.1) as f64 / 1e6;
+    let prep = if areas + chunks > 0 { PREP_S_PER_MP * mp } else { 0.0 };
+    let compute_s = (prep
+        + near_work * AREA_S_PER_MWORK
+        + areas as f64 * (AREA_S + AREA_S_PER_MP * mp)
+        + wide_work * CHUNK_S_PER_MWORK
+        + chunks as f64 * (CHUNK_S + CHUNK_S_PER_MP * mp)
+        + refines * REFINE_S)
+        * IPHONE_FACTOR;
     let download_s = bytes / DOWNLOAD_BYTES_PER_S + rounds as f64 * ROUND_LATENCY_S;
-    Estimate { coarse_zoom, tiles, bytes, compute_s, download_s, rounds, chunks }
+    Estimate { coarse_zoom, tiles, bytes, compute_s, download_s, rounds, chunks, work, refines, wide_work }
 }
 
 /// `mm_search_estimate` request.
@@ -702,7 +802,14 @@ struct EstimateRequest {
     gps: Option<EstimateGps>,
     hints: Option<Vec<EstimateHint>>,
     max_tiles_per_round: Option<f64>,
+    /// A printed scale was read (the typical sheet's 1:25 000 at 300 dpi).
     scale_known: Option<bool>,
+    /// The map's size in pixels (default: a 300-dpi A3 sheet).
+    image_size: Option<[f64; 2]>,
+    /// Ground m/px range of a printed scale (with the dpi) …
+    scale_m_per_px: Option<[f64; 2]>,
+    /// … or of a scale bar (`diagnostics.scale_range` of an earlier search).
+    scale_bar_m_per_px: Option<[f64; 2]>,
 }
 
 #[derive(Deserialize)]
@@ -716,6 +823,12 @@ struct EstimateHint {
     lat: f64,
     lon: f64,
     radius_m: Option<f64>,
+}
+
+/// A ground m/px range from a request: finite, positive, ordered.
+fn range_of(v: Option<[f64; 2]>) -> Option<(f64, f64)> {
+    let [a, b] = v?;
+    (a.is_finite() && b.is_finite() && a > 0.0 && b >= a).then_some((a, b))
 }
 
 /// `mm_search_estimate` on JSON; never fails (errors become a failed response).
@@ -749,11 +862,24 @@ pub fn search_estimate_json(json: &str) -> String {
         req.max_tiles_per_round.filter(|v| v.is_finite()).map_or(crate::georef::DEFAULT_MAX_TILES_PER_ROUND, |v| {
             v.round().clamp(crate::georef::MAX_TILES_RANGE.0 as f64, crate::georef::MAX_TILES_RANGE.1 as f64) as usize
         });
-    let known = req.scale_known.unwrap_or(false);
-    // A scale label narrows the search to a sheet's scale; without one the
-    // default range of the typical sheet is searched, small-scale bands too.
-    let scale = if known { TYPICAL_SCALE } else { default_scale_range(TYPICAL_IMAGE.0, TYPICAL_IMAGE.1) };
-    let e = estimate(radius, crate::georef::NEAR_RADIUS_M, gps, &hints, TYPICAL_IMAGE, scale, known, max_tiles);
+    let size = req
+        .image_size
+        .filter(|s| s.iter().all(|v| v.is_finite() && (16.0..=100_000.0).contains(v)))
+        .map_or(TYPICAL_IMAGE, |s| (s[0].round() as usize, s[1].round() as usize));
+    let lat = gps.map_or(0.0, |g| g.lat);
+    let prior = if let Some((lo, hi)) = range_of(req.scale_m_per_px) {
+        ScalePrior::Label(lo, hi)
+    } else if let Some((lo, hi)) = range_of(req.scale_bar_m_per_px) {
+        ScalePrior::Bar(lo, hi)
+    } else if req.scale_known.unwrap_or(false) {
+        // The typical sheet's printed 1:25 000 at 300 dpi, ±25 % (`georef`).
+        let prior = 25_000.0 * 0.0254 / 300.0;
+        ScalePrior::Label(0.75 * prior * lat.to_radians().cos(), 1.25 * prior)
+    } else {
+        ScalePrior::None
+    };
+    let map = EstimateMap { size, prior };
+    let e = estimate(radius, crate::georef::NEAR_RADIUS_M, gps, &hints, &map, max_tiles);
     let mb = |b: f64| (b / 1e5).round() / 10.0;
     json!({
         "status": "ok",
@@ -767,6 +893,8 @@ pub fn search_estimate_json(json: &str) -> String {
         "approx_megabytes": mb(e.bytes),
         "rounds": e.rounds,
         "chunks": e.chunks,
+        "search_work": (e.work * 10.0).round() / 10.0,
+        "search_work_wide": (e.wide_work * 10.0).round() / 10.0,
         "tiles_by_zoom": e.tiles.iter().map(|&(z, n)| json!({"z": z, "tiles": n})).collect::<Vec<Value>>(),
     })
     .to_string()
@@ -1007,12 +1135,12 @@ mod tests {
     #[test]
     fn estimate_grows_with_radius_and_stays_honest() {
         let g = Some(LatLon::new(-25.85, 27.4));
-        let near = estimate(50_000.0, 50_000.0, g, &[], TYPICAL_IMAGE, TYPICAL_SCALE, false, 64);
+        let near = estimate(50_000.0, 50_000.0, g, &[], &EstimateMap::typical(), 64);
         assert_eq!(near.coarse_zoom, 11);
         assert_eq!(near.chunks, 0);
-        let mid = estimate(120_000.0, 50_000.0, g, &[], TYPICAL_IMAGE, TYPICAL_SCALE, false, 64);
+        let mid = estimate(120_000.0, 50_000.0, g, &[], &EstimateMap::typical(), 64);
         assert_eq!(mid.coarse_zoom, 10);
-        let far = estimate(1_000_000.0, 50_000.0, g, &[], TYPICAL_IMAGE, TYPICAL_SCALE, false, 64);
+        let far = estimate(1_000_000.0, 50_000.0, g, &[], &EstimateMap::typical(), 64);
         assert_eq!(far.coarse_zoom, 9);
         assert!(near.bytes < mid.bytes && mid.bytes < far.bytes);
         assert!(near.compute_s < far.compute_s);
@@ -1029,18 +1157,57 @@ mod tests {
             source: crate::hints::HintSource::Place,
             name: None,
         };
-        let only =
-            estimate(1_000_000.0, 50_000.0, None, std::slice::from_ref(&h), TYPICAL_IMAGE, TYPICAL_SCALE, false, 64);
+        let only = estimate(1_000_000.0, 50_000.0, None, std::slice::from_ref(&h), &EstimateMap::typical(), 64);
         assert_eq!(only.coarse_zoom, 11);
         assert!(only.total_tiles() > 0 && only.bytes < near.bytes * 1.5);
-        assert_eq!(
-            estimate(1_000_000.0, 50_000.0, None, &[], TYPICAL_IMAGE, TYPICAL_SCALE, false, 64).total_tiles(),
-            0
-        );
+        assert_eq!(estimate(1_000_000.0, 50_000.0, None, &[], &EstimateMap::typical(), 64).total_tiles(), 0);
         // A hint beyond the radius of the fix is not searched.
         let far_hint = SearchHint { lat: -33.9, lon: 18.4, ..h };
-        let e = estimate(50_000.0, 50_000.0, g, &[far_hint], TYPICAL_IMAGE, TYPICAL_SCALE, false, 64);
+        let e = estimate(50_000.0, 50_000.0, g, &[far_hint], &EstimateMap::typical(), 64);
         assert_eq!(e.total_tiles(), near.total_tiles());
+    }
+
+    /// The estimate follows the map: a small export searches less than a
+    /// 300-dpi sheet, a printed scale far less; a scale bar's band is searched
+    /// first near the fix (its inner 20 km in place of the default range's),
+    /// the default range after it, and the wide search is the default
+    /// range's: about the work of no prior.
+    #[test]
+    fn estimate_follows_the_map() {
+        let g = Some(LatLon::new(-22.56, 17.08));
+        let e = |size: (usize, usize), prior: ScalePrior| {
+            estimate(1_000_000.0, 50_000.0, g, &[], &EstimateMap { size, prior }, 64)
+        };
+        let typical = e(TYPICAL_IMAGE, ScalePrior::None);
+        let small = e((1118, 791), ScalePrior::None);
+        let label = e(TYPICAL_IMAGE, ScalePrior::Label(1.59, 2.65));
+        let bar = e(TYPICAL_IMAGE, ScalePrior::Bar(1.8, 2.4));
+        assert!(small.work < typical.work && small.compute_s < typical.compute_s, "{small:?} {typical:?}");
+        assert!(label.work < typical.work / 2.0, "{label:?} {typical:?}");
+        assert!((bar.work - typical.work).abs() < 0.1 * typical.work, "{bar:?} {typical:?}");
+        assert!(bar.work > label.work * 1.5, "{bar:?} {label:?}");
+        assert_eq!(bar.chunks, typical.chunks);
+        assert_eq!(bar.wide_work, typical.wide_work);
+        // A small export's coarse band reaches beyond 150 km on coarse tiles; its
+        // fine band stops there (`wide_reach`).
+        assert!(small.chunks > 0 && small.tiles.iter().all(|t| t.1 > 0));
+        let v: Value = serde_json::from_str(&search_estimate_json(
+            r#"{"radius_m": 1000000, "gps": {"lat": -22.56, "lon": 17.08}, "image_size": [1118, 791]}"#,
+        ))
+        .unwrap();
+        assert_eq!(v["tiles"].as_u64().unwrap() as usize, small.total_tiles());
+        let v: Value = serde_json::from_str(&search_estimate_json(
+            r#"{"radius_m": 1000000, "gps": {"lat": -22.56, "lon": 17.08}, "scale_bar_m_per_px": [1.8, 2.4]}"#,
+        ))
+        .unwrap();
+        assert_eq!(v["chunks"].as_u64().unwrap() as usize, bar.chunks);
+        // Nonsense sizes and ranges fall back to the typical sheet, no prior.
+        let v: Value = serde_json::from_str(&search_estimate_json(
+            r#"{"radius_m": 1000000, "gps": {"lat": -22.56, "lon": 17.08}, "image_size": [0, -5],
+                "scale_m_per_px": [3, 1]}"#,
+        ))
+        .unwrap();
+        assert_eq!(v["tiles"].as_u64().unwrap() as usize, typical.total_tiles());
     }
 
     #[test]

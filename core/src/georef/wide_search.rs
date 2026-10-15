@@ -25,7 +25,7 @@
 
 use super::*;
 use crate::search::{distinct_m, map_half_extent, min_searchable_scale, Region};
-use crate::wide::{merge_plans, plan_wide, recheck_zoom, wide_band_reach, WidePlan};
+use crate::wide::{merge_plans, plan_wide, recheck_zoom, wide_band_reaches, WidePlan};
 
 /// Candidates a chunk's coarse search returns (by significance) and of
 /// those kept (by correlation) for re-checking.
@@ -170,24 +170,10 @@ impl Run<'_> {
     fn wide_setup(&mut self, gps: LatLon, bands: &[ScaleBand]) -> Option<(WideKey, Arc<WidePlan>, Vec<SearchParams>)> {
         let (w, h) = self.size();
         let near = NEAR_RADIUS_M.min(self.radius_m);
-        let mut reaches: Vec<Option<(u8, f64)>> =
-            bands.iter().map(|b| wide_band_reach(self.radius_m, b, w, h, gps.lat)).collect();
         // A band inside another one searched on the same zoom at least as far
         // (a scale bar's inside the default range's) adds nothing to a sweep
         // nearest first: the other finds what it would, at the same chunks.
-        for i in 0..bands.len() {
-            let Some((zi, ri)) = reaches[i] else { continue };
-            let covered = (0..bands.len()).any(|j| {
-                j != i
-                    && reaches[j].is_some_and(|(zj, rj)| zj == zi && rj >= ri)
-                    && bands[j].lo <= bands[i].lo
-                    && bands[j].hi >= bands[i].hi
-                    && (j < i || bands[j] != bands[i])
-            });
-            if covered {
-                reaches[i] = None;
-            }
-        }
+        let reaches = wide_band_reaches(self.radius_m, bands, w, h, gps.lat);
         let farthest = reaches.iter().flatten().map(|r| r.1).reduce(f64::max);
         self.wide_limit = match farthest {
             Some(r) if r < self.radius_m => Some(r),

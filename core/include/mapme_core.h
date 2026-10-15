@@ -67,12 +67,15 @@ char *mm_session_georeference(MMSession *session, const char *request_json);
 /*
  * Estimate a search before running it (stateless, fast). Request:
  *   {"radius_m": 1000000, "gps": {"lat": -25.75, "lon": 28.19} | null,
- *    "hints": [{"lat","lon","radius_m"}], "max_tiles_per_round": 64, "scale_known": false}
- * (every field optional; radius clamped to 1 000 ... 2 000 000 m, default 50 000).
+ *    "hints": [{"lat","lon","radius_m"}], "max_tiles_per_round": 64, "scale_known": false,
+ *    "image_size": [w, h], "scale_m_per_px": [lo, hi] | "scale_bar_m_per_px": [lo, hi]}
+ * (every field optional; radius clamped to 1 000 ... 2 000 000 m, default 50 000; without
+ * "image_size" a typical 300-dpi A3 sheet; the scale ranges as a search's
+ * diagnostics.scale_range reports them, a printed scale's or a scale bar's).
  * Response: {"status":"ok","radius_m","coarse_zoom","tiles","approx_bytes","approx_seconds",
  *   "approx_compute_seconds","approx_download_seconds","approx_megabytes","rounds","chunks",
- *   "tiles_by_zoom":[{"z","tiles"}]} for a typical 300-dpi A3 sheet (see docs/ARCHITECTURE.md,
- * "Wide search"), or {"status":"failed","message"}. Never NULL.
+ *   "search_work","search_work_wide","tiles_by_zoom":[{"z","tiles"}]} (see docs/ARCHITECTURE.md,
+ * "Wide search", Estimate), or {"status":"failed","message"}. Never NULL.
  */
 char *mm_search_estimate(const char *request_json);
 

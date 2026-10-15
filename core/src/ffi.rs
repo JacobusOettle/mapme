@@ -234,7 +234,8 @@ pub unsafe extern "C" fn mm_fit_control_points(request_json: *const c_char) -> *
 }
 
 /// Estimate what a search will fetch and how long it takes, before running
-/// it (stateless): `{"radius_m", "gps": {"lat","lon"} | null, "hints": [...]}`
+/// it (stateless): `{"radius_m", "gps": {"lat","lon"} | null, "hints": [...],
+/// "image_size", "scale_m_per_px" | "scale_bar_m_per_px"}`
 /// → `{"status":"ok","coarse_zoom","tiles","approx_bytes","approx_seconds",...}`
 /// (see `wide::search_estimate_json`), or a failed response; never NULL.
 ///

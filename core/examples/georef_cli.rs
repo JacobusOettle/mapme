@@ -5,6 +5,7 @@
 //!     [--dem-dir dir] [--dpi N] [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b]
 //!     [--rotate] [--verify] [--photo] [--hint lat,lon[,radius_m][,name]]... [--max-tiles N]
 //!     [--dump-mask out.png] [--missing-out tiles.txt] [--fit-check a,b,c,d,e,f]
+//! cargo run --release --example georef_cli -- --estimate '{"radius_m": 500000, "gps": {...}}'
 //! ```
 //!
 //! Runs the same request / `need_dem` loop as the app: tiles are read from
@@ -25,6 +26,9 @@
 //! contours on the fine DEM the session would use (the refinement's metrics
 //! and confidence factors), then the refinement from it and from it shifted
 //! by 300 m, 1 km and 2.8 km, with how far each moved the image corners.
+//!
+//! `--estimate JSON` prints `mm_search_estimate` of that request (no image).
+//! Each round's stage times (`timings_ms`) are logged after its line.
 
 use mapme_core::contour::normalize_illumination;
 use mapme_core::contour_lines::contour_mask;
@@ -46,7 +50,7 @@ use std::time::Instant;
 const USAGE: &str = "usage: georef_cli <image.jpg|png> [--gps lat,lon] [--ocr ocr.json] [--dem-dir dir] [--dpi N] \
                      [--methods grid,contours] [--radius-m M] [--contour-rgb r,g,b] [--rotate] [--verify] [--photo] \
                      [--hint lat,lon[,radius_m][,name]]... [--max-tiles N] [--dump-mask out.png] [--missing-out tiles.txt] \
-                     [--fit-check a,b,c,d,e,f]";
+                     [--fit-check a,b,c,d,e,f] | --estimate JSON";
 
 /// Most `need_dem` rounds before giving up (a 2 000 km wide search takes ~100).
 const MAX_ROUNDS: usize = 300;
@@ -134,6 +138,11 @@ fn run() -> Result<bool, String> {
             "--dump-mask" => dump_mask = Some(PathBuf::from(value("--dump-mask")?)),
             "--missing-out" => missing_out = Some(PathBuf::from(value("--missing-out")?)),
             "--fit-check" => fit_check = Some(numbers(&value("--fit-check")?, 6, "--fit-check")?),
+            "--estimate" => {
+                // `mm_search_estimate` of a request (JSON); no image needed.
+                println!("{}", mapme_core::wide::search_estimate_json(&value("--estimate")?));
+                return Ok(true);
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(true);
@@ -168,6 +177,15 @@ fn run() -> Result<bool, String> {
         let ms = t.elapsed().as_secs_f64() * 1e3;
         core_ms += ms;
         eprintln!("round {round}: {:?} in {ms:.0} ms: {}", resp.status, resp.message);
+        let stages: Vec<String> = resp
+            .timings_ms
+            .iter()
+            .filter(|(k, v)| k.as_str() != "total" && **v >= 1.0)
+            .map(|(k, v)| format!("{k} {v:.0}"))
+            .collect();
+        if !stages.is_empty() {
+            eprintln!("  ms: {}", stages.join(", "));
+        }
         if let Some(p) = &resp.search {
             eprintln!(
                 "  search: {:?} z{}, {:.0} of {:.0} km, {} of {} tiles, {} of {} hints",

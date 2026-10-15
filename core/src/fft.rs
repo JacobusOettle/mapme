@@ -59,6 +59,69 @@ impl Fft2 {
         data.par_iter_mut().for_each(|v| *v *= s);
     }
 
+    /// Forward transform of a row-major `w`×`h` array into a column-major
+    /// spectrum (`x · h + y`): one transpose instead of two.
+    pub fn forward_to_cols(&self, data: &[Complex32]) -> Vec<Complex32> {
+        assert_eq!(data.len(), self.w * self.h);
+        let (w, h) = (self.w, self.h);
+        let mut rows = data.to_vec();
+        rows.par_chunks_mut(w * batch(w)).for_each(|c| self.fw.process(c));
+        let mut cols = transpose(&rows, w, h);
+        cols.par_chunks_mut(h * batch(h)).for_each(|c| self.fh.process(c));
+        cols
+    }
+
+    /// Column-major spectrum (`x · h + y`) of an `sw`×`sh` row-major block
+    /// zero-padded to `w`×`h` (the block at the origin), written to `out`:
+    /// only the block's rows are transformed along x, and no transpose of
+    /// the padded array is made.
+    pub fn forward_padded_to_cols(&self, src: &[Complex32], sw: usize, sh: usize, out: &mut Vec<Complex32>) {
+        let (w, h) = (self.w, self.h);
+        assert!(sw <= w && sh <= h && src.len() == sw * sh);
+        let mut rows = vec![Complex32::new(0.0, 0.0); w * sh];
+        rows.par_chunks_mut(w).zip(src.par_chunks(sw.max(1))).for_each(|(r, s)| r[..sw].copy_from_slice(s));
+        rows.par_chunks_mut(w * batch(w)).for_each(|c| self.fw.process(c));
+        out.clear();
+        out.resize(w * h, Complex32::new(0.0, 0.0));
+        let nb = batch(h);
+        out.par_chunks_mut(h * nb).enumerate().for_each(|(bi, chunk)| {
+            for (j, col) in chunk.chunks_mut(h).enumerate() {
+                let x = bi * nb + j;
+                for (y, v) in col[..sh].iter_mut().enumerate() {
+                    *v = rows[y * w + x];
+                }
+            }
+            self.fh.process(chunk);
+        });
+    }
+
+    /// Inverse transform of a column-major spectrum (`x · h + y`, transformed
+    /// in place along y), returning rows `0..rows` of the result row-major
+    /// (`rows` × `w`), unnormalised (times w·h).
+    pub fn inverse_cols_to_rows(&self, spec: &mut [Complex32], rows: usize, out: &mut Vec<Complex32>) {
+        assert_eq!(spec.len(), self.w * self.h);
+        let (w, h) = (self.w, self.h);
+        let rows = rows.min(h);
+        spec.par_chunks_mut(h * batch(h)).for_each(|c| self.ih.process(c));
+        out.clear();
+        out.resize(rows * w, Complex32::new(0.0, 0.0));
+        const B: usize = 32;
+        let spec = &*spec;
+        out.par_chunks_mut(w * B).enumerate().for_each(|(bi, chunk)| {
+            let y0 = bi * B;
+            let ny = chunk.len() / w;
+            for x0 in (0..w).step_by(B) {
+                for x in x0..(x0 + B).min(w) {
+                    let col = &spec[x * h + y0..x * h + y0 + ny];
+                    for (dy, &v) in col.iter().enumerate() {
+                        chunk[dy * w + x] = v;
+                    }
+                }
+            }
+            self.iw.process(chunk);
+        });
+    }
+
     fn run(&self, data: &mut [Complex32], fw: &Arc<dyn Fft<f32>>, fh: &Arc<dyn Fft<f32>>) {
         assert_eq!(data.len(), self.w * self.h);
         let (w, h) = (self.w, self.h);
@@ -68,6 +131,12 @@ impl Fft2 {
         let back = transpose(&t, h, w);
         data.copy_from_slice(&back);
     }
+}
+
+/// Transforms of length `n` per `process` call in the parallel passes (one
+/// scratch buffer per call).
+fn batch(n: usize) -> usize {
+    (16_384 / n.max(1)).clamp(1, 64)
 }
 
 /// Transpose a row-major `w`×`h` matrix into `h`×`w`.

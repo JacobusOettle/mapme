@@ -643,21 +643,28 @@ struct Tile {
     w: usize,
     h: usize,
     fft: Fft2,
+    /// Index of the tile's FFT size among the layout's distinct sizes
+    /// (tiles of one size share a template's spectrum).
+    size: usize,
 }
 
 /// FFT tiling of a level's frames (identical for every rotation): one tile
 /// if it fits, else overlapping tiles so that every placement of the largest
 /// template lies wholly inside some tile.
 fn tile_layout(fw: usize, fh: usize, max_t: (usize, usize)) -> Vec<Tile> {
+    tile_layout_capped(fw, fh, max_t, FFT_CAP)
+}
+
+fn tile_layout_capped(fw: usize, fh: usize, max_t: (usize, usize), cap: usize) -> Vec<Tile> {
     let axis = |n: usize, t: usize| -> Vec<(usize, usize)> {
-        if next_fast_len(n) <= FFT_CAP || t >= FFT_CAP {
+        if next_fast_len(n) <= cap || t >= cap {
             return vec![(0, n)];
         }
-        let stride = FFT_CAP + 1 - t;
+        let stride = cap + 1 - t;
         let mut v = Vec::new();
         let mut s = 0;
         loop {
-            let len = FFT_CAP.min(n - s);
+            let len = cap.min(n - s);
             v.push((s, len));
             if s + len >= n {
                 break;
@@ -667,23 +674,40 @@ fn tile_layout(fw: usize, fh: usize, max_t: (usize, usize)) -> Vec<Tile> {
         v
     };
     let mut tiles = Vec::new();
+    let mut sizes: Vec<(usize, usize)> = Vec::new();
     for &(y0, h) in &axis(fh, max_t.1) {
         for &(x0, w) in &axis(fw, max_t.0) {
-            tiles.push(Tile { x0, y0, w, h, fft: Fft2::new(next_fast_len(w), next_fast_len(h)) });
+            let (nw, nh) = (next_fast_len(w), next_fast_len(h));
+            let size = sizes.iter().position(|&z| z == (nw, nh)).unwrap_or_else(|| {
+                sizes.push((nw, nh));
+                sizes.len() - 1
+            });
+            tiles.push(Tile { x0, y0, w, h, fft: Fft2::new(nw, nh), size });
         }
     }
     tiles
 }
 
-/// Forward FFT of a template zero-padded to a tile's FFT size.
+/// Number of distinct FFT sizes of a layout.
+fn n_sizes(layout: &[Tile]) -> usize {
+    layout.iter().map(|t| t.size + 1).max().unwrap_or(0)
+}
+
+/// Column-major spectrum of a template zero-padded to `tile`'s FFT size
+/// (empty when the template does not fit the tile).
 fn template_hat(t: &Template, tile: &Tile) -> Vec<C32> {
-    let (fw, fh) = (tile.fft.w, tile.fft.h);
-    let mut buf = vec![C32::new(0.0, 0.0); fw * fh];
-    for y in 0..t.h {
-        buf[y * fw..y * fw + t.w].copy_from_slice(&t.data[y * t.w..(y + 1) * t.w]);
+    let mut out = Vec::new();
+    if t.w <= tile.fft.w && t.h <= tile.fft.h {
+        tile.fft.forward_padded_to_cols(&t.data, t.w, t.h, &mut out);
     }
-    tile.fft.forward(&mut buf);
-    buf
+    out
+}
+
+/// A template's spectra on each distinct FFT size of a layout.
+fn template_hats(t: &Template, layout: &[Tile]) -> Vec<Vec<C32>> {
+    (0..n_sizes(layout))
+        .map(|s| layout.iter().find(|tile| tile.size == s).map_or_else(Vec::new, |tile| template_hat(t, tile)))
+        .collect()
 }
 
 /// The DEM field resampled into the map's frame for one rotation: frame cell
@@ -698,7 +722,7 @@ struct Frame {
     /// Integral images ((w+1)×(h+1)) of |D|² and validity.
     e_int: Vec<f64>,
     v_int: Vec<f64>,
-    /// FFT of the field in each tile of the level's layout.
+    /// Column-major FFT of the field in each tile of the level's layout.
     d_hats: Vec<Vec<C32>>,
     /// With a search region: may a map centre lie in frame cell (u, v)?
     allowed: Option<Vec<bool>>,
@@ -715,7 +739,7 @@ struct LevelRegion<'a> {
 }
 
 impl Frame {
-    #[inline]
+    #[cfg(test)]
     fn box_sum(&self, int: &[f64], x: usize, y: usize, w: usize, h: usize) -> f64 {
         let s = self.w + 1;
         int[(y + h) * s + x + w] - int[y * s + x + w] - int[(y + h) * s + x] + int[y * s + x]
@@ -729,15 +753,26 @@ impl Frame {
     }
 }
 
-fn integral(vals: &[f64], w: usize, h: usize) -> Vec<f64> {
+/// Integral image ((w+1)×(h+1)) of `val(i)` over a row-major w×h grid:
+/// row prefix sums in parallel, then each row added to the one above it in
+/// parallel pieces (the same additions as a running sum).
+fn integral(w: usize, h: usize, val: impl Fn(usize) -> f64 + Sync) -> Vec<f64> {
     let s = w + 1;
     let mut out = vec![0.0f64; s * (h + 1)];
-    for y in 0..h {
+    out[s..].par_chunks_mut(s).enumerate().for_each(|(y, row)| {
         let mut run = 0.0;
         for x in 0..w {
-            run += vals[y * w + x];
-            out[(y + 1) * s + x + 1] = out[y * s + x + 1] + run;
+            run += val(y * w + x);
+            row[x + 1] = run;
         }
+    });
+    for y in 2..=h {
+        let (above, rest) = out[(y - 1) * s..].split_at_mut(s);
+        rest[..s].par_chunks_mut(1024).zip(above.par_chunks(1024)).for_each(|(r, a)| {
+            for (v, p) in r.iter_mut().zip(a) {
+                *v += *p;
+            }
+        });
     }
     out
 }
@@ -789,10 +824,8 @@ fn build_frame(
             }
         }
     });
-    let energy: Vec<f64> = d.iter().map(|z| z.norm_sqr() as f64).collect();
-    let vals: Vec<f64> = valid.iter().map(|&v| v as u8 as f64).collect();
-    let e_int = integral(&energy, fw, fh);
-    let v_int = integral(&vals, fw, fh);
+    let e_int = integral(fw, fh, |i| d[i].norm_sqr() as f64);
+    let v_int = integral(fw, fh, |i| valid[i] as u8 as f64);
     let d_hats = layout
         .iter()
         .map(|tile| {
@@ -802,8 +835,7 @@ fn build_frame(
                 let src = (tile.y0 + y) * fw + tile.x0;
                 buf[y * nw..y * nw + tile.w].copy_from_slice(&d[src..src + tile.w]);
             }
-            tile.fft.forward(&mut buf);
-            buf
+            tile.fft.forward_to_cols(&buf)
         })
         .collect();
     let allowed = region.map(|lr| {
@@ -852,114 +884,253 @@ impl Peak {
     }
 }
 
-fn surface_stats(ncc: &[f32]) -> (f32, f32) {
-    let (mut n, mut s, mut s2) = (0usize, 0.0f64, 0.0f64);
-    for &v in ncc {
-        if v.is_finite() {
-            n += 1;
-            s += v as f64;
-            s2 += (v as f64) * (v as f64);
-        }
-    }
-    if n < 2 {
-        return (0.0, 1.0);
-    }
-    let m = s / n as f64;
-    (m as f32, ((s2 / n as f64 - m * m).max(0.0)).sqrt() as f32)
-}
-
-/// Correlate one template over a frame; returns the NCC surface over all
-/// placements (fw−tw+1)×(fh−th+1), −∞ where invalid or outside the disc of
-/// `radius` frame cells around the GPS position. `hats` are the template's
-/// cached spectra per tile (computed here when None).
-fn correlate(
-    t: &Template,
-    hats: Option<&[Vec<C32>]>,
+/// Correlate one or two templates over a frame; returns each one's NCC
+/// surface over all placements (fw−tw+1)×(fh−th+1), −∞ where invalid or
+/// outside the disc of `radius` frame cells around the GPS position (or
+/// outside the frame's region). `hats` are the templates' cached spectra
+/// per FFT size (`template_hats`; computed here when None).
+///
+/// Only the real part of a correlation is wanted, so two templates share
+/// one inverse transform: with X = D̂·conj(T̂), the Hermitian part
+/// H(X)[k] = (X[k] + conj(X[−k]))/2 transforms back to Re(x), and
+/// IFFT(H(X₁) + i·H(X₂)) = Re(x₁) + i·Re(x₂).
+fn correlate_set(
+    ts: &[&Template],
+    hats: Option<&[&[Vec<C32>]]>,
     f: &Frame,
     layout: &[Tile],
     radius: f64,
-) -> (usize, usize, Vec<f32>) {
-    if t.w > f.w || t.h > f.h {
-        return (0, 0, Vec::new());
+) -> Vec<(usize, usize, Vec<f32>)> {
+    debug_assert!(!ts.is_empty() && ts.len() <= 2);
+    let mut surfaces: Vec<(usize, usize, Vec<f32>)> = ts
+        .iter()
+        .map(|t| {
+            if t.w > f.w || t.h > f.h {
+                (0, 0, Vec::new())
+            } else {
+                let (pw, ph) = (f.w - t.w + 1, f.h - t.h + 1);
+                (pw, ph, vec![f32::NEG_INFINITY; pw * ph])
+            }
+        })
+        .collect();
+    // Tiles of one FFT size in a row, so that spectra computed here serve them all.
+    let mut order: Vec<usize> = (0..layout.len()).collect();
+    order.sort_by_key(|&k| layout[k].size);
+    let mut own: Vec<(usize, Vec<C32>)> = Vec::new();
+    let (mut y, mut out) = (Vec::new(), Vec::new());
+    for k in order {
+        let tile = &layout[k];
+        let fits: Vec<usize> =
+            (0..ts.len()).filter(|&i| surfaces[i].0 > 0 && ts[i].w <= tile.w && ts[i].h <= tile.h).collect();
+        if fits.is_empty() {
+            continue;
+        }
+        if hats.is_none() && own.first().is_none_or(|o| o.0 != tile.size) {
+            own = ts.iter().map(|t| (tile.size, template_hat(t, tile))).collect();
+        }
+        let hat = |i: usize| -> &[C32] {
+            match hats {
+                Some(h) => &h[i][tile.size],
+                None => &own[i].1,
+            }
+        };
+        let d = &f.d_hats[k];
+        let (nw, nh) = (tile.fft.w, tile.fft.h);
+        if y.len() != nw * nh {
+            // Every element is written below.
+            y.clear();
+            y.resize(nw * nh, C32::new(0.0, 0.0));
+        }
+        if let [a, b] = fits[..] {
+            let (ha, hb) = (hat(a), hat(b));
+            y.par_chunks_mut(nh).enumerate().for_each(|(x, col)| {
+                let xn = (nw - x) % nw;
+                let (dc, dn) = (&d[x * nh..(x + 1) * nh], &d[xn * nh..(xn + 1) * nh]);
+                let (ac, an) = (&ha[x * nh..(x + 1) * nh], &ha[xn * nh..(xn + 1) * nh]);
+                let (bc, bn) = (&hb[x * nh..(x + 1) * nh], &hb[xn * nh..(xn + 1) * nh]);
+                // (H(X_a) + i·H(X_b))[k] from k and −k (y index 0 is its own mirror).
+                let comb = |dk: C32, dm: C32, ak: C32, am: C32, bk: C32, bm: C32| -> C32 {
+                    let dm = dm.conj();
+                    let xa = dk * ak.conj() + dm * am;
+                    let xb = dk * bk.conj() + dm * bm;
+                    C32::new(0.5 * (xa.re - xb.im), 0.5 * (xa.im + xb.re))
+                };
+                col[0] = comb(dc[0], dn[0], ac[0], an[0], bc[0], bn[0]);
+                let mirror = dn[1..].iter().rev().zip(an[1..].iter().rev()).zip(bn[1..].iter().rev());
+                for ((((o, &dk), &ak), &bk), ((&dm, &am), &bm)) in
+                    col[1..].iter_mut().zip(&dc[1..]).zip(&ac[1..]).zip(&bc[1..]).zip(mirror)
+                {
+                    *o = comb(dk, dm, ak, am, bk, bm);
+                }
+            });
+        } else {
+            let ha = hat(fits[0]);
+            y.par_iter_mut().zip(d.par_iter().zip(ha.par_iter())).for_each(|(o, (dk, hk))| *o = dk * hk.conj());
+        }
+        let rows = fits.iter().map(|&i| tile.h - ts[i].h + 1).max().unwrap_or(0);
+        tile.fft.inverse_cols_to_rows(&mut y, rows, &mut out);
+        let scale = 1.0 / (nw * nh) as f64;
+        for (j, &i) in fits.iter().enumerate() {
+            let t = ts[i];
+            let imag = j == 1;
+            let (pw, _, ncc) = &mut surfaces[i];
+            scan_tile(t, f, tile, &out, nw, imag, scale, radius, *pw, ncc);
+        }
     }
-    let (pw, ph) = (f.w - t.w + 1, f.h - t.h + 1);
-    let mut ncc = vec![f32::NEG_INFINITY; pw * ph];
+    surfaces
+}
+
+/// Write the NCC of template `t` at its placements in `tile` into `ncc`
+/// (keeping the larger value where tiles overlap) from the tile's inverse
+/// transform `out` (row-major, `nw` columns; the real or imaginary part,
+/// times `scale`).
+#[allow(clippy::too_many_arguments)]
+fn scan_tile(
+    t: &Template,
+    f: &Frame,
+    tile: &Tile,
+    out: &[C32],
+    nw: usize,
+    imag: bool,
+    scale: f64,
+    radius: f64,
+    pw: usize,
+    ncc: &mut [f32],
+) {
+    let (tpw, tph) = (tile.w - t.w + 1, tile.h - t.h + 1);
     let r2 = radius * radius;
     let n_cells = (t.w * t.h) as f64;
     let floor = ENERGY_FLOOR * n_cells;
     let norm = t.norm.max(1e-12);
-    for (k, tile) in layout.iter().enumerate() {
-        if t.w > tile.w || t.h > tile.h {
-            continue;
-        }
-        let fw = tile.fft.w;
-        let mut buf = match hats {
-            Some(h) => h[k].clone(),
-            None => template_hat(t, tile),
+    let rows = &mut ncc[tile.y0 * pw..(tile.y0 + tph) * pw];
+    let s = f.w + 1;
+    let min_cover = MIN_COVERAGE * n_cells;
+    rows.par_chunks_mut(pw).enumerate().for_each(|(ly, row)| {
+        let iy = tile.y0 + ly;
+        let dy = iy as f64 + t.cy - f.fc.1;
+        let my = iy as f64 + t.cy;
+        let (vt, vb) = (&f.v_int[iy * s..(iy + 1) * s], &f.v_int[(iy + t.h) * s..(iy + t.h + 1) * s]);
+        let (et, eb) = (&f.e_int[iy * s..(iy + 1) * s], &f.e_int[(iy + t.h) * s..(iy + t.h + 1) * s]);
+        let src = &out[ly * nw..ly * nw + tpw];
+        let mut put = |lx: usize| {
+            let ix = tile.x0 + lx;
+            // `Frame::box_sum`, from the two rows of the integral images.
+            let cover = vb[ix + t.w] - vt[ix + t.w] - vb[ix] + vt[ix];
+            if cover < min_cover {
+                return;
+            }
+            let energy = eb[ix + t.w] - et[ix + t.w] - eb[ix] + et[ix];
+            let z = src[lx];
+            let c = if imag { z.im } else { z.re } as f64 * scale;
+            let v = (c / (norm * (energy.max(0.0) + floor).sqrt())) as f32;
+            let o = &mut row[ix];
+            if v > *o {
+                *o = v;
+            }
         };
-        buf.par_iter_mut().zip(f.d_hats[k].par_iter()).for_each(|(a, d)| *a = d * a.conj());
-        tile.fft.inverse(&mut buf);
-        let (tpw, tph) = (tile.w - t.w + 1, tile.h - t.h + 1);
-        let rows: Vec<(usize, Vec<(usize, f32)>)> = (0..tph)
-            .into_par_iter()
-            .map(|ly| {
-                let iy = tile.y0 + ly;
-                let mut row = Vec::with_capacity(tpw);
-                let dy = iy as f64 + t.cy - f.fc.1;
-                let my = iy as f64 + t.cy;
+        match &f.allowed {
+            Some(a) => {
                 for lx in 0..tpw {
-                    let ix = tile.x0 + lx;
-                    match &f.allowed {
-                        Some(a) => {
-                            // The frame cell holding the map centre.
-                            let (u, v) = ((ix as f64 + t.cx).floor(), my.floor());
-                            if u < 0.0 || v < 0.0 || u >= f.w as f64 || v >= f.h as f64 {
-                                continue;
-                            }
-                            if !a[v as usize * f.w + u as usize] {
-                                continue;
-                            }
-                        }
-                        None => {
-                            let dx = ix as f64 + t.cx - f.fc.0;
-                            if dx * dx + dy * dy > r2 {
-                                continue;
-                            }
-                        }
-                    }
-                    let cover = f.box_sum(&f.v_int, ix, iy, t.w, t.h);
-                    if cover < MIN_COVERAGE * n_cells {
+                    // The frame cell holding the map centre.
+                    let (u, v) = (((tile.x0 + lx) as f64 + t.cx).floor(), my.floor());
+                    if u < 0.0 || v < 0.0 || u >= f.w as f64 || v >= f.h as f64 {
                         continue;
                     }
-                    let energy = f.box_sum(&f.e_int, ix, iy, t.w, t.h);
-                    let c = buf[ly * fw + lx].re as f64;
-                    row.push((ix, (c / (norm * (energy.max(0.0) + floor).sqrt())) as f32));
+                    if a[v as usize * f.w + u as usize] {
+                        put(lx);
+                    }
                 }
-                (iy, row)
-            })
-            .collect();
-        for (iy, row) in rows {
-            for (ix, s) in row {
-                let o = &mut ncc[iy * pw + ix];
-                if s > *o {
-                    *o = s;
+            }
+            None => {
+                // Placements whose map centre lies in the disc: an interval of
+                // the row (estimated, then trimmed by the exact test).
+                let rem = r2 - dy * dy;
+                if rem < 0.0 {
+                    return;
+                }
+                let sq = rem.sqrt();
+                let c = f.fc.0 - t.cx - tile.x0 as f64;
+                let inside = |lx: usize| {
+                    let dx = (tile.x0 + lx) as f64 + t.cx - f.fc.0;
+                    dx * dx + dy * dy <= r2
+                };
+                let mut lo = ((c - sq).floor() - 1.0).clamp(0.0, tpw as f64) as usize;
+                let mut hi = ((c + sq).ceil() + 2.0).clamp(0.0, tpw as f64) as usize;
+                while lo < hi && !inside(lo) {
+                    lo += 1;
+                }
+                while hi > lo && !inside(hi - 1) {
+                    hi -= 1;
+                }
+                for lx in lo..hi {
+                    put(lx);
                 }
             }
         }
-    }
-    (pw, ph, ncc)
+    });
 }
 
+/// A surface's mean and standard deviation, and its peaks (value, x, y).
+type SurfacePeaks = ((f32, f32), Vec<(f32, f64, f64)>);
+/// A block's maximum (value, index) and its finite values' count, sum and
+/// sum of squares (`find_peaks`).
+type BlockMax = (f32, usize);
+type BlockSums = (usize, f64, f64);
+
 /// Non-maximum suppression: up to `n` peaks at least `rad` cells apart, with
-/// sub-cell (parabolic) positions.
-fn find_peaks(ncc: &[f32], pw: usize, ph: usize, n: usize, rad: f64) -> Vec<(f32, f64, f64)> {
-    let mut work = ncc.to_vec();
-    let mut out = Vec::new();
+/// sub-cell (parabolic) positions: the greatest value (the first in row-major
+/// order among equal ones), then the greatest beyond `rad` of it, and so on.
+/// Also returns the mean and standard deviation of the finite values (the
+/// spread of the template's surface, against which a peak's height counts:
+/// `Peak::z`). The surface is scanned once, in blocks: each block
+/// keeps its maximum, and only blocks near a chosen peak are scanned again.
+fn find_peaks(ncc: &[f32], pw: usize, ph: usize, n: usize, rad: f64) -> SurfacePeaks {
+    const B: usize = 32;
+    let (bw, bh) = (pw.div_ceil(B), ph.div_ceil(B));
     let r = rad.ceil() as isize;
+    let near = |chosen: &[(isize, isize)], x: isize, y: isize| {
+        chosen.iter().any(|&(cx, cy)| {
+            let (dx, dy) = ((x - cx) as f64, (y - cy) as f64);
+            dx * dx + dy * dy <= rad * rad
+        })
+    };
+    // Block maximum (value, index; the first in row-major order) of cells
+    // not within `rad` of a chosen peak, and the block's finite sums.
+    let scan = |bi: usize, chosen: &[(isize, isize)]| -> (BlockMax, BlockSums) {
+        let (bx, by) = (bi % bw, bi / bw);
+        let (x0, y0) = (bx * B, by * B);
+        let (mut bv, mut bidx) = (f32::NEG_INFINITY, usize::MAX);
+        let (mut cnt, mut s, mut s2) = (0usize, 0.0f64, 0.0f64);
+        for y in y0..(y0 + B).min(ph) {
+            for (x, &v) in ncc[y * pw + x0..y * pw + (x0 + B).min(pw)].iter().enumerate().map(|(i, v)| (x0 + i, v)) {
+                if v.is_finite() {
+                    cnt += 1;
+                    s += v as f64;
+                    s2 += (v as f64) * (v as f64);
+                }
+                if v > bv && (chosen.is_empty() || !near(chosen, x as isize, y as isize)) {
+                    bv = v;
+                    bidx = y * pw + x;
+                }
+            }
+        }
+        ((bv, bidx), (cnt, s, s2))
+    };
+    let first: Vec<(BlockMax, BlockSums)> = (0..bw * bh).into_par_iter().map(|bi| scan(bi, &[])).collect();
+    let (cnt, sum, sum2) = first.iter().fold((0usize, 0.0f64, 0.0f64), |a, (_, b)| (a.0 + b.0, a.1 + b.1, a.2 + b.2));
+    let stats = if cnt < 2 {
+        (0.0, 1.0)
+    } else {
+        let m = sum / cnt as f64;
+        (m as f32, ((sum2 / cnt as f64 - m * m).max(0.0)).sqrt() as f32)
+    };
+    let mut best: Vec<(f32, usize)> = first.into_iter().map(|b| b.0).collect();
+    let mut chosen: Vec<(isize, isize)> = Vec::new();
+    let mut out = Vec::new();
     for _ in 0..n {
-        let (mut bi, mut bv) = (usize::MAX, f32::NEG_INFINITY);
-        for (i, &v) in work.iter().enumerate() {
-            if v > bv {
+        let (mut bv, mut bi) = (f32::NEG_INFINITY, usize::MAX);
+        for &(v, i) in &best {
+            if v > bv || (v == bv && v.is_finite() && i < bi) {
                 bv = v;
                 bi = i;
             }
@@ -991,16 +1162,19 @@ fn find_peaks(ncc: &[f32], pw: usize, ph: usize, n: usize, rad: f64) -> Vec<(f32
         let fx = x as f64 + sub(at(x - 1, y), bv, at(x + 1, y));
         let fy = y as f64 + sub(at(x, y - 1), bv, at(x, y + 1));
         out.push((bv, fx, fy));
-        for yy in (y - r).max(0)..=(y + r).min(ph as isize - 1) {
-            for xx in (x - r).max(0)..=(x + r).min(pw as isize - 1) {
-                let (ddx, ddy) = ((xx - x) as f64, (yy - y) as f64);
-                if ddx * ddx + ddy * ddy <= rad * rad {
-                    work[yy as usize * pw + xx as usize] = f32::NEG_INFINITY;
-                }
-            }
+        chosen.push((x, y));
+        // Blocks within reach of the new peak: their maxima again.
+        let bx0 = ((x - r).max(0) as usize) / B;
+        let bx1 = ((x + r).min(pw as isize - 1) as usize) / B;
+        let by0 = ((y - r).max(0) as usize) / B;
+        let by1 = ((y + r).min(ph as isize - 1) as usize) / B;
+        let redo: Vec<usize> = (by0..=by1).flat_map(|by| (bx0..=bx1).map(move |bx| by * bw + bx)).collect();
+        let again: Vec<(f32, usize)> = redo.par_iter().map(|&bi| scan(bi, &chosen).0).collect();
+        for (&bi, v) in redo.iter().zip(again) {
+            best[bi] = v;
         }
     }
-    out
+    (stats, out)
 }
 
 /// Run the coarse search. `dem` is a coarse mosaic (zoom 11, ~76 m) covering
@@ -1091,6 +1265,84 @@ const FULL_PASS: Pass = Pass { target_side: TARGET_SIDE, scale_step: SCALE_STEP 
 /// First stage of a rotation sweep: smaller templates, 8 % scale steps.
 const SWEEP_PASS: Pass = Pass { target_side: SWEEP_TARGET_SIDE, scale_step: SCALE_STEP * SCALE_STEP };
 
+/// Centre and half extents (Mercator metres) of the area holding the map
+/// centres: the search disc, or a chunk's box.
+fn placement_area(params: &SearchParams) -> ((f64, f64), f64, f64) {
+    match &params.region {
+        Some(r) => {
+            let b = r.bounds;
+            (((b.min_x + b.max_x) / 2.0, (b.min_y + b.max_y) / 2.0), b.width() / 2.0, b.height() / 2.0)
+        }
+        None => {
+            let r = params.search_radius_m.max(0.0) * merc_per_ground(params);
+            (params.center_merc, r, r)
+        }
+    }
+}
+
+/// The scales searched, each on its DEM pyramid level (scale index,
+/// Mercator m/px, level): the coarsest level keeping ≥ `target_side` cells,
+/// or coarser while the search window would need FFT tiling and the
+/// template keeps ≥ `TILED_MIN_SIDE` cells. `r0`: the DEM's Mercator metres
+/// per cell.
+fn scale_plan(params: &SearchParams, img_w: usize, img_h: usize, r0: f64, pass: Pass) -> Vec<(usize, f64, usize)> {
+    let kmg = merc_per_ground(params);
+    let (_, phx, phy) = placement_area(params);
+    let radius_cells0 = phx.max(phy) / r0;
+    let mut plan = Vec::new();
+    for (si, &s) in scale_list(params, pass.scale_step).iter().enumerate() {
+        let s_merc = s * kmg;
+        let m0 = img_w.min(img_h) as f64 * s_merc / r0;
+        if m0 < MIN_SIDE {
+            continue;
+        }
+        let big0 = img_w.max(img_h) as f64 * s_merc / r0;
+        let at = |l: usize| (1u64 << l) as f64;
+        let mut level = 0usize;
+        while level < 8
+            && (m0 / at(level + 1) >= pass.target_side
+                || (m0 / at(level + 1) >= TILED_MIN_SIDE
+                    && next_fast_len(((2.0 * radius_cells0 + big0) / at(level)).ceil() as usize + 4) > FFT_CAP))
+        {
+            level += 1;
+        }
+        plan.push((si, s_merc, level));
+    }
+    plan
+}
+
+/// The work of a north-up coarse search with `params` for an image of
+/// `img_w` × `img_h` px on a DEM of `dem_res` Mercator metres per cell, in
+/// millions of FFT cells: per pyramid level, the level's FFT tiles once per
+/// template and twice for the frame (its spectrum and integral images).
+/// The search estimate (`wide::estimate`) turns it into seconds.
+pub fn search_work(params: &SearchParams, img_w: usize, img_h: usize, dem_res: f64) -> f64 {
+    if img_w == 0 || img_h == 0 || dem_res.is_nan() || dem_res <= 0.0 {
+        return 0.0;
+    }
+    let (_, phx, phy) = placement_area(params);
+    let plan = scale_plan(params, img_w, img_h, dem_res, FULL_PASS);
+    let mut work = 0.0;
+    for lvl in 0..=plan.iter().map(|p| p.2).max().unwrap_or(0) {
+        let res = dem_res * (1u64 << lvl) as f64;
+        let sizes: Vec<(usize, usize)> = plan
+            .iter()
+            .filter(|p| p.2 == lvl)
+            .map(|p| ((img_w as f64 * p.1 / res).ceil() as usize, (img_h as f64 * p.1 / res).ceil() as usize))
+            .collect();
+        if sizes.is_empty() {
+            continue;
+        }
+        let max_w = sizes.iter().map(|t| t.0).max().unwrap_or(0);
+        let max_h = sizes.iter().map(|t| t.1).max().unwrap_or(0);
+        let fw = (2.0 * phx / res).ceil() as usize + max_w + 4;
+        let fh = (2.0 * phy / res).ceil() as usize + max_h + 4;
+        let cells: usize = tile_layout(fw, fh, (max_w, max_h)).iter().map(|t| t.fft.w * t.fft.h).sum();
+        work += (sizes.len() + 2) as f64 * cells as f64 / 1e6;
+    }
+    work
+}
+
 #[allow(clippy::too_many_arguments)]
 fn search_peaks_with(
     field: &MapField,
@@ -1102,7 +1354,6 @@ fn search_peaks_with(
     cancel: &(dyn Fn() -> bool + Sync),
     progress: &(dyn Fn(f32) + Sync),
 ) -> Vec<Peak> {
-    let target_side = pass.target_side;
     if img_w == 0 || img_h == 0 || dem.w() < 4 || dem.h() < 4 || field.w == 0 || field.h == 0 {
         return Vec::new();
     }
@@ -1110,41 +1361,8 @@ fn search_peaks_with(
     let r0 = dem.res;
     let rots = rotation_list(params);
     let any_rot = rots.iter().any(|&r| !is_zero_rotation(r));
-    // Plan: each scale on its DEM level: the coarsest level keeping
-    // ≥ target_side cells, or coarser while the search window would need FFT
-    // tiling and the template keeps ≥ TILED_MIN_SIDE cells.
-    // Half extents (Mercator metres) of the area holding the map centres:
-    // the search disc, or a chunk's box.
-    let (centre, phx, phy) = match &params.region {
-        Some(r) => {
-            let b = r.bounds;
-            (((b.min_x + b.max_x) / 2.0, (b.min_y + b.max_y) / 2.0), b.width() / 2.0, b.height() / 2.0)
-        }
-        None => {
-            let r = params.search_radius_m.max(0.0) * kmg;
-            (params.center_merc, r, r)
-        }
-    };
-    let radius_cells0 = phx.max(phy) / r0;
-    let mut plan: Vec<(usize, f64, usize)> = Vec::new(); // (scale index, s_merc, level)
-    for (si, &s) in scale_list(params, pass.scale_step).iter().enumerate() {
-        let s_merc = s * kmg;
-        let m0 = img_w.min(img_h) as f64 * s_merc / r0;
-        if m0 < MIN_SIDE {
-            continue;
-        }
-        let big0 = img_w.max(img_h) as f64 * s_merc / r0;
-        let at = |l: usize| (1u64 << l) as f64;
-        let mut level = 0usize;
-        while level < 8
-            && (m0 / at(level + 1) >= target_side
-                || (m0 / at(level + 1) >= TILED_MIN_SIDE
-                    && next_fast_len(((2.0 * radius_cells0 + big0) / at(level)).ceil() as usize + 4) > FFT_CAP))
-        {
-            level += 1;
-        }
-        plan.push((si, s_merc, level));
-    }
+    let (centre, phx, phy) = placement_area(params);
+    let mut plan = scale_plan(params, img_w, img_h, r0, pass);
     if plan.is_empty() {
         return Vec::new();
     }
@@ -1217,29 +1435,36 @@ fn search_peaks_with(
         let layout = tile_layout(fw, fh, (max_w, max_h));
         // With several rotations, transform each template once per level
         // (within a memory budget) instead of once per rotation.
-        let hat_bytes: usize = layout.iter().map(|t| t.fft.w * t.fft.h * 8).sum::<usize>() * templates.len();
-        let hats: Option<Vec<Vec<Vec<C32>>>> = (rots.len() > 1 && hat_bytes <= HAT_CACHE_BYTES).then(|| {
-            templates.par_iter().map(|(_, t)| layout.iter().map(|tile| template_hat(t, tile)).collect()).collect()
-        });
+        let size_bytes: usize = (0..n_sizes(&layout))
+            .filter_map(|s| layout.iter().find(|t| t.size == s))
+            .map(|t| t.fft.w * t.fft.h * 8)
+            .sum();
+        let hat_bytes = size_bytes * templates.len();
+        let hats: Option<Vec<Vec<Vec<C32>>>> = (rots.len() > 1 && hat_bytes <= HAT_CACHE_BYTES)
+            .then(|| templates.par_iter().map(|(_, t)| template_hats(t, &layout)).collect());
         for (ri, &rot) in rots.iter().enumerate() {
             if cancel() {
                 return Vec::new();
             }
             let frame = build_frame(&grid, gc, rot.to_radians(), fw, fh, &layout, lregion);
             tick();
+            // Templates in pairs (neighbouring scales: similar sizes) share
+            // their inverse transforms (`correlate_set`).
             let fpeaks: Vec<Peak> = templates
-                .par_iter()
+                .par_chunks(2)
                 .enumerate()
-                .flat_map_iter(|(ti, (si, t))| {
+                .flat_map_iter(|(pi, pair)| {
                     if cancel() {
                         return Vec::new();
                     }
-                    let cached = hats.as_ref().map(|h| h[ti].as_slice());
-                    let (pw, ph, ncc) = correlate(t, cached, &frame, &layout, rc);
-                    let (mu, sd) = surface_stats(&ncc);
-                    let out: Vec<Peak> = find_peaks(&ncc, pw, ph, PEAKS_PER_TEMPLATE, rad_cells(t.s_merc))
-                        .into_iter()
-                        .map(|(score, fx, fy)| {
+                    let ts: Vec<&Template> = pair.iter().map(|(_, t)| t).collect();
+                    let cached: Option<Vec<&[Vec<C32>]>> =
+                        hats.as_ref().map(|h| (0..pair.len()).map(|j| h[2 * pi + j].as_slice()).collect());
+                    let surfaces = correlate_set(&ts, cached.as_deref(), &frame, &layout, rc);
+                    let mut out: Vec<Peak> = Vec::new();
+                    for ((si, t), (pw, ph, ncc)) in pair.iter().zip(surfaces) {
+                        let ((mu, sd), found) = find_peaks(&ncc, pw, ph, PEAKS_PER_TEMPLATE, rad_cells(t.s_merc));
+                        out.extend(found.into_iter().map(|(score, fx, fy)| {
                             let (lx, ly) = frame.to_level(fx + t.cx, fy + t.cy);
                             Peak {
                                 score,
@@ -1256,9 +1481,9 @@ fn search_peaks_with(
                                 rot_idx: ri,
                                 scale_step: pass.scale_step,
                             }
-                        })
-                        .collect();
-                    tick();
+                        }));
+                        tick();
+                    }
                     out
                 })
                 .collect();
@@ -1447,6 +1672,169 @@ mod tests {
         // Away from it: a plain clamp.
         let q = (-half + 300_000.0, 150_000.0);
         assert_eq!(nearest_in_box(&b, q), (b.max_x, b.max_y));
+    }
+
+    /// The FFT correlation (tiled, two templates per inverse transform, with
+    /// and without cached spectra) equals the NCC computed directly.
+    #[test]
+    fn correlation_matches_direct_ncc() {
+        let mut seed = 99u64;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 11) as f32 / (1u64 << 53) as f32 - 0.5
+        };
+        let (gw, gh) = (90usize, 70usize);
+        let d: Vec<C32> = (0..gw * gh).map(|_| C32::new(rnd(), rnd())).collect();
+        let valid: Vec<bool> = (0..gw * gh).map(|i| i % 17 != 3).collect();
+        let g = GridField { x0: 0, y0: 0, w: gw, h: gh, d, valid };
+        let mk = |w: usize, h: usize, rnd: &mut dyn FnMut() -> f32| {
+            let data: Vec<C32> = (0..w * h).map(|_| C32::new(rnd(), rnd())).collect();
+            let norm = data.iter().map(|z| z.norm_sqr() as f64).sum::<f64>().sqrt();
+            Template { w, h, data, cx: w as f64 / 2.0, cy: h as f64 / 2.0, s_merc: 1.0, norm }
+        };
+        let ts = [mk(9, 7, &mut rnd), mk(11, 8, &mut rnd), mk(6, 10, &mut rnd)];
+        let (fw, fh) = (80usize, 60usize);
+        for cap in [128usize, 30] {
+            // cap 30: 3 × 3 tiles of up to four FFT sizes.
+            let layout = tile_layout_capped(fw, fh, (11, 10), cap);
+            assert!(cap > 100 || (layout.len() > 4 && n_sizes(&layout) > 1));
+            for theta in [0.0f64, 0.3] {
+                let frame = build_frame(&g, (45.0, 35.0), theta, fw, fh, &layout, None);
+                let radius = 25.0;
+                let hats: Vec<Vec<Vec<C32>>> = ts.iter().map(|t| template_hats(t, &layout)).collect();
+                for (set, cached) in [(vec![0usize, 1], false), (vec![2], false), (vec![1, 2], true)] {
+                    let tr: Vec<&Template> = set.iter().map(|&i| &ts[i]).collect();
+                    let ch: Vec<&[Vec<C32>]> = set.iter().map(|&i| hats[i].as_slice()).collect();
+                    let got = correlate_set(&tr, cached.then_some(ch.as_slice()), &frame, &layout, radius);
+                    for (t, (pw, ph, ncc)) in tr.iter().zip(&got) {
+                        assert_eq!((*pw, *ph), (fw - t.w + 1, fh - t.h + 1));
+                        let mut n_valid = 0;
+                        for iy in 0..*ph {
+                            for ix in 0..*pw {
+                                // Direct NCC at this placement (frame field from the
+                                // tiles' inverse: rebuild it from the integral images'
+                                // source, the frame's own resampling).
+                                let dx = ix as f64 + t.cx - frame.fc.0;
+                                let dy = iy as f64 + t.cy - frame.fc.1;
+                                let n_cells = (t.w * t.h) as f64;
+                                let cover = frame.box_sum(&frame.v_int, ix, iy, t.w, t.h);
+                                let want = if dx * dx + dy * dy > radius * radius || cover < MIN_COVERAGE * n_cells {
+                                    None
+                                } else {
+                                    let mut c = 0.0f64;
+                                    for v in 0..t.h {
+                                        for u in 0..t.w {
+                                            let z = frame_value(&g, &frame, ix + u, iy + v);
+                                            c += (z * t.data[v * t.w + u].conj()).re as f64;
+                                        }
+                                    }
+                                    let e = frame.box_sum(&frame.e_int, ix, iy, t.w, t.h);
+                                    Some(c / (t.norm * (e.max(0.0) + ENERGY_FLOOR * n_cells).sqrt()))
+                                };
+                                let v = ncc[iy * pw + ix];
+                                match want {
+                                    None => assert!(v == f32::NEG_INFINITY, "{ix},{iy}: {v}"),
+                                    Some(w) => {
+                                        n_valid += 1;
+                                        assert!((v as f64 - w).abs() < 1e-4, "{ix},{iy}: {v} vs {w}");
+                                    }
+                                }
+                            }
+                        }
+                        assert!(n_valid > 100, "{n_valid}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// `find_peaks` as it was: a full scan per peak over a suppressed copy.
+    fn find_peaks_reference(ncc: &[f32], pw: usize, ph: usize, n: usize, rad: f64) -> Vec<(f32, usize)> {
+        let mut work = ncc.to_vec();
+        let mut out = Vec::new();
+        let r = rad.ceil() as isize;
+        for _ in 0..n {
+            let (mut bi, mut bv) = (usize::MAX, f32::NEG_INFINITY);
+            for (i, &v) in work.iter().enumerate() {
+                if v > bv {
+                    bv = v;
+                    bi = i;
+                }
+            }
+            if bi == usize::MAX || !bv.is_finite() {
+                break;
+            }
+            out.push((bv, bi));
+            let (x, y) = ((bi % pw) as isize, (bi / pw) as isize);
+            for yy in (y - r).max(0)..=(y + r).min(ph as isize - 1) {
+                for xx in (x - r).max(0)..=(x + r).min(pw as isize - 1) {
+                    let (ddx, ddy) = ((xx - x) as f64, (yy - y) as f64);
+                    if ddx * ddx + ddy * ddy <= rad * rad {
+                        work[yy as usize * pw + xx as usize] = f32::NEG_INFINITY;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Block-wise peak picking finds the peaks a full scan per peak finds,
+    /// ties and invalid cells included, and the surface's mean and spread.
+    #[test]
+    fn peaks_match_full_scans() {
+        let mut seed = 7u64;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 11) as f32 / (1u64 << 53) as f32
+        };
+        for (pw, ph, rad) in [(150usize, 97usize, 9.5f64), (33, 200, 40.0), (64, 64, 1.0), (5, 3, 2.0)] {
+            // Coarse values (many ties), some cells invalid.
+            let ncc: Vec<f32> = (0..pw * ph)
+                .map(|_| {
+                    let v = rnd();
+                    if v < 0.1 {
+                        f32::NEG_INFINITY
+                    } else {
+                        (v * 20.0).floor() / 20.0
+                    }
+                })
+                .collect();
+            let ((mu, sd), got) = find_peaks(&ncc, pw, ph, 6, rad);
+            let want = find_peaks_reference(&ncc, pw, ph, 6, rad);
+            assert_eq!(got.len(), want.len());
+            for (g, w) in got.iter().zip(&want) {
+                assert_eq!(g.0, w.0);
+                // The same cell (the position is refined by at most half a cell).
+                let (x, y) = ((w.1 % pw) as f64, (w.1 / pw) as f64);
+                assert!((g.1 - x).abs() <= 0.5 && (g.2 - y).abs() <= 0.5, "{g:?} {w:?}");
+            }
+            let fin: Vec<f64> = ncc.iter().filter(|v| v.is_finite()).map(|&v| v as f64).collect();
+            let m = fin.iter().sum::<f64>() / fin.len() as f64;
+            let v = fin.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / fin.len() as f64;
+            assert!((mu as f64 - m).abs() < 1e-5 && (sd as f64 - v.sqrt()).abs() < 1e-4, "{mu} {sd} {m} {v}");
+        }
+    }
+
+    /// The frame's field at cell (u, v), as `build_frame` resamples it.
+    fn frame_value(g: &GridField, f: &Frame, u: usize, v: usize) -> C32 {
+        let zero = is_zero_rotation(f.theta.to_degrees());
+        let (s, c) = f.theta.sin_cos();
+        let (du, dv) = (u as f64 + 0.5 - f.fc.0, v as f64 + 0.5 - f.fc.1);
+        let (gx, gy) = (f.gc.0 + c * du - s * dv, f.gc.1 + s * du + c * dv);
+        let (wx, wy) = (gx - 0.5 - g.x0 as f64, gy - 0.5 - g.y0 as f64);
+        let rot = C32::new((2.0 * f.theta).cos() as f32, -(2.0 * f.theta).sin() as f32);
+        let val = if zero {
+            let (ix, iy) = (wx.round() as i64, wy.round() as i64);
+            if ix >= 0 && iy >= 0 && (ix as usize) < g.w && (iy as usize) < g.h {
+                let i = iy as usize * g.w + ix as usize;
+                g.valid[i].then_some(g.d[i])
+            } else {
+                None
+            }
+        } else {
+            g.sample(wx, wy).map(|z| z * rot)
+        };
+        val.unwrap_or(C32::new(0.0, 0.0))
     }
 
     #[test]

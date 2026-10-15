@@ -105,7 +105,17 @@ order:
      or a sweep if `allow_rotation`). This finds where the map's contour pattern
      matches the real terrain. The prototype found the Grootkloof map
      unambiguously in a 70×80 km window: peak 0.77 vs 0.28 for the next distinct
-     location, about 40 m error.
+     location, about 40 m error. Only the real part of a correlation is
+     wanted, so two templates (neighbouring scales) share one inverse
+     transform (the Hermitian parts of both spectra, one as the real and one
+     as the imaginary part: `search::correlate_set`); spectra are kept column
+     by column (one transpose per transform instead of two), a template's is
+     made once per FFT size of the window's tiles from its non-zero rows, and
+     each surface's peaks are picked block by block in one pass
+     (`find_peaks`). The same NCC surfaces as before (`tests`:
+     `correlation_matches_direct_ncc`, `peaks_match_full_scans`), 2–2.8× faster:
+     the 50 km disc at zoom 11 for a 2 678 × 3 396 px sheet over 0.4–12 m/px
+     7.8 → 2.8 s (11.7 → 5.7 s of CPU).
    * *Refinement* (the "3D match"): skeletonise the mask, split it into contour
      segments at junctions, and sample DEM elevations along every segment. If
      the georeference is right, each contour segment has constant elevation.
@@ -113,7 +123,15 @@ order:
      within-segment elevation variance over similarity (4 parameters), then
      affine (6), with DEM gradients giving the Jacobian. The prototype
      converged to about 14 m max error over the whole sheet (the SRTM noise
-     floor) from starts up to 470 m off, in under a second.
+     floor) from starts up to 470 m off, in under a second. A refinement costs
+     0.3–0.6 s, so an area's candidates are refined only when its best one
+     stands out at all (peak ratio ≥ 1.15, where `refine::confidence` starts
+     to give it search evidence: `georef::REFINE_MIN_RATIO`), and its
+     runners-up only while their peak ratio against it is ≥ 0.5
+     (`RUNNER_UP_MIN_RATIO`). Of the 727 candidates the contour benchmark
+     refined 90–110 km from its maps (every one fitting at 0) the best of
+     their area peaked under 1.15 in 225 of 247 areas; every map located was
+     its area's best candidate, at 1.35 or more.
    * *Confidence*: coarse peak ratio (best vs best distinct location) +
      refined robust cost + inlier fraction. If the map is not in the search
      area, the result is a low score and `failed` status, never a confident
@@ -209,11 +227,14 @@ differ in scale, contour interval, units and furniture:
   searched on a 4–16× downsampled mosaic anyway, and the mosaic holding such
   a map would be hundreds of tiles. The coarse band's DEM box may hold as many
   cells as zoom 11's (`ScaleBand::max_box_half_m`: 240 km on zoom 9). Each
-  hint area and the near disc search the fine band (inner 20 km, then 50 km),
-  then the coarse band over the whole disc; a coarse band refines only
-  candidates whose peak ratio reaches 1.15 (true small-scale matches peak at
-  3–8: refining three wrong ones costs ~2 s in every search the map is not
-  in). A coarse candidate is re-checked one zoom finer than its band
+  hint area searches the fine band, then the coarse band; the near disc the
+  fine band in the inner 20 km, then the coarse band over the whole disc
+  (0.1–0.4 s), then the fine band over the whole disc (the costliest search
+  of all: 1–3 s over 50 km), cheapest first, so that a 23 m/px export
+  without a scale bar is found in 1.2 s instead of 5–6 s; a coarse band
+  refines only candidates whose peak ratio reaches 1.15 (true small-scale
+  matches peak at 3–8: refining three wrong ones costs ~2 s in every search
+  the map is not in). A coarse candidate is re-checked one zoom finer than its band
   (`wide::recheck_zoom`). The wide search plans each band (`wide_band_reach`:
   the fine band on zoom 9/10 as before, the coarse one up to two zooms
   coarser) out to the radius its own scales allow (a small image is too
@@ -1124,15 +1145,33 @@ on coarser tiles, chunk by chunk, and verifies candidates on finer ones.
    that finds nothing in the band covers the whole radius.
 2. *Near*: the disc of `min(search_radius_m, 50 km)` around the fix at zoom 11
    (`wide::near_zoom`; up to 50 km this is the whole search), the inner 20 km first: where the
-   map usually is, a third of the cost (the 50 km disc's coarse search takes
-   ~2 s on 64 tiles, the 20 km one ~0.8 s), so a user near the sheet waits no
+   map usually is, a fifth to a third of the cost (the 50 km disc's coarse search takes
+   ~1–3 s, the 20 km one ~0.3–0.6 s), so a user near the sheet waits no
    longer than with the old 20 km default; without a confident match there,
-   the whole disc follows. In a hint or near area the fit gap among its three
-   refined candidates counts as search evidence (`refine::select_refined`); a
+   the whole disc follows, a scale prior's band first, then the coarser bands
+   before the near zoom's (*Any map: scales, priors, units*). In a hint or
+   near area the fit gap among its refined candidates counts as search
+   evidence (`refine::select_refined`); a
    match that only this gap makes acceptable must also stand out locally
    like a wide match (its zoom-11 re-check below peaks at ≥ 2.2; see
    *Adversarial checks*: without it the phone photo was placed 137 and 145 km
    off at confidence 0.82 and 0.999).
+   *Lines unlike contour lines* (`georef::line_organisation`): contour lines
+   nest, the next line runs alongside, while the lines the detector finds in
+   a photo, hillshade, tints, drainage or hachures meet their neighbours at
+   any angle. Of up to 5 000 samples the nearest sample of another segment
+   within 1/40 of the image's short side is looked up; the share running
+   within 25° of the sample's line is 0.45–0.98 on every map the contour
+   benchmark locates, 0.17–0.74 on the reviewer's 18 non-maps that have
+   lines (10 under 0.40), 0.25–0.51 on flat-terrain maps that cannot be
+   located. With no scale printed or drawn, nothing found in the inner 20 km
+   and fewer than 0.40 parallel (`LINES_MIN_PARALLEL`), the search stops
+   there ("No match within 20 km of you (…). The lines on this image don't
+   run like contour lines, so it wasn't searched farther.",
+   `search.searched_radius_m` 20 km, `diagnostics.search_stopped`), wide
+   search included: those non-maps fail in 0.3–0.7 s instead of 2.7–4.1 s
+   (GPS at the reviewer's place and 100 km off, alternating with the build
+   before). Photos (their own mask) are not judged.
 3. *Wide* (`search_radius_m` > 50 km): the rest of the disc, north up, in
    chunks nearest first (`wide::plan_wide`): the coarse tile grid is cut into
    blocks of `s × s` tiles of placements (where the map centre may lie), each
@@ -1258,11 +1297,10 @@ mosaic, its search buffers and the zoom-9 tiles of the next ring), however
 wide; the 1 000 km search that cannot succeed releases its 675 zoom-9 tiles
 as it goes. The photo is accepted at a re-check ratio of 2.76–2.80 (NCC
 margin 1.33–1.99), confidence 1.0, with the same transform as from on the
-sheet. The estimate for these (scale unknown) is conservative: 1 000 km,
-78.8 MB in 29 rounds and ~121 s on an iPhone vs 55.5 MB in 31 rounds and
-25.6 s of core time here with the scale known; from Cape Town (the photo,
-which fails) 89.6 MB in 36 rounds vs 90.0 MB in 39 rounds, ~80 s of iPhone
-compute (53 s here) vs 61 s here.
+sheet. (These times are of the build that introduced the wide search; the
+search has since become ~2× cheaper: the same 1 000 km from Windhoek fails
+in 14.0 s of core time with the scale label, 30.6 s without; see
+*Estimate*.)
 
 Every scan match is the sheet within 11.6 m (max over the frame). Hermetic tests
 (`tests/wide.rs`) cover the same on fixture tiles and synthetic terrain served
@@ -1329,37 +1367,83 @@ tiles instead of ~100) find it in 9 rounds.
   reproduce tile for tile.
 
 **Estimate** (`mm_search_estimate`, `wide::estimate`): the plan the search
-would make (hint areas, at most 8 after ordering, and the near disc at zoom
-11, the wide chunks; zooms for latitude) for a
-typical 300-dpi A3 sheet over its default scale range (0.4–30 m/px: the
-fine band to 12 m/px on zoom 11, the coarse band on zoom 8 near and in hint
-areas, on zoom 7 in the wide search), plus measured allowances for
-candidate checks (12 zoom-11 tiles per chunk, 16 zoom-13 tiles per
-refinement, two refinements per area and band); bytes from the tile weights
-above; compute from the measured 0.47 s per million mosaic cells over the
-fine band (0.17 s with `"scale_known": true`, a scale label read; the coarse
-band's mosaics are small) and 0.6 s per refinement, times 1.5 for an iPhone;
-download at 2 MB/s plus 0.5 s per round. From Pretoria, scale unknown (in
-brackets: the fine band alone, as before the coarse band):
+would make for the map, in the search's order — hint areas (at most 8 after
+ordering); the near disc (the inner 20 km of the fine band, the scale
+prior's bands, the coarse bands, the fine band's whole disc); each band's
+wide chunks out to its reach (`wide_band_reaches`, as `wide_setup`), zooms
+for latitude — plus measured allowances for candidate checks (10 near-zoom
+tiles per chunk for its re-checks, 14 zoom-13 tiles per refinement, 1.5
+refinements a search: only a candidate that stands out is refined, 0–3 in
+the runs below). Bytes from the tile weights above. Compute from each coarse
+search's planned work (`search::search_work`: per DEM level of its scale
+plan, templates + 2 FFTs of its tiles' cells, in millions): per hint or near
+area 4.9 ms per million cells + 33 ms + 3.5 ms per megapixel of the map; per
+wide chunk 6.2 ms per million cells + 0.20 s + 4.9 ms per megapixel (its
+re-checks included); 30 ms per megapixel of contour extraction that the
+search waits for; 0.35 s per refinement; times 1.5 for an iPhone. Download
+at 2 MB/s plus 0.5 s per round.
 
-| R km | zoom | tiles | MB | rounds | chunks | ~s (compute + download) |
+The request takes `radius_m`, `gps`, `hints` and `max_tiles_per_round` as
+the search does, and the map: `image_size` `[w, h]` in pixels (default a
+300-dpi A3 sheet, 3 507 × 4 960), and its scale prior, if any: a printed
+scale's ground m/px range `scale_m_per_px` `[lo, hi]` (its bands alone), a
+scale bar's `scale_bar_m_per_px` (its bands first, then the default range),
+or `"scale_known": true` (the typical sheet's 1:25 000 at 300 dpi, ±25 %).
+Both ranges are what a search reports in `diagnostics.scale_range`. The
+answer also gives the planned work (`search_work`, of it
+`search_work_wide`, millions of FFT cells).
+
+Measured against complete searches (`wide_measure::estimate_check`; the
+fix at Windhoek, or Nairobi for 2 000 km, so that every map is out of reach
+and every search runs to its end; tiles from a local cache; the reference
+box at low load; core time; estimate = iPhone compute / 1.5):
+
+| map | px | scale prior | R km | tiles meas / est | MB meas / est | rounds meas / est | core s meas / est |
+|---|---|---|---|---|---|---|---|
+| Grootkloof scan | 3 507 × 4 960 | none | 50 | 75 / 91 | 3.4 / 2.8 | 5 / 5 | 2.0 / 2.1 |
+| | | | 250 | 190 / 216 | 9.1 / 10.7 | 11 / 11 | 6.7 / 6.8 |
+| | | | 1 000 | 1 212 / 1 154 | 64.9 / 78.5 | 39 / 35 | 30.6 / 29.9 |
+| | | | 2 000 | 3 368 / 3 337 | 208.9 / 239.9 | 90 / 87 | 81.3 / 80.3 |
+| Grootkloof scan | 3 507 × 4 960 | label | 50 | 73 / 70 | 2.9 / 1.9 | 4 / 4 | 2.0 / 1.4 |
+| | | | 250 | 167 / 166 | 7.3 / 7.9 | 9 / 9 | 3.8 / 3.3 |
+| | | | 1 000 | 993 / 995 | 53.9 / 68.5 | 30 / 30 | 14.0 / 13.0 |
+| Gaia page | 3 508 × 2 480 | bar | 50 | 124 / 105 | 5.1 / 4.1 | 6 / 6 | 1.9 / 1.7 |
+| | | | 250 | 240 / 207 | 10.3 / 9.9 | 12 / 12 | 6.5 / 6.1 |
+| | | | 1 000 | 1 245 / 1 131 | 64.4 / 76.6 | 36 / 36 | 29.3 / 27.2 |
+| | | | 2 000 | 3 589 / 3 314 | 218.3 / 237.9 | 89 / 87 | 73.0 / 72.5 |
+| Gaia raster | 1 118 × 791 | none | 50 | 74 / 95 | 3.4 / 3.1 | 4 / 5 | 0.9 / 1.3 |
+| | | | 250 | 227 / 239 | 9.8 / 10.9 | 13 / 14 | 5.4 / 5.9 |
+| | | | 1 000 | 1 391 / 1 300 | 72.3 / 79.1 | 55 / 56 | 32.8 / 29.7 |
+| | | | 2 000 | 4 017 / 3 809 | 228.0 / 243.5 | 152 / 151 | 83.7 / 83.7 |
+| sparse Rockies | 2 118 × 1 714 | bar | 50 | 86 / 107 | 4.2 / 4.2 | 4 / 5 | 0.9 / 1.3 |
+| | | | 250 | 215 / 239 | 10.3 / 11.9 | 12 / 12 | 5.0 / 5.6 |
+| | | | 1 000 | 1 494 / 1 415 | 88.7 / 94.2 | 47 / 44 | 31.0 / 29.0 |
+
+Over all 28 runs (these and 120 and 500 km): from 120 km on (23 runs)
+core time −14 … +16 % (mean |error| 7 %), tiles −14 … +24 %, megabytes
+−7 … +31 % (a tile's bytes depend on its terrain: the sea compresses to
+almost nothing, so the estimate's average weights overstate a coast), rounds
+−11 … +10 %. A 50 km search takes 1–2 s, and its refinements (0–3 at
+~0.35 s; 1.5 counted) swing that by ±0.5 s: −31 … +49 % there (within
+0.6 s), tiles −15 … +28 %, megabytes −35 … +1 %.
+
+From Pretoria, a typical sheet, scale unknown (in brackets: with a scale
+label, `"scale_known": true`):
+
+| R km | zoom | tiles | MB | rounds | chunks | ~s on an iPhone (compute + download) |
 |---|---|---|---|---|---|---|
-| 20 | 11 | 103 (67) | 3.0 (1.8) | 4 (2) | 0 | 9 (5.3 + 3.5) (5) |
-| 50 | 11 | 164 (128) | 4.6 (3.5) | 5 (3) | 0 | 15 (10.0 + 4.8) (11) |
-| 100 | 10 | 292 (231) | 10.0 (7.5) | 9 (6) | 3 (2) | 24 (14.6 + 9.5) (19) |
-| 250 | 9 | 321 (261) | 13.7 (11.3) | 11 (8) | 5 (4) | 28 (16.0 + 12.4) (24) |
-| 500 | 9 | 539 (465) | 29.2 (25.7) | 16 (13) | 10 (9) | 50 (27.5 + 22.6) (45) |
-| 1 000 | 9 | 1 344 (1 197) | 86.2 (78.8) | 35 (29) | 29 (25) | 131 (70.6 + 60.6) (121) |
-| 2 000 | 9 | 4 379 (4 025) | 303.6 (282.9) | 103 (92) | 97 (88) | 446 (242.5 + 203.3) (424) |
+| 20 | 11 | 60 (37) | 1.8 (1.0) | 4 (3) | 0 | 5 (2.1 + 2.9) (4) |
+| 50 | 11 | 89 (70) | 2.6 (1.9) | 5 (4) | 0 | 7 (3.1 + 3.8) (5) |
+| 100 | 10 | 191 (134) | 7.1 (4.5) | 9 (7) | 3 | 15 (7.1 + 8.0) (10) |
+| 250 | 9 | 220 (168) | 11.0 (8.1) | 11 (9) | 5 | 21 (10.2 + 11.0) (13) |
+| 500 | 9 | 428 (361) | 26.2 (22.1) | 16 (14) | 10 | 39 (17.6 + 21.1) (26) |
+| 1 000 | 9 | 1 195 (1 027) | 82.2 (71.3) | 35 (30) | 29 | 103 (44.6 + 58.6) (70) |
+| 2 000 | 9 | 4 094 (3 702) | 295.9 (269.7) | 103 (93) | 97 | 343 (143.8 + 199.4) (245) |
 
-The coarse band adds few tiles (4 at zoom 8 near, 12–210 at zoom 7 in the
-wide sweep) but its refinements (zoom 13 under each candidate, counted for
-every area) and rounds; a coarse band refines only peaks of ratio 1.15 and
-more, so most searches stay near the bracketed figures.
-
-(For 50 km and more the near disc counts twice: the inner 20 km first, the
-whole disc if the map is not there. A whole search is planned; one that
-finds the map stops early, so these are upper bounds.)
+(A whole search is planned; one that finds the map stops early, so these
+are upper bounds. The previous model, from mosaic cells of the fine band and
+two refinements per area and band, gave 15 s for 50 km and 131 s for
+1 000 km: about twice the time a search now takes.)
 
 Known limits: the wide search is north up (a rotation sweep costs 36 times
 as much; the hint and near areas honour `allow_rotation`); maps narrower than
@@ -1371,9 +1455,9 @@ across the antimeridian the wide chunks reach maps on the far side, but the
 near disc and maps straddling 180° are not searched there; far north and
 south the per-latitude zoom is set at the fix, so a 1 000 km disc from
 69.6°N still plans 1.8× the tiles of one from 26°S (its poleward part has
-smaller tiles); the estimate assumes a typical sheet (a small-scale map adds
-margin tiles, a scale label makes the search ~3× faster, a photo ~15 %
-slower).
+smaller tiles); the estimate takes the map's size and scale prior when the
+request gives them (else a typical sheet, no scale), but not photo mode
+(slower refinements) nor the terrain's bytes.
 
 ## Dark map
 
@@ -1756,10 +1840,41 @@ library card.
   4.3 s median, 9.0 → 7.8 s p95 on the 19 maps both builds search (the
   fine-level sample cap pays for the coarse scale band and the scale bar's
   second pass), while maps the old mask found no contours on now take 3–6 s
-  to fail instead of 0.3 s. Wide search on the reference box: 6–26 s of
-  core time to find the sheet from up to 650 km, 26 s for a whole 1 000 km
-  search that fails (see *Wide search*), at most one chunk mosaic (≤ 8 × 8
-  tiles) in memory. Photo mode adds the normalisation (~0.1 s for 9 MP) and costlier
+  to fail instead of 0.3 s. Then the search's own cost (two templates per
+  inverse transform, block-wise peak picking: `search.rs`; refinement only of
+  candidates that stand out; the coarse band before the near zoom's 50 km
+  disc; a stop at 20 km for lines unlike contour lines: `georef.rs`), the
+  whole contour benchmark (97 maps × GPS at the centre, 10–30 km off and
+  90–110 km off) against 725018e, the two builds alternating one process at
+  a time (load 2–5 from other jobs), same verdicts run for run, none
+  confidently wrong:
+
+  | runs | old p50 / p95 / max | new p50 / p95 / max |
+  |---|---|---|
+  | located (173) | 0.90 / 2.68 / 6.2 s | 0.79 / 1.54 / 3.4 s |
+  | failed (112) | 5.80 / 9.02 / 10.8 s | 2.24 / 3.71 / 6.7 s |
+  | GPS 90–110 km off (97) | 6.01 / 9.22 / 10.8 s | 2.31 / 3.71 / 6.7 s |
+
+  Every located run now within 4 s (169 of 173 before), 171 of 173 within
+  4 s on an iPhone (×1.5: 161 before), 288 of 291 runs of any kind within 4 s
+  (193 before); CPU time of a failing run 10.7 → 4.9 s median. The
+  black-and-white photocopy (2 678 × 3 396 px, 5 m/px) 6.2 → 3.4 s with the
+  GPS 22 km off and 7.0 → 3.2 s 98 km off (11–18 s under load before); the
+  23 m/px native Gaia raster 5.2–5.4 → 0.9–1.1 s. The reviewer's non-maps
+  (41 images: photos, noise, blank pages, hillshade, tints, drainage,
+  hachures, roads; GPS at the place and 100 km off; alternating the same
+  way, load ~3): 2.18 → 0.29 s median, 3.90 → 1.74 s p95, 4.5 → 2.7 s at
+  most, none located (the old build placed a photo of a coffee cup at
+  confidence 0.52); those whose lines do not nest 2.7–4.1 → 0.3–0.7 s, the
+  others searched 0.6–4.5 → 0.6–2.7 s (photos of objects whose edges
+  happen to run in parallel: a brick wall, a cup; a 48 MP page whose
+  terrain is not there; noise images unchanged at 0.6–2.3 s, their
+  skeleton's time). Wide search on the reference box: see the tables
+  under *Wide search*
+  (a whole 1 000 km search that fails: 14 s of core time with a printed
+  scale, 29–33 s without, ~20–50 s on an iPhone plus the download; the
+  estimate's compute within ±16 % of it from 120 km), at most one
+  chunk mosaic (≤ 8 × 8 tiles) in memory. Photo mode adds the normalisation (~0.1 s for 9 MP) and costlier
   line and mask extraction: ~0.9 s grid and ~2 s contour path on the CI-class
   Linux box (4 cores), < 6 s even when three candidates must be refined. The
   warp adds ~0.5 s of fit, plus the contour products in the grid path (one

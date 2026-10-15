@@ -766,3 +766,117 @@ fn wide_session_real_photo() {
         );
     }
 }
+
+/// Process CPU seconds (user + system) so far.
+fn cpu_seconds() -> f64 {
+    let s = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    let rest = s.rfind(')').map_or("", |i| &s[i + 2..]);
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    // utime and stime: fields 14 and 15 of the line (11 and 12 after the state).
+    let tick = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok());
+    tick(11).zip(tick(12)).map_or(f64::NAN, |(u, s)| (u + s) / 100.0)
+}
+
+/// A JPEG or PNG file as packed RGB.
+fn load_image_file(path: &std::path::Path) -> Rgb8 {
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
+        let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let mut r = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().expect("png");
+        let mut buf = vec![0; r.output_buffer_size()];
+        let info = r.next_frame(&mut buf).expect("png frame");
+        let ch = info.color_type.samples();
+        let px: Vec<u8> =
+            buf[..info.buffer_size()].chunks(ch).flat_map(|p| [p[0], p[1.min(ch - 1)], p[2.min(ch - 1)]]).collect();
+        Rgb8::from_rgb(info.width as usize, info.height as usize, px).unwrap()
+    } else {
+        jpeg(path)
+    }
+}
+
+/// `mm_search_estimate` against searches the session runs to the end (the
+/// map is not within the radius, so every area and chunk of the plan is
+/// searched): `ESTIMATE_RUNS` = `label|image|ocr.json or -|lat,lon|radius km[|dpi]`
+/// separated by `;`. Prints, and appends to `ESTIMATE_OUT` as JSON lines,
+/// the rounds, tiles by zoom, megabytes, core (wall) and CPU seconds of the
+/// search next to the estimate for the same image size and scale prior.
+#[test]
+#[ignore]
+fn estimate_check() {
+    use serde_json::json;
+    let runs = std::env::var("ESTIMATE_RUNS").expect("ESTIMATE_RUNS");
+    for run in runs.split(';').filter(|r| !r.trim().is_empty()) {
+        let p: Vec<&str> = run.split('|').map(str::trim).collect();
+        let (label, image, ocr, at, radius_km) = (p[0], p[1], p[2], p[3], p[4].parse::<f64>().unwrap());
+        let ll: Vec<f64> = at.split(',').map(|v| v.trim().parse().unwrap()).collect();
+        let img = load_image_file(std::path::Path::new(image));
+        let mut req = json!({"gps": {"lat": ll[0], "lon": ll[1]}, "methods": ["contours"],
+                             "search_radius_m": radius_km * 1000.0});
+        if ocr != "-" {
+            let v: serde_json::Value = serde_json::from_slice(&std::fs::read(ocr).unwrap()).unwrap();
+            req["ocr"] = if v.is_array() { v } else { v["observations"].clone() };
+        }
+        if let Some(dpi) = p.get(5).and_then(|d| d.parse::<f64>().ok()) {
+            req["dpi"] = json!(dpi);
+        }
+        let s = mapme_core::georef::Session::new(img.clone());
+        let cpu0 = cpu_seconds();
+        let t = Instant::now();
+        let (rs, core_s, fetch_s, by_zoom, bytes) = network_loop(&s, &req);
+        let cpu = cpu_seconds() - cpu0;
+        let r = rs.last().unwrap();
+        let sr = &r["diagnostics"]["scale_range"];
+        let mut ereq = json!({"radius_m": radius_km * 1000.0, "gps": {"lat": ll[0], "lon": ll[1]},
+                              "image_size": [img.w, img.h]});
+        match sr["source"].as_str() {
+            Some("scale_label") => ereq["scale_m_per_px"] = json!([sr["min"], sr["max"]]),
+            Some("scale_bar") => ereq["scale_bar_m_per_px"] = json!([sr["min"], sr["max"]]),
+            _ => {}
+        }
+        let est: serde_json::Value =
+            serde_json::from_str(&mapme_core::wide::search_estimate_json(&ereq.to_string())).unwrap();
+        let tiles: usize = by_zoom.values().sum();
+        // Stage times over every call, and the refinements made.
+        let mut stages: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+        for x in &rs {
+            for (k, v) in x["timings_ms"].as_object().into_iter().flatten() {
+                *stages.entry(k.clone()).or_insert(0.0) += v.as_f64().unwrap_or(0.0);
+            }
+        }
+        let refined: u64 = r["diagnostics"]["search_areas"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|a| a["selected"]["refined"].as_u64().unwrap_or(0))
+            .sum::<u64>()
+            + r["diagnostics"]["wide"]["refined"].as_array().map_or(0, |v| v.len() as u64);
+        let line = json!({
+            "stages_ms": stages, "refined": refined,
+            "label": label, "image": [img.w, img.h], "radius_km": radius_km, "status": r["status"],
+            "scale_source": sr["source"], "rounds": rs.len(), "tiles": tiles, "tiles_by_zoom": by_zoom,
+            "mb": bytes as f64 / 1e6, "core_s": core_s, "cpu_s": cpu, "fetch_s": fetch_s,
+            "wall_s": t.elapsed().as_secs_f64(), "search": r["search"], "estimate": est, "estimate_request": ereq,
+            "areas": r["diagnostics"]["search_areas"].as_array().map_or(0, |a| a.len()),
+            "wide": r["diagnostics"]["wide"], "timings_ms": r["timings_ms"], "message": r["message"],
+        });
+        eprintln!(
+            "[estimate_check] {label} {}x{} R {radius_km} km ({}): {} in {} rounds, {tiles} tiles {:.1} MB, core \
+             {core_s:.1} s (cpu {cpu:.1} s) | estimate: {} tiles {} MB {} rounds, {} s compute (iPhone) + {} s download",
+            img.w,
+            img.h,
+            sr["source"],
+            r["status"],
+            rs.len(),
+            bytes as f64 / 1e6,
+            est["tiles"],
+            est["approx_megabytes"],
+            est["rounds"],
+            est["approx_compute_seconds"],
+            est["approx_download_seconds"]
+        );
+        if let Some(out) = std::env::var_os("ESTIMATE_OUT") {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(out).unwrap();
+            writeln!(f, "{line}").unwrap();
+        }
+    }
+}

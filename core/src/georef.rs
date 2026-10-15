@@ -96,9 +96,21 @@ const DISTINCT_PEAK_RATIO: f32 = 1.6;
 /// and a PDF page drawn at another aspect ratio (Gaia: 1.6 %) or a photo's
 /// flattening skews it.
 const SCALE_BAR_TOLERANCE: f64 = 1.15;
-/// Candidates of a coarser scale band (`wide::scale_bands`) are refined only
-/// from this peak ratio (`refine::confidence` gives search evidence from 1.15).
-const COARSE_BAND_MIN_RATIO: f32 = 1.15;
+/// A hint or near area's coarse candidates are refined only when the best
+/// peaks at least this much over the next distinct place (`refine::confidence`
+/// gives search evidence from 1.15); a coarser scale band
+/// (`wide::scale_bands`) refines only those candidates that do.
+const REFINE_MIN_RATIO: f32 = 1.15;
+/// A fine band's runner-up candidate is refined with the best while its
+/// peak ratio (against the best) reaches this.
+const RUNNER_UP_MIN_RATIO: f32 = 0.5;
+/// Lines of which fewer than this share run parallel to their neighbours
+/// (`line_organisation`) do not nest like contour lines: with nothing found
+/// in the inner 20 km, the near disc is not searched farther, nor the wide
+/// area. Every map the contour benchmark locates: 0.45–0.98; the reviewer's
+/// non-maps 0.17–0.74, 10 of 18 under 0.40; flat-terrain maps that cannot be
+/// located 0.25–0.51.
+const LINES_MIN_PARALLEL: f64 = 0.40;
 /// Search evidence credited to a labels-only fit that the contours agree with.
 const LABELS_PEAK_RATIO: f32 = 1.6;
 /// Fewer contour segments than this: the map has no usable contours.
@@ -524,6 +536,8 @@ pub struct ContourProducts {
     pub level: usize,
     /// How the mask was made (`contour_lines::contour_mask`).
     pub extraction: Value,
+    /// How contour-like the sampled lines are arranged.
+    pub organisation: LineOrganisation,
 }
 
 impl ContourProducts {
@@ -552,6 +566,7 @@ impl ContourProducts {
                 (map_field_at(mask, level_field_cell(img.w, img.h, level), level), ms_since(t))
             },
         );
+        let organisation = line_organisation(&samples, img.w, img.h);
         ContourProducts {
             model: lm.model,
             mask_fraction: mask.fraction(),
@@ -560,6 +575,7 @@ impl ContourProducts {
             timings_ms: [t_mask, t_skel, t_field],
             level,
             extraction: lm.diag,
+            organisation,
         }
     }
 }
@@ -914,6 +930,9 @@ struct Run<'a> {
     wide_limit: Option<f64>,
     /// The map's scale bar, once looked for (`scale_bar`).
     scale_bar: Option<Option<ScaleBar>>,
+    /// The radius the near search stopped at because the image's lines do
+    /// not nest like contour lines (`lines_unlike_contours`).
+    stopped_at_m: Option<f64>,
 }
 
 impl<'a> Run<'a> {
@@ -956,6 +975,7 @@ impl<'a> Run<'a> {
             band: None,
             wide_limit: None,
             scale_bar: None,
+            stopped_at_m: None,
         }
     }
 
@@ -1499,6 +1519,9 @@ impl<'a> Run<'a> {
                 "extraction": p.extraction,
                 "prep_ms": {"mask": round_dp(p.timings_ms[0], 1), "skeleton": round_dp(p.timings_ms[1], 1),
                             "field": round_dp(p.timings_ms[2], 1)},
+                "organisation": {"neighbours": round_dp(p.organisation.neighbours, 3),
+                                 "parallel": round_dp(p.organisation.parallel, 3),
+                                 "queries": p.organisation.queries},
             }),
         );
         self.s.bump_progress(0.35);
@@ -1596,9 +1619,17 @@ impl<'a> Run<'a> {
     ///   which holds only for a page printed at that scale (not for a sheet
     ///   reduced to fit the page), while the bar is measured in the image.
     fn area_bands(&mut self, lat: f64, init: Option<&GridResult>) -> Vec<ScaleBand> {
+        self.area_band_plan(lat, init).0
+    }
+
+    /// `area_bands`, with how many of them are a scale prior's (a printed
+    /// scale, a scale bar, a labels-only fit; 0 for the default range): the
+    /// prior's bands come first, the fallbacks after them.
+    fn area_band_plan(&mut self, lat: f64, init: Option<&GridResult>) -> (Vec<ScaleBand>, usize) {
         let (w, h) = self.size();
         let ((lo, hi), source) = self.scale_range_source(lat, init);
         let mut bands = scale_bands(lo, hi, w, h, lat);
+        let n_prior = if source == "default" { 0 } else { bands.len() };
         match source {
             "scale_bar" => {
                 let (dlo, dhi) = default_scale_range(w, h);
@@ -1612,7 +1643,7 @@ impl<'a> Run<'a> {
             }
             _ => {}
         }
-        bands
+        (bands, n_prior)
     }
 
     /// Coarse search parameters for the area of `radius_m` around `centre`
@@ -1863,17 +1894,22 @@ impl<'a> Run<'a> {
             // axis put the map elsewhere (their band): one misread label
             // must not hide a map lying next to the user. The inner disc
             // first (where the map usually is: as fast as a 20 km search),
-            // then the whole near disc; then the coarser scale bands over
-            // the whole near disc at once (on coarse tiles: cheap). After a
-            // scale bar's band, the default range (the fallback for a
-            // misread bar) searches the whole disc at once.
+            // then the whole near disc: a scale prior's bands first (a
+            // scale bar's, a printed scale's), then the others cheapest
+            // first, the coarser scale bands (on coarse tiles: 0.1–0.4 s)
+            // before the near zoom's 0.4–12 m/px (the costliest search of
+            // all over 50 km: 1–3 s), so that a small-scale map without a
+            // scale bar does not wait for it. After a scale bar's band, the
+            // default range (the fallback for a misread bar) searches the
+            // whole disc at once.
+            let (bands, n_prior) = self.area_band_plan(gps.lat, init);
             let mut steps: Vec<(f64, ScaleBand)> = Vec::new();
-            for (i, band) in self.area_bands(gps.lat, init).into_iter().enumerate() {
-                if i == 0 && band.is_fine() && near > NEAR_FIRST_RADIUS_M {
-                    steps.push((NEAR_FIRST_RADIUS_M, band));
-                }
-                steps.push((near, band));
+            if let Some(&b) = bands.first().filter(|b| b.is_fine() && near > NEAR_FIRST_RADIUS_M) {
+                steps.push((NEAR_FIRST_RADIUS_M, b));
             }
+            let mut rest = bands[n_prior..].to_vec();
+            rest.sort_by_key(|b| b.is_fine());
+            steps.extend(bands[..n_prior].iter().chain(&rest).map(|&b| (near, b)));
             for (r, band) in steps {
                 self.set_progress(SearchStage::Near, band.zoom, 0.0);
                 match self.area_search(Area::Near, gps, r, labelled.as_ref(), &band)? {
@@ -1886,16 +1922,24 @@ impl<'a> Run<'a> {
                 }
                 if r < near {
                     self.set_progress(SearchStage::Near, band.zoom, r);
+                    // Nothing in the inner disc, no scale printed or drawn, and
+                    // lines that do not nest like contour lines: the rest (1–3 s
+                    // for the near zoom's band over 50 km, far more for a wide
+                    // search) is not searched.
+                    if fallback.is_none() && n_prior == 0 && self.lines_unlike_contours()? {
+                        self.stopped_at_m = Some(r);
+                        break;
+                    }
                 }
             }
-            self.set_progress(SearchStage::Near, nz, near);
+            self.set_progress(SearchStage::Near, nz, self.stopped_at_m.unwrap_or(near));
             if let Some((conf, _)) = &fallback {
                 if *conf >= CONFIDENT || !wide {
                     return Ok(Found::Located(fallback.take().unwrap().1));
                 }
             }
             // 5. The wide area, chunk by chunk, nearest first.
-            if wide {
+            if wide && self.stopped_at_m.is_none() {
                 let prod = self.products(self.contour_key())?;
                 let bands = self.area_bands(gps.lat, init);
                 if let Some(r) = self.wide_search(&prod, gps, &bands)? {
@@ -1907,6 +1951,24 @@ impl<'a> Run<'a> {
             return Ok(Found::Located(r));
         }
         Ok(Found::NotFound(self.not_found_message()))
+    }
+
+    /// Do the image's lines run unlike contour lines (`line_organisation`:
+    /// under `LINES_MIN_PARALLEL` of them parallel to their neighbours)? Not
+    /// judged for photos (their mask is another) or on fewer than 100
+    /// samples.
+    fn lines_unlike_contours(&mut self) -> Step<bool> {
+        if self.req.photo {
+            return Ok(false);
+        }
+        let prod = self.products(self.contour_key())?;
+        let o = prod.organisation;
+        let unlike = o.queries >= 100 && o.parallel < LINES_MIN_PARALLEL;
+        if unlike {
+            let why = json!({"reason": "lines unlike contours", "parallel": round_dp(o.parallel, 3)});
+            self.diag.insert("search_stopped".into(), why);
+        }
+        Ok(unlike)
     }
 
     /// Plan the hint areas (request hints and the map's coordinate labels,
@@ -2110,16 +2172,35 @@ impl<'a> Run<'a> {
         record["candidates"] = json!(cands.len());
 
         // Refinement: the best candidate alone when it stands out, else the top few.
-        // A coarser band's candidates must stand out a little (small-scale maps
-        // found there peak at 3–8 its runner-up): refining three wrong ones costs
-        // ~2 s in every search the map is not in.
-        let n = if band.is_fine() {
-            cands.len().min(MAX_REFINE_CANDIDATES)
+        // Nothing when the best does not stand out at all (peak ratio under 1.15,
+        // where its search evidence starts): refining three wrong candidates costs
+        // ~1.3 s in every search the map is not in. Of the contour benchmark's 727
+        // candidates refined 90–110 km from their maps (all fitting at 0), the
+        // best of their area peaked under 1.15 in 225 of 247 areas; every map
+        // located was its area's best candidate at 1.35 or more.
+        // A coarser band refines only its candidates of 1.15 and more (small-scale
+        // maps found there peak at 3–8 their runner-up).
+        // The fine band's runners-up are refined with the best (as alternatives,
+        // and for the fit gap: `select_refined`) while they are within reach
+        // of it: their peak ratio, against the best, ≥ 0.5. A runner-up a
+        // fraction as significant as a best that stands out (0.2–0.35 on flat
+        // ground, where the best fits at 0) never was the map (every map the
+        // benchmark locates is its area's best candidate).
+        let stands_out = cands.first().is_some_and(|c| c.peak_ratio >= REFINE_MIN_RATIO);
+        let n = if !stands_out {
+            0
+        } else if band.is_fine() {
+            1 + cands
+                .iter()
+                .take(MAX_REFINE_CANDIDATES)
+                .skip(1)
+                .take_while(|c| c.peak_ratio >= RUNNER_UP_MIN_RATIO)
+                .count()
         } else {
-            cands.iter().take(MAX_REFINE_CANDIDATES).take_while(|c| c.peak_ratio >= COARSE_BAND_MIN_RATIO).count()
+            cands.iter().take(MAX_REFINE_CANDIDATES).take_while(|c| c.peak_ratio >= REFINE_MIN_RATIO).count()
         };
         if n == 0 && labelled.is_none() {
-            record["outcome"] = json!("no candidates");
+            record["outcome"] = json!(if cands.is_empty() { "no candidates" } else { "not distinct" });
             self.areas.push(record);
             return Ok(AreaResult::NotFound);
         }
@@ -2252,6 +2333,15 @@ impl<'a> Run<'a> {
         }
         if let Some(b) = self.band.as_ref().filter(|_| self.gps.is_some() && self.radius_m > NEAR_RADIUS_M) {
             what.push(format!("first along {}, printed on the map", b.name));
+        }
+        // Lines unlike contour lines: searched to the inner disc only.
+        if let Some(r) = self.stopped_at_m.filter(|_| self.gps.is_some()) {
+            return format!(
+                "No match within {} km of you ({}). The lines on this image don't run like contour lines, so it \
+                 wasn't searched farther. Pick the contour colour, or calibrate manually.",
+                group_thousands((r / 1000.0).round()),
+                what.join("; ")
+            );
         }
         // A map too small for the coarse zooms is searched out to its limit.
         let limit = self.wide_limit.filter(|l| *l < self.radius_m && self.gps.is_some());
@@ -2402,6 +2492,106 @@ impl<'a> Run<'a> {
     }
 }
 
+/// How contour-like the sampled lines are arranged (`line_organisation`).
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct LineOrganisation {
+    /// Of the samples queried, the fraction with a sample of another
+    /// segment within 1/40 of the image's short side…
+    pub neighbours: f64,
+    /// …and of those, the fraction whose nearest such neighbour runs
+    /// parallel to it (within 25°).
+    pub parallel: f64,
+    /// Samples queried.
+    pub queries: usize,
+}
+
+/// Contour lines nest: beside a contour runs the next one, parallel to it,
+/// while the lines found in a photo, hillshade, tints, drainage or hachures
+/// meet their neighbours at any angle. Of at most 5 000 samples, spread
+/// over the segments, the nearest sample of another segment (of at most
+/// 100 000 indexed) within 1/40 of the image's short side, and whether it
+/// runs within 25° of the queried line. Contour benchmark (97 maps): every
+/// map located 0.45–0.98 parallel (flat-terrain maps that cannot be located
+/// 0.25–0.51); the reviewer's non-maps with lines (photos, hillshade, tints,
+/// drainage, hachures, roads) 0.17–0.74, 10 of 18 under 0.40
+/// (`LINES_MIN_PARALLEL`).
+pub fn line_organisation(s: &ContourSamples, w: usize, h: usize) -> LineOrganisation {
+    let n = s.pts.len().min(s.seg.len());
+    if n < 10 || w == 0 || h == 0 {
+        return LineOrganisation::default();
+    }
+    let r = (w.min(h) as f64 / 40.0).max(4.0);
+    let (gw, gh) = ((w as f64 / r).ceil() as usize + 1, (h as f64 / r).ceil() as usize + 1);
+    let cell_of = |p: &[f32; 2]| -> usize {
+        let cx = ((p[0] as f64 / r).floor().max(0.0) as usize).min(gw - 1);
+        let cy = ((p[1] as f64 / r).floor().max(0.0) as usize).min(gh - 1);
+        cy * gw + cx
+    };
+    // Indexed samples, bucketed by grid cell (counting sort).
+    let index_stride = n.div_ceil(100_000).max(1);
+    let indexed: Vec<usize> = (0..n).step_by(index_stride).collect();
+    let mut start = vec![0u32; gw * gh + 1];
+    for &i in &indexed {
+        start[cell_of(&s.pts[i]) + 1] += 1;
+    }
+    for c in 0..gw * gh {
+        start[c + 1] += start[c];
+    }
+    let mut fill = start.clone();
+    let mut bucket = vec![0u32; indexed.len()];
+    for &i in &indexed {
+        let c = cell_of(&s.pts[i]);
+        bucket[fill[c] as usize] = i as u32;
+        fill[c] += 1;
+    }
+    // Unit direction at sample i from its neighbours along the segment.
+    let dir = |i: usize| -> Option<(f64, f64)> {
+        let a = (i.saturating_sub(2)..i).find(|&j| s.seg[j] == s.seg[i]).unwrap_or(i);
+        let b = (i + 1..(i + 3).min(n)).rev().find(|&j| s.seg[j] == s.seg[i]).unwrap_or(i);
+        let (dx, dy) = ((s.pts[b][0] - s.pts[a][0]) as f64, (s.pts[b][1] - s.pts[a][1]) as f64);
+        let l = dx.hypot(dy);
+        (a != b && l > 0.0).then(|| (dx / l, dy / l))
+    };
+    let (mut queries, mut with_nb, mut parallel) = (0usize, 0usize, 0usize);
+    for i in (0..n).step_by(n.div_ceil(5_000).max(1)) {
+        let Some(di) = dir(i) else { continue };
+        queries += 1;
+        let (px, py) = (s.pts[i][0] as f64, s.pts[i][1] as f64);
+        let c = cell_of(&s.pts[i]);
+        let (cx, cy) = (c % gw, c / gw);
+        let mut best: Option<(f64, usize)> = None;
+        for gy in cy.saturating_sub(1)..=(cy + 1).min(gh - 1) {
+            for gx in cx.saturating_sub(1)..=(cx + 1).min(gw - 1) {
+                let g = gy * gw + gx;
+                for &j in &bucket[start[g] as usize..start[g + 1] as usize] {
+                    let j = j as usize;
+                    if s.seg[j] == s.seg[i] {
+                        continue;
+                    }
+                    let d = (s.pts[j][0] as f64 - px).hypot(s.pts[j][1] as f64 - py);
+                    if d <= r && best.is_none_or(|b| d < b.0) {
+                        best = Some((d, j));
+                    }
+                }
+            }
+        }
+        if let Some((_, j)) = best {
+            with_nb += 1;
+            if dir(j).is_some_and(|dj| (di.0 * dj.1 - di.1 * dj.0).abs() < 0.42) {
+                parallel += 1;
+            }
+        }
+    }
+    if queries == 0 {
+        return LineOrganisation::default();
+    }
+    LineOrganisation {
+        neighbours: with_nb as f64 / queries as f64,
+        parallel: parallel as f64 / with_nb.max(1) as f64,
+        queries,
+    }
+}
+
 /// Candidate standing for a labels-only fit in `select_refined`.
 fn labels_candidate(t: &Affine, w: usize, h: usize) -> Candidate {
     let (scale, rotation) = scale_and_rotation(&t.to_homography(), w as f64 / 2.0, h as f64 / 2.0);
@@ -2512,6 +2702,46 @@ mod wide_search;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nested wavy lines (contours) run parallel to their neighbours; short
+    /// strokes at random angles (a photo's edges, hachures) do not.
+    #[test]
+    fn line_organisation_tells_nested_lines_from_strokes() {
+        let (w, h) = (1200usize, 900usize);
+        let mut nested = ContourSamples::default();
+        for k in 0..60 {
+            for x in 0..w {
+                let y = 10.0 + k as f64 * 14.0 + 30.0 * (x as f64 / 150.0 + k as f64 * 0.05).sin();
+                if (0.0..h as f64).contains(&y) {
+                    nested.pts.push([x as f32 + 0.5, y as f32]);
+                    nested.seg.push(k);
+                }
+            }
+        }
+        nested.n_segs = 60;
+        let o = line_organisation(&nested, w, h);
+        assert!(o.parallel > 0.9 && o.neighbours > 0.9 && o.queries > 1000, "{o:?}");
+        let mut seed = 5u64;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut strokes = ContourSamples::default();
+        for k in 0..1500u32 {
+            let (x0, y0, a) = (rnd() * w as f64, rnd() * h as f64, rnd() * std::f64::consts::PI);
+            for i in 0..40 {
+                let (x, y) = (x0 + i as f64 * a.cos(), y0 + i as f64 * a.sin());
+                if x >= 0.0 && y >= 0.0 && x < w as f64 && y < h as f64 {
+                    strokes.pts.push([x as f32, y as f32]);
+                    strokes.seg.push(k);
+                }
+            }
+        }
+        strokes.n_segs = 1500;
+        let o = line_organisation(&strokes, w, h);
+        assert!(o.parallel < 0.4 && o.neighbours > 0.9, "{o:?}");
+        assert_eq!(line_organisation(&ContourSamples::default(), w, h).queries, 0);
+    }
 
     #[test]
     fn request_defaults_nulls_and_unknown_fields() {
