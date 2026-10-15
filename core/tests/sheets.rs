@@ -758,6 +758,11 @@ fn vision_ocr_locates_the_sheets() {
         assert!(err <= GRID_MAX_ERR_M, "{dir}: max error {err:.1} m");
         assert!(r.confidence.unwrap() >= 0.9, "{dir}: {:?}", r.confidence);
         assert_eq!(r.diagnostics["grid"]["lone_label"], false, "{dir}");
+        // The map's labels are a stage of the answer's timings, and cheap: the spot heights'
+        // check against the terrain had looked for the map on its page (40-60 ms on these
+        // 17 MP sheets), which a grid fit never needs.
+        let pois_ms = r.timings_ms.get("pois").copied().unwrap_or(f64::NAN);
+        assert!(pois_ms < common::time_budget_ms(20.0), "{dir}: pois {pois_ms} ms: {:?}", r.timings_ms);
         // Spot heights: the sheets' heights all have four digits (Vision drops leading 1s too:
         // "287", "338", "124" on Mhlabatini).
         let heights: Vec<f64> =

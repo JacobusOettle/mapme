@@ -825,10 +825,14 @@ struct EstimateHint {
     radius_m: Option<f64>,
 }
 
-/// A ground m/px range from a request: finite, positive, ordered.
+/// A ground m/px range from a request: finite, ordered, within the scales
+/// a map can have (`georef::PLAUSIBLE_SCALE`, as the georeference's own
+/// priors: a prior of 10⁸ m/px planned templates of millions of cells).
 fn range_of(v: Option<[f64; 2]>) -> Option<(f64, f64)> {
     let [a, b] = v?;
-    (a.is_finite() && b.is_finite() && a > 0.0 && b >= a).then_some((a, b))
+    let (lo, hi) = crate::georef::PLAUSIBLE_SCALE;
+    let (a, b) = (a.max(lo), b.min(hi));
+    (a.is_finite() && b.is_finite() && b >= a).then_some((a, b))
 }
 
 /// `mm_search_estimate` on JSON; never fails (errors become a failed response).
@@ -862,10 +866,16 @@ pub fn search_estimate_json(json: &str) -> String {
         req.max_tiles_per_round.filter(|v| v.is_finite()).map_or(crate::georef::DEFAULT_MAX_TILES_PER_ROUND, |v| {
             v.round().clamp(crate::georef::MAX_TILES_RANGE.0 as f64, crate::georef::MAX_TILES_RANGE.1 as f64) as usize
         });
-    let size = req
-        .image_size
-        .filter(|s| s.iter().all(|v| v.is_finite() && (16.0..=100_000.0).contains(v)))
-        .map_or(TYPICAL_IMAGE, |s| (s[0].round() as usize, s[1].round() as usize));
+    // An image the session would take (`georef::MAX_IMAGE_PIXELS`).
+    let size = req.image_size.filter(|s| s.iter().all(|v| v.is_finite() && (16.0..=100_000.0).contains(v))).map_or(
+        TYPICAL_IMAGE,
+        |[w, h]| {
+            let side = crate::georef::MAX_IMAGE_SIDE as f64;
+            let (w, h) = (w.min(side), h.min(side));
+            let k = (crate::georef::MAX_IMAGE_PIXELS as f64 / (w * h)).sqrt().min(1.0);
+            ((w * k).round().max(16.0) as usize, (h * k).round().max(16.0) as usize)
+        },
+    );
     let lat = gps.map_or(0.0, |g| g.lat);
     let prior = if let Some((lo, hi)) = range_of(req.scale_m_per_px) {
         ScalePrior::Label(lo, hi)
@@ -1232,5 +1242,33 @@ mod tests {
             serde_json::from_str(&search_estimate_json(r#"{"radius_m": 9e9, "gps": {"lat": -25.85, "lon": 27.4}}"#))
                 .unwrap();
         assert_eq!(v["radius_m"], 2_000_000.0);
+    }
+
+    /// Priors no map has (10⁸–10¹⁰ m/px, as a misread bar might give) and
+    /// images no session takes are what the georeference would make of
+    /// them: the default range, the session's largest image. They planned
+    /// templates of millions of cells (minutes of work for one estimate).
+    #[test]
+    fn estimate_bounds_its_inputs() {
+        let est = |extra: &str| -> (Value, f64) {
+            let t = std::time::Instant::now();
+            let json = format!(r#"{{"radius_m": 500000, "gps": {{"lat": -29.3, "lon": 29.4}}{extra}}}"#);
+            let v: Value = serde_json::from_str(&search_estimate_json(&json)).unwrap();
+            (v, t.elapsed().as_secs_f64())
+        };
+        let (none, _) = est("");
+        for prior in [r#""scale_m_per_px": [1e9, 1e10]"#, r#""scale_bar_m_per_px": [1e8, 2e8]"#] {
+            let (v, s) = est(&format!(", {prior}"));
+            assert_eq!(v["status"], "ok", "{prior}: {v}");
+            assert!(s < 1.0, "{prior}: {s:.1} s");
+            assert_eq!(v["approx_compute_seconds"], none["approx_compute_seconds"], "{prior}: {v}");
+        }
+        // Within the plausible scales, a prior still narrows the search.
+        let (v, _) = est(r#", "scale_m_per_px": [400, 1e9]"#);
+        assert!(v["approx_compute_seconds"].as_f64().unwrap() < 600.0, "{v}");
+        let (huge, s) = est(r#", "image_size": [100000, 100000]"#);
+        let (cap, _) = est(r#", "image_size": [20000, 20000]"#);
+        assert!(s < 1.0, "{s:.1} s");
+        assert_eq!(huge["approx_compute_seconds"], cap["approx_compute_seconds"], "{huge} vs {cap}");
     }
 }

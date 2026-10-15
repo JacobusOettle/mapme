@@ -95,6 +95,8 @@ REGIONS = {
                         flat=True, notes="Great Plains, near-flat"),
     "lyngen": dict(lat=69.60, lon=20.25, lang="no", treeline=500, forest=0.2, snowline=1100, tm=None,
                    notes="Lyngen Alps, sea level to 1830 m, fjords and glaciers"),
+    "svalbard": dict(lat=78.15, lon=16.0, lang="no", treeline=0, forest=0.0, snowline=600, tm=None,
+                     notes="Svalbard, Adventdalen / Longyearbyen, sea level to 1100 m, glaciers"),
 }
 
 NAME_PARTS = {
@@ -1709,6 +1711,9 @@ def regional_suite():
         C("regional-alps-otm", "opentopo", "alps", 40.0, (2000, 1500)),
         C("regional-lyngen-otm", "opentopo", "lyngen", 30.0, (2000, 1500)),
         C("regional-norway-gaia", "gaia", "norway_fjords", 35.0, (1800, 1300), page="screen"),
+        # 78 N: Terrarium's zoom 9-10 terrain there is too coarse for a 30 m/px map, and zoom 11
+        # would take ~400 tiles: no answer (it must not be a confident wrong one).
+        C("regional-svalbard-otm", "opentopo", "svalbard", 30.0, (2000, 1500)),
     ]
 
 

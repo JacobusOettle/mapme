@@ -479,3 +479,61 @@ fn langalibalele_native_central_crop_is_honest() {
     let (resp, errs) = native_part(Rgb8::from_rgb(w, h, data).unwrap(), (x0 as f64, y0 as f64));
     assert_honest("native central 50 % (lossless)", &resp, errs, 75.0);
 }
+
+/// The page render of map A with all but its western quarter blank (painted
+/// the paper's colour, its frame with it: the sea, a glacier, the land
+/// beyond a park as some maps leave them). The contours hold the west only;
+/// the user may be anywhere on the map. Judged over the inked strip alone,
+/// the page's 1.6 % aspect ratio was dropped and extrapolated across the
+/// blank part: 57/129 m off at 0.996 with ±43 m (75 % blank), 80/175 m at
+/// 1.0 with ±30 m (85 %). Now the map's extent is the raster when its
+/// rectangle reaches two of the raster's edges or more: within the ±
+/// everywhere, or no answer.
+#[test]
+fn langalibalele_page_blank_east_is_honest() {
+    let _g = serial();
+    let case = Case::load("gaia-langalibalele", "case.json");
+    let frame: Vec<f64> = case.json["map_frame_px"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    for keep in [0.25, 0.15] {
+        let mut img = case.image();
+        // The paper: the 98th percentile of each channel.
+        let paper: Vec<u8> = (0..3)
+            .map(|c| {
+                let mut v: Vec<u8> = img.data.iter().skip(c).step_by(3).copied().collect();
+                let k = v.len() * 98 / 100;
+                *v.select_nth_unstable(k).1
+            })
+            .collect();
+        let x_blank = (frame[0] + keep * (frame[2] - frame[0])).ceil() as usize;
+        for y in 0..img.h {
+            for x in x_blank..img.w {
+                let i = (y * img.w + x) * 3;
+                img.data[i..i + 3].copy_from_slice(&paper);
+            }
+        }
+        let (lat, lon) = case.gps("centre");
+        let req = GeorefRequest {
+            gps: Some(GpsFix { lat, lon, accuracy_m: Some(10.0) }),
+            dpi: case.json["dpi"].as_f64(),
+            methods: vec!["contours".into()],
+            ..Default::default()
+        };
+        let resp = case.run_request(&Session::new(img), &req);
+        let errs = case.errors(&resp);
+        let s = format!(
+            "{:.0} % blank: {:?} conf {:?} ±{:?} m, errors (median, max) {:?}, extent {}, cover {}: {}",
+            100.0 * (1.0 - keep),
+            resp.status,
+            resp.confidence,
+            resp.rms_m,
+            errs.as_ref().map(|e| (e[e.len() / 2], e[e.len() - 1])),
+            resp.diagnostics["contours"]["map_extent"],
+            resp.diagnostics["refined"]["extent_cover"],
+            resp.message
+        );
+        println!("{s}");
+        if let Some(e) = errs {
+            assert!(e[e.len() - 1] <= resp.rms_m.unwrap(), "{s}: the error exceeds the reported ±");
+        }
+    }
+}

@@ -34,8 +34,8 @@ fn live_styles() -> MutexGuard<'static, BTreeSet<usize>> {
 }
 
 /// Largest raster accepted (pixels per side and in total).
-const MAX_SIDE: u32 = 32_768;
-const MAX_PIXELS: u64 = 400_000_000;
+const MAX_SIDE: u32 = crate::georef::MAX_IMAGE_SIDE;
+const MAX_PIXELS: u64 = crate::georef::MAX_IMAGE_PIXELS;
 
 /// Return codes of the tile functions.
 pub const MM_OK: i32 = 0;

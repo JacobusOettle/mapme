@@ -87,6 +87,10 @@ pub struct RefineResult {
     /// Fraction of that extent the samples cover (`extent_cover`): cells
     /// of an 8 × 8 grid holding samples.
     pub extent_cover: f64,
+    /// That extent (pixels [x0, y0, x1, y1]): the map's (`RefineOptions`),
+    /// or the parts of it the fit placed (`fitted_parts`). None when not
+    /// judged.
+    pub extent: Option<[f64; 4]>,
     /// The models tried, in order (diagnostics).
     pub stages: Vec<StageFit>,
 }
@@ -818,6 +822,22 @@ impl Data {
         Data { xs, ys, seg, n_segs: self.n_segs, cx: self.cx, cy: self.cy, sn: self.sn }
     }
 
+    /// The same samples about their own centroid and extent (`Data::new`'s
+    /// normalisation; parameters carry over through `Params::from_affine`).
+    fn recentred(self) -> Data {
+        let n = self.xs.len().max(1) as f64;
+        let (cx, cy) = (self.xs.iter().sum::<f64>() / n, self.ys.iter().sum::<f64>() / n);
+        let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for (&x, &y) in self.xs.iter().zip(&self.ys) {
+            x0 = x0.min(x);
+            x1 = x1.max(x);
+            y0 = y0.min(y);
+            y1 = y1.max(y);
+        }
+        let sn = if self.xs.is_empty() { 1.0 } else { (0.5 * (x1 - x0).hypot(y1 - y0)).max(1.0) };
+        Data { cx, cy, sn, ..self }
+    }
+
     fn subset(&self, stride: usize) -> Data {
         let idx = (0..self.xs.len()).step_by(stride.max(1));
         let (mut xs, mut ys, mut seg) = (Vec::new(), Vec::new(), Vec::new());
@@ -1066,7 +1086,7 @@ fn lm(
 }
 
 /// Options of `refine_prepared_with`.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RefineOptions {
     /// The image is a photo of a paper map flattened by its page borders:
     /// residual perspective and aspect errors are expected, so the affine
@@ -1078,6 +1098,17 @@ pub struct RefineOptions {
     /// `extent_cover` over it; the conformal stage needs samples across most
     /// of it (`CONFORMAL_MIN_COVER`). None: the samples' bounding box.
     pub map_rect: Option<[f64; 4]>,
+    /// Where the map may lie (pixels [x0, y0, x1, y1]): the extent the
+    /// transform must hold, at whose corners the spread and the models'
+    /// shifts are measured and over which `extent_cover` is (the map's
+    /// rectangle and its blank part, `content::MapContent::extent`). None:
+    /// `map_rect`.
+    pub extent: Option<[f64; 4]>,
+    /// The separate blocks of ink in the map's rectangle (two maps on one
+    /// page, a map and a photo; `content::MapContent::parts`): the fit
+    /// keeps the samples of the parts it places (`fitted_parts`) and is
+    /// judged over them.
+    pub parts: Vec<[f64; 4]>,
     /// The map says it is drawn in Web Mercator ("EPSG:3857" printed on a
     /// web map's export): it has no projection bend.
     pub web_mercator: bool,
@@ -1161,11 +1192,25 @@ pub fn refine_prepared_with(
         converged = conv;
     }
     let fine = &dem.levels[0];
-    let sim_cost = evaluate_params(&fine_data, fine, &par, LOSS_SCALE_M, false).cost;
-    let judge = Judge::new(&fine_data, fine, opts.map_rect);
+    // Two maps on one page (or a map and a photo): the fit holds the parts
+    // whose samples it places, and is judged over them.
+    let mut extent = opts.extent.or(opts.map_rect);
+    let parted = if opts.photo { None } else { fitted_parts(&fine_data, fine, &par, &opts.parts) };
+    if let Some((sub, ext)) = &parted {
+        extent = Some(*ext);
+        let start = Params::from_affine(&par.to_affine(), Model::Similarity, sub);
+        let (p, _, it, conv) = lm(sub, fine, start, LOSS_SCALE_M, 25, bounds);
+        (par, converged) = (p, conv);
+        iterations += it;
+    }
+    let (full, fine_data) = match &parted {
+        Some((sub, _)) => (sub, sub),
+        None => (&full, &fine_data),
+    };
+    let sim_cost = evaluate_params(fine_data, fine, &par, LOSS_SCALE_M, false).cost;
+    let judge = Judge::new(fine_data, fine, extent);
     if opts.photo {
-        let stages =
-            PhotoStages { full: &full, fine_data: &fine_data, dem, level_data: &level_data, loss: &loss, bounds };
+        let stages = PhotoStages { full, fine_data, dem, level_data: &level_data, loss: &loss, bounds };
         return stages.run(par, sim_cost, iterations, converged, &judge);
     }
     let mut stages = vec![judge.stage("similarity", &par, sim_cost, None, false)];
@@ -1175,8 +1220,8 @@ pub fn refine_prepared_with(
     // to contours over part of the map takes up whatever the DEM and the
     // drawing disagree on there as shear, which grows towards the far side
     // (`MODEL_MIN_Z`).
-    let ani_start = Params::from_affine(&par.to_affine(), Model::Aniso, &full);
-    let (ani, ani_cost, it, ani_conv) = lm(&fine_data, fine, ani_start, LOSS_SCALE_M, 25, bounds);
+    let ani_start = Params::from_affine(&par.to_affine(), Model::Aniso, full);
+    let (ani, ani_cost, it, ani_conv) = lm(fine_data, fine, ani_start, LOSS_SCALE_M, 25, bounds);
     iterations += it;
     let mut st = judge.stage("aniso", &ani, ani_cost, Some(&par), true);
     let (mut kept, mut kept_cost, mut is_affine) = (par, sim_cost, false);
@@ -1197,10 +1242,10 @@ pub fn refine_prepared_with(
     let lat = crate::geo::merc_to_latlon(0.0, my).0;
     let span_m = 2.0 * full.sn * out.mean_scale() * lat.to_radians().cos();
     if span_m <= REGIONAL_SPAN_M {
-        return judge.finish(metrics(&full, dem, &Fit::Affine(out), iterations, converged, is_affine), stages, &kept);
+        return judge.finish(metrics(full, dem, &Fit::Affine(out), iterations, converged, is_affine), stages, &kept);
     }
-    let start = Params::from_affine(&out, Model::Projective, &full);
-    let (proj, proj_cost, it, proj_conv) = lm(&fine_data, fine, start, LOSS_SCALE_M, 25, bounds);
+    let start = Params::from_affine(&out, Model::Projective, full);
+    let (proj, proj_cost, it, proj_conv) = lm(fine_data, fine, start, LOSS_SCALE_M, 25, bounds);
     iterations += it;
     let mut st = judge.stage("projective", &proj, proj_cost, Some(&kept), true);
     st.kept = proj_cost < kept_cost * (1.0 - REGIONAL_MIN_GAIN) && plausible_regional(&proj, &out) && st.supported();
@@ -1217,15 +1262,10 @@ pub fn refine_prepared_with(
         (Fit::Affine(out), kept, converged)
     };
     // The projection's bend (`ConformalStage`) on the kept planar model.
-    if !opts.web_mercator && samples_cover(&full, opts.map_rect, CONFORMAL_MIN_COVER) {
-        let stage = ConformalStage {
-            full: &full,
-            fine_data: &fine_data,
-            prepared: dem,
-            dem: fine,
-            bounds,
-            map_rect: opts.map_rect,
-        };
+    // The bend's reach: the map's rectangle, or the parts the fit places.
+    let bend_rect = if parted.is_some() { extent } else { opts.map_rect };
+    if !opts.web_mercator && samples_cover(full, bend_rect, CONFORMAL_MIN_COVER) {
+        let stage = ConformalStage { full, fine_data, prepared: dem, dem: fine, bounds, map_rect: bend_rect };
         let (found, it) = stage.run(&kept, kept_cost, proj_kept.then_some(&proj));
         iterations += it;
         if let Some((c, tm, cost, conv)) = found {
@@ -1238,7 +1278,54 @@ pub fn refine_prepared_with(
         }
     }
     let affine = is_affine || !matches!(fit, Fit::Affine(_));
-    judge.finish(metrics(&full, dem, &fit, iterations, fin_conv, affine), stages, &fin)
+    judge.finish(metrics(full, dem, &fit, iterations, fin_conv, affine), stages, &fin)
+}
+
+/// A part of the map (`RefineOptions::parts`) needs this many samples on
+/// the DEM for its fit to be judged…
+const PART_MIN_SAMPLES: usize = 100;
+/// …and holds another map when under this share of its samples lie within
+/// `INLIER_M` of their segment's level as the best part's do.
+const PART_MIN_INLIERS: f64 = 0.5;
+
+/// The samples of the parts of the map (`parts`, pixels) the fit `par`
+/// places, recentred, and those parts' bounding box; None when it places
+/// them all (or there are no parts). A part whose samples lie on their
+/// levels at under `PART_MIN_INLIERS` of the best part's rate is another
+/// map (the other of two maps on a page: 0.1–0.2 against 0.6–0.8); a part
+/// with fewer than `PART_MIN_SAMPLES` samples (a photo, a legend box) is
+/// none of the map's.
+fn fitted_parts(d: &Data, dem: &DemMosaic, par: &Params, parts: &[[f64; 4]]) -> Option<(Data, [f64; 4])> {
+    if parts.len() < 2 {
+        return None;
+    }
+    let e = evaluate_params(d, dem, par, LOSS_SCALE_M, false);
+    let of: Vec<Option<usize>> = (0..d.xs.len())
+        .map(|i| parts.iter().position(|r| (r[0]..r[2]).contains(&d.xs[i]) && (r[1]..r[3]).contains(&d.ys[i])))
+        .collect();
+    let mut n = vec![(0usize, 0usize); parts.len()];
+    for (k, r) in of.iter().zip(&e.resid) {
+        if let (Some(k), true) = (k, r.is_finite()) {
+            n[*k].0 += 1;
+            n[*k].1 += (r.abs() < INLIER_M) as usize;
+        }
+    }
+    let rate = |k: usize| if n[k].0 >= PART_MIN_SAMPLES { n[k].1 as f64 / n[k].0 as f64 } else { f64::NAN };
+    let best = (0..parts.len()).map(rate).filter(|r| r.is_finite()).fold(0.0, f64::max);
+    if best <= 0.0 {
+        return None;
+    }
+    let keep: Vec<bool> = (0..parts.len()).map(|k| rate(k) >= PART_MIN_INLIERS * best).collect();
+    if keep.iter().all(|&k| k) {
+        return None;
+    }
+    let ext = parts
+        .iter()
+        .zip(&keep)
+        .filter(|(_, &k)| k)
+        .map(|(r, _)| *r)
+        .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])?;
+    Some((d.select(|i| of[i].is_some_and(|k| keep[k])).recentred(), ext))
 }
 
 /// Judges the fits of one refinement: their spread at the corners of the
@@ -1305,6 +1392,7 @@ impl<'a> Judge<'a> {
             r.spread_m = st.spread_m;
         }
         r.extent_cover = extent_cover(self.data, &self.extent);
+        r.extent = Some(self.extent);
         r.stages = stages;
         r
     }
@@ -1820,6 +1908,7 @@ fn metrics(d: &Data, dem: &PreparedDem, fit: &Fit, iterations: usize, converged:
         gradient_alignment: f64::NAN,
         spread_m: f64::NAN,
         extent_cover: f64::NAN,
+        extent: None,
         stages: Vec::new(),
     };
     let Some(fine) = dem.levels.first() else {
@@ -1901,6 +1990,7 @@ fn metrics(d: &Data, dem: &PreparedDem, fit: &Fit, iterations: usize, converged:
         gradient_alignment,
         spread_m: f64::NAN,
         extent_cover: f64::NAN,
+        extent: None,
         stages: Vec::new(),
     }
 }
@@ -2139,8 +2229,13 @@ const SPAN_FLOOR: f64 = 0.25;
 /// * fit: `fit_confidence`.
 ///
 /// The result is 0.35·search + 0.65·fit, but never more than fit + 0.1 or
-/// 2·search + 0.1: both pieces of evidence must agree. Thresholds: ≥ 0.7 is
-/// a confident match, ≤ 0.3 means "not found".
+/// 2·search + 0.1: both pieces of evidence must agree. Search evidence
+/// lifts only a fit that is acceptable on its own (`FIT_LIFT`): a fit under
+/// 0.5 stays under it, however distinct its coarse peak (a 30 m/px map at
+/// 78° N refined on zoom-9 tiles, whose terrain there is too coarse for it,
+/// fitted its true place at 0.45 and 140/545 m off, and was accepted at
+/// 0.55 by its peak ratio of 3.85). Thresholds: ≥ 0.7 is a confident match,
+/// ≤ 0.3 means "not found".
 pub fn confidence(c: &Candidate, r: &RefineResult) -> f64 {
     combine(search_evidence(c), fit_confidence(r))
 }
@@ -2150,8 +2245,14 @@ fn search_evidence(c: &Candidate) -> f64 {
 }
 
 fn combine(search: f64, fit: f64) -> f64 {
-    (0.35 * search + 0.65 * fit).min(fit + 0.1).min(2.0 * search + 0.1).clamp(0.0, 1.0)
+    let lift = 0.1 * ramp(fit, FIT_LIFT, FIT_LIFT + 0.1);
+    (0.35 * search + 0.65 * fit).min(fit + lift).min(2.0 * search + 0.1).clamp(0.0, 1.0)
 }
+
+/// The fit confidence from which search evidence lifts the confidence (by
+/// up to 0.1 at `FIT_LIFT` + 0.1): the acceptance threshold. Every match of
+/// the contour benchmark fits at 0.62 or more.
+const FIT_LIFT: f64 = 0.5;
 
 /// Pick the best of several refined candidates (e.g. the coarse top-k, each
 /// refined on its own fine DEM) and return (index, confidence).
@@ -2233,6 +2334,22 @@ mod tests {
         assert_eq!(ramp(0.0, 1.0, 2.0), 0.0);
         assert_eq!(ramp(3.0, 1.0, 2.0), 1.0);
         assert!((ramp(1.5, 1.0, 2.0) - 0.5).abs() < 1e-12);
+    }
+
+    /// Search evidence lifts only a fit acceptable on its own: the 78° N map
+    /// refined on terrain too coarse for it (fit 0.448, peak ratio 3.85) was
+    /// accepted at 0.548, 140/545 m off. Fits of 0.6 and more (every match
+    /// of the contour benchmark: 0.62 at the least) keep their lift.
+    #[test]
+    fn search_evidence_lifts_only_acceptable_fits() {
+        assert!(combine(1.0, 0.448) < 0.5);
+        assert!(combine(1.0, 0.499) < 0.5);
+        assert!((combine(1.0, 0.62) - 0.72).abs() < 1e-9);
+        assert!((combine(1.0, 1.0) - 1.0).abs() < 1e-9);
+        // Continuous across the threshold.
+        assert!((combine(1.0, 0.5) - 0.5).abs() < 1e-9 && (combine(1.0, 0.501) - 0.501).abs() < 1e-3);
+        // Weak search evidence still caps a good fit.
+        assert!((combine(0.0, 1.0) - 0.1).abs() < 1e-9);
     }
 
     /// DEM tiles (zoom 13) of a synthetic surface over `fp`, and its 10 m

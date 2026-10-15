@@ -28,7 +28,7 @@ resolution (`core/src/contour_lines.rs`, docs/ARCHITECTURE.md *Contour lines of 
 and the search covers 0.4-50 m/px with scale bars as priors (*Any map: scales, priors,
 units*), every case is located from the centre: gaia-drakensberg ~7 m (analysed at level 3),
 bw-tasmania ~9 m and grey-tasmania ~4 m (grey/black ink), faded-himalaya ~1 m,
-sparse-drakensberg 40/104 m (median/max at 30 m/px, searched on zoom-9 tiles).
+sparse-drakensberg 24/57 m (median/max at 30 m/px, searched on zoom-9 tiles; refined on zoom-12 tiles since its title and legend, text, are left out of its rectangle: `dem/drakensberg` holds them).
 
 ## Case format (common benchmark format)
 

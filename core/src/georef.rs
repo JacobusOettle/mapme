@@ -143,7 +143,11 @@ pub const DEFAULT_MAX_TILES_PER_ROUND: usize = 64;
 /// Allowed `max_tiles_per_round`.
 pub const MAX_TILES_RANGE: (usize, usize) = (1, 4096);
 /// Ground scales (m/px) outside this range are not plausible map transforms.
-const PLAUSIBLE_SCALE: (f64, f64) = (0.02, 500.0);
+pub(crate) const PLAUSIBLE_SCALE: (f64, f64) = (0.02, 500.0);
+/// The largest image a session takes (pixels per side and in all; the C
+/// ABI refuses larger).
+pub const MAX_IMAGE_SIDE: u32 = 32_768;
+pub const MAX_IMAGE_PIXELS: u64 = 400_000_000;
 /// A mosaic counts as complete when this fraction of it has elevations.
 const COMPLETE_DEM: f64 = 0.98;
 /// Confidence of a labels-only fit (below 0.5: the app asks to check it).
@@ -604,6 +608,7 @@ impl ContourProducts {
     }
 }
 
+/// One hint or near area's search in one scale band.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct SearchKey {
     contour: ContourKey,
@@ -612,8 +617,6 @@ struct SearchKey {
     radius_m: i64,
     scale: [u64; 2],
     rotate: bool,
-    /// Present coarse tiles: the result depends on what DEM was there.
-    tiles_present: usize,
 }
 
 /// The ground scale range (m/px) a scale bar gives: its scale within
@@ -653,6 +656,12 @@ struct RefineKey {
     evaluate_only: bool,
 }
 
+/// A hint or near area's candidates, with the coarse tiles present when it
+/// was searched.
+type CachedSearch = (usize, Arc<Vec<Candidate>>);
+/// The map's labels for an OCR hash and the labels a grid fit used.
+type CachedPois = Arc<Vec<PoiLabel>>;
+
 /// Georeferencing session bound to one map raster.
 pub struct Session {
     image: Arc<Rgb8>,
@@ -664,7 +673,9 @@ pub struct Session {
     contours: Mutex<HashMap<ContourKey, Arc<OnceLock<Arc<ContourProducts>>>>>,
     /// The map's content area on the raster (`content::map_content`).
     content: Arc<OnceLock<MapContent>>,
-    searches: Mutex<Vec<(SearchKey, Arc<Vec<Candidate>>)>>,
+    /// The candidates of each hint and near area's search, with the coarse
+    /// tiles present when it ran (the result depends on what DEM was there).
+    searches: Mutex<HashMap<SearchKey, CachedSearch>>,
     refinements: Mutex<HashMap<RefineKey, RefineResult>>,
     /// The wide search's plan and the candidates of its searched chunks.
     wide: Mutex<Option<wide_search::WideCache>>,
@@ -676,14 +687,25 @@ pub struct Session {
     cancel: AtomicBool,
     /// f32 bits of the progress of the running call.
     progress: AtomicU32,
+    /// What the request's OCR text gives, by its hash (`ocr_hash`): the
+    /// names to geocode (`hint_queries`, in every response) and the map's
+    /// labels (`pois`, by the labels a grid fit used), worked out once a
+    /// session rather than on every need_dem round (0.5 s a round for 2 000
+    /// names).
+    hint_queries: Mutex<Option<(u64, Arc<Vec<String>>)>>,
+    pois: Mutex<HashMap<(u64, Vec<usize>), CachedPois>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Searches kept in the cache (hint areas and the near area).
-const SEARCH_CACHE: usize = 32;
+/// Searches kept (hint and near areas: one per area and scale band, at
+/// most `MAX_HINTS` × 4 bands + 5 near steps a call, 37, while a call
+/// redoes every one of them: a cache smaller than that, emptied in order,
+/// missed every search on every round). Beyond this many (other contour
+/// colours tried in one session) the cache starts again.
+const SEARCH_CACHE: usize = 256;
 
 impl Session {
     pub fn new(image: Rgb8) -> Session {
@@ -695,14 +717,26 @@ impl Session {
             photo_lines: OnceLock::new(),
             contours: Mutex::new(HashMap::new()),
             content: Arc::new(OnceLock::new()),
-            searches: Mutex::new(Vec::new()),
+            searches: Mutex::new(HashMap::new()),
             refinements: Mutex::new(HashMap::new()),
             wide: Mutex::new(None),
             rechecks: Mutex::new(HashMap::new()),
             wide_refined: Mutex::new(HashMap::new()),
             cancel: AtomicBool::new(false),
             progress: AtomicU32::new(0f32.to_bits()),
+            hint_queries: Mutex::new(None),
+            pois: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// `hints::hint_queries` of `ocr` (hash `h`), once a session.
+    fn hint_queries(&self, ocr: &[OcrObservation], h: u64) -> Arc<Vec<String>> {
+        if let Some((_, q)) = lock(&self.hint_queries).as_ref().filter(|(k, _)| *k == h) {
+            return q.clone();
+        }
+        let q = Arc::new(hint_queries(ocr));
+        *lock(&self.hint_queries) = Some((h, q.clone()));
+        q
     }
 
     pub fn image(&self) -> &Rgb8 {
@@ -786,6 +820,17 @@ impl Session {
         }
     }
 
+    /// Where the map may lie (`MapContent::extent`) and its separate parts,
+    /// which a fit must hold (`RefineOptions::extent`, `parts`).
+    fn map_extent(&self, photo: bool) -> (MapRect, Vec<MapRect>) {
+        if photo {
+            (MapRect::whole(self.image.w, self.image.h), Vec::new())
+        } else {
+            let c = self.map_content();
+            (c.extent, c.parts.clone())
+        }
+    }
+
     /// Compute the contour products on a background thread (while the app downloads DEM tiles).
     fn prefetch_contours(&self, key: ContourKey) {
         let cell = self.contour_cell(key);
@@ -810,7 +855,11 @@ impl Session {
         let store = lock(&self.dem);
         let mut best: Option<(DemMosaic, u8, f64)> = None;
         for z in (plan.zoom.saturating_sub(2).max(1)..=plan.zoom).rev() {
-            if tile_count(z, &plan.bbox) > 4 * MAX_FINE_TILES {
+            // No mosaic of a zoom without a tile of it (each is a grid of the
+            // whole box: tens of ms for the spot-height check of a grid fit).
+            if tile_count(z, &plan.bbox) > 4 * MAX_FINE_TILES
+                || !tiles_covering(z, &plan.bbox).iter().any(|t| store.present(t))
+            {
                 continue;
             }
             let m = store.mosaic(z, &plan.bbox);
@@ -978,6 +1027,8 @@ struct Run<'a> {
     /// The radius the near search stopped at because the image's lines do
     /// not nest like contour lines (`lines_unlike_contours`).
     stopped_at_m: Option<f64>,
+    /// `ocr_hash` of the request's OCR text.
+    ocr_hash: u64,
 }
 
 impl<'a> Run<'a> {
@@ -1021,6 +1072,7 @@ impl<'a> Run<'a> {
             wide_limit: None,
             scale_bar: None,
             stopped_at_m: None,
+            ocr_hash: ocr_hash(&req.ocr),
         }
     }
 
@@ -1084,11 +1136,24 @@ impl<'a> Run<'a> {
     }
 
     fn finish(&mut self, resp: &mut GeorefResponse) {
+        // The map's labels in an answer (not in a need_dem round), timed
+        // as a stage of their own.
+        let mut dropped = None;
+        if resp.status != Status::NeedDem && !resp.is_cancelled() {
+            let t = Instant::now();
+            resp.pois = self.pois();
+            if let (Status::Ok, Some(m)) = (resp.status, resp.pixel_to_mercator) {
+                dropped = self.check_heights_against_dem(&mut resp.pois, &Homography { m });
+            }
+            if !self.req.ocr.is_empty() {
+                self.time("pois", t);
+            }
+        }
+        if !self.req.ocr.is_empty() {
+            resp.hint_queries = Some(self.s.hint_queries(&self.req.ocr, self.ocr_hash).to_vec());
+        }
         self.timings.insert("total".into(), ms_since(self.t0));
         resp.timings_ms = std::mem::take(&mut self.timings).into_iter().map(|(k, v)| (k, round_dp(v, 1))).collect();
-        if !self.req.ocr.is_empty() {
-            resp.hint_queries = Some(hint_queries(&self.req.ocr));
-        }
         if let Some(mut p) = self.progress_info.take() {
             if resp.status != Status::NeedDem && !resp.is_cancelled() {
                 p.stage = SearchStage::Done;
@@ -1107,14 +1172,8 @@ impl<'a> Run<'a> {
             diag.extend(extra);
         }
         resp.diagnostics = Value::Object(diag);
-        if resp.status != Status::NeedDem && !resp.is_cancelled() {
-            resp.pois = self.pois();
-            if let (Status::Ok, Some(m)) = (resp.status, resp.pixel_to_mercator) {
-                let dropped = self.check_heights_against_dem(&mut resp.pois, &Homography { m });
-                if let (Some(n), Value::Object(d)) = (dropped, &mut resp.diagnostics) {
-                    d.insert("spot_heights_off_dem".into(), json!(n));
-                }
-            }
+        if let (Some(n), Value::Object(d)) = (dropped, &mut resp.diagnostics) {
+            d.insert("spot_heights_off_dem".into(), json!(n));
         }
     }
 
@@ -1128,8 +1187,19 @@ impl<'a> Run<'a> {
         if !pois.iter().any(|p| p.elevation_m.is_some()) {
             return None;
         }
-        let r = self.map_rect();
-        let plan = self.fine_plan(&t.local_affine((r.x0 + r.x1) as f64 / 2.0, (r.y0 + r.y1) as f64 / 2.0))?;
+        // The DEM under the map's rectangle, if the contour path found it
+        // (finding it costs 30-60 ms on a 17 MP sheet that a grid fit
+        // located: there, the raster).
+        let r = match self.s.content.get() {
+            Some(c) if !self.req.photo => c.rect,
+            _ => MapRect::whole(self.s.image.w, self.s.image.h),
+        };
+        let plan = fine_plan(
+            &t.local_affine((r.x0 + r.x1) as f64 / 2.0, (r.y0 + r.y1) as f64 / 2.0)
+                .compose(&Affine::translation(r.x0 as f64, r.y0 as f64)),
+            r.w(),
+            r.h(),
+        )?;
         let (dem, zoom) = self.s.fine_dem(&plan)?;
         if zoom < FINE_ZOOM - 1 {
             // Coarse tiles smooth cliffs and summits by more than the tolerance.
@@ -1187,8 +1257,15 @@ impl<'a> Run<'a> {
     }
 
     /// Map labels (place names, peaks, spot heights), excluding the labels
-    /// used as coordinates.
+    /// used as coordinates; once a session for each set of those.
     fn pois(&self) -> Vec<PoiLabel> {
+        if self.req.ocr.is_empty() {
+            return Vec::new();
+        }
+        let key = (self.ocr_hash, self.used_labels.clone());
+        if let Some(p) = lock(&self.s.pois).get(&key) {
+            return p.to_vec();
+        }
         let obs: Vec<OcrObservation> = self
             .req
             .ocr
@@ -1197,7 +1274,13 @@ impl<'a> Run<'a> {
             .filter(|(i, _)| !self.used_labels.contains(i))
             .map(|(_, o)| o.clone())
             .collect();
-        classify_pois(&obs)
+        let p = classify_pois(&obs);
+        let mut cache = lock(&self.s.pois);
+        if cache.len() >= 16 {
+            cache.clear();
+        }
+        cache.insert(key, Arc::new(p.clone()));
+        p
     }
 
     fn execute(&mut self) -> Step<GeorefResponse> {
@@ -1606,6 +1689,12 @@ impl<'a> Run<'a> {
                 "field_cells": [p.field.w, p.field.h],
                 "map_area": (!p.rect.is_whole(self.s.image.w, self.s.image.h))
                     .then(|| json!([p.rect.x0, p.rect.y0, p.rect.x1, p.rect.y1])),
+                "map_extent": (!key.photo && !p.rect.is_whole(self.s.image.w, self.s.image.h)).then(|| {
+                    let (e, parts) = self.s.map_extent(false);
+                    json!({"extent": [e.x0, e.y0, e.x1, e.y1],
+                           "parts": parts.iter().map(|r| [r.x0, r.y0, r.x1, r.y1]).collect::<Vec<_>>(),
+                           "text_cells": self.s.map_content().text_cells})
+                }),
                 "extraction": p.extraction,
                 "prep_ms": {"mask": round_dp(p.timings_ms[0], 1), "skeleton": round_dp(p.timings_ms[1], 1),
                             "field": round_dp(p.timings_ms[2], 1)},
@@ -1773,9 +1862,8 @@ impl<'a> Run<'a> {
             radius_m: params.search_radius_m.round() as i64,
             scale: [params.scale_min.to_bits(), params.scale_max.to_bits()],
             rotate: params.rotations_deg.len() > 1,
-            tiles_present,
         };
-        let cached = lock(&self.s.searches).iter().find(|(k, _)| *k == skey).map(|(_, c)| c.clone());
+        let cached = lock(&self.s.searches).get(&skey).filter(|c| c.0 == tiles_present).map(|c| c.1.clone());
         if let Some(c) = cached {
             self.s.bump_progress(0.8);
             return Ok(c);
@@ -1793,10 +1881,10 @@ impl<'a> Run<'a> {
         self.check_cancel()?;
         let cands = Arc::new(cands);
         let mut cache = lock(&self.s.searches);
-        cache.push((skey, cands.clone()));
-        if cache.len() > SEARCH_CACHE {
-            cache.remove(0);
+        if cache.len() >= SEARCH_CACHE && !cache.contains_key(&skey) {
+            cache.clear();
         }
+        cache.insert(skey, (tiles_present, cands.clone()));
         Ok(cands)
     }
 
@@ -1847,11 +1935,15 @@ impl<'a> Run<'a> {
         let r = if evaluate_only {
             evaluate_prepared(&prod.samples, &prep, t)
         } else {
-            // The map's rectangle: what the transform must hold (its spread
-            // at the corners, the samples' cover) and the bend's reach.
+            // The map's rectangle (the bend's reach), and where the map may
+            // lie: what the transform must hold (its spread at the corners,
+            // the samples' cover), of the parts the fit places.
+            let (extent, parts) = self.s.map_extent(key.photo);
             let opts = RefineOptions {
                 photo: key.photo,
                 map_rect: Some(self.map_rect().bounds()),
+                extent: Some(extent.bounds()),
+                parts: parts.iter().map(MapRect::bounds).collect(),
                 web_mercator: says_web_mercator(&self.req.ocr),
             };
             refine_prepared_with(&prod.samples, &prep, t, &opts)
@@ -2528,6 +2620,7 @@ impl<'a> Run<'a> {
                 "source": if from_labels { "labels" } else { "search" },
                 "spread_m": finite_or_null(round_dp(r.spread_m, 1)),
                 "extent_cover": finite_or_null(round_dp(r.extent_cover, 3)),
+                "extent": r.extent.map(|e| e.map(|v| v.round())),
                 "stages": r.stages.iter().map(|s| json!({
                     "model": s.model,
                     "m": s.homography.m,
@@ -2726,6 +2819,20 @@ pub fn line_organisation(s: &ContourSamples, w: usize, h: usize) -> LineOrganisa
 
 /// Does the map say it is drawn in Web Mercator? Web maps print it on their
 /// exports ("Web Mercator | EPSG: 3857" on Gaia GPS pages, "Pseudo-Mercator").
+/// A hash of OCR observations (texts, boxes, confidences): what the
+/// session works out from them once (`Session::hint_queries`, `pois`).
+fn ocr_hash(ocr: &[OcrObservation]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ocr.len().hash(&mut h);
+    for o in ocr {
+        o.text.hash(&mut h);
+        o.bbox.map(f64::to_bits).hash(&mut h);
+        o.confidence.to_bits().hash(&mut h);
+    }
+    h.finish()
+}
+
 fn says_web_mercator(ocr: &[OcrObservation]) -> bool {
     ocr.iter().any(|o| {
         let t: String = o.text.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();

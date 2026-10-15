@@ -268,6 +268,9 @@ pub fn distinct_m(scale_m_per_px: f64, img_w: usize, img_h: usize) -> f64 {
         DISTINCT_M
     }
 }
+/// Bytes of whole-frame NCC surfaces in flight at once (`coarse_search`):
+/// two per template pair, f32 per placement.
+const SURFACE_BUDGET_BYTES: usize = 128 << 20;
 /// Peaks kept per (template, rotation) after non-maximum suppression.
 const PEAKS_PER_TEMPLATE: usize = 6;
 /// Placements whose template window has less valid DEM than this are skipped.
@@ -1449,42 +1452,54 @@ fn search_peaks_with(
             let frame = build_frame(&grid, gc, rot.to_radians(), fw, fh, &layout, lregion);
             tick();
             // Templates in pairs (neighbouring scales: similar sizes) share
-            // their inverse transforms (`correlate_set`).
-            let fpeaks: Vec<Peak> = templates
-                .par_chunks(2)
-                .enumerate()
-                .flat_map_iter(|(pi, pair)| {
-                    if cancel() {
-                        return Vec::new();
-                    }
-                    let ts: Vec<&Template> = pair.iter().map(|(_, t)| t).collect();
-                    let cached: Option<Vec<&[Vec<C32>]>> =
-                        hats.as_ref().map(|h| (0..pair.len()).map(|j| h[2 * pi + j].as_slice()).collect());
-                    let surfaces = correlate_set(&ts, cached.as_deref(), &frame, &layout, rc);
-                    let mut out: Vec<Peak> = Vec::new();
-                    for ((si, t), (pw, ph, ncc)) in pair.iter().zip(surfaces) {
-                        let ((mu, sd), found) = find_peaks(&ncc, pw, ph, PEAKS_PER_TEMPLATE, rad_cells(t.s_merc));
-                        out.extend(found.into_iter().map(|(score, fx, fy)| {
-                            let (lx, ly) = frame.to_level(fx + t.cx, fy + t.cy);
-                            Peak {
-                                score,
-                                surface_mean: mu,
-                                surface_std: sd,
-                                mx: ldem.ox + lx * res,
-                                my: ldem.oy - ly * res,
-                                s_merc: t.s_merc,
-                                rot_deg: rot,
-                                level: lvl,
-                                tw: t.w,
-                                th: t.h,
-                                scale_idx: *si,
-                                rot_idx: ri,
-                                scale_step: pass.scale_step,
+            // their inverse transforms (`correlate_set`). Each pair in
+            // flight holds two whole-frame surfaces, while the work within a
+            // pair runs in parallel too: as many pairs at a time as threads,
+            // and their surfaces within `SURFACE_BUDGET_BYTES` (the 50 km
+            // disc on zoom 11: ~12 MB a surface at 30°, ~25 MB at 57° N,
+            // where a pair per thread had raised the peak by 0.1–0.25 GB).
+            let pair_bytes = 2 * 4 * fw * fh;
+            let batch = (SURFACE_BUDGET_BYTES / pair_bytes.max(1)).clamp(1, rayon::current_num_threads().max(1));
+            let pairs: Vec<(usize, &[(usize, Template)])> = templates.chunks(2).enumerate().collect();
+            let fpeaks: Vec<Peak> = pairs
+                .chunks(batch)
+                .flat_map(|b| {
+                    b.par_iter()
+                        .flat_map_iter(|&(pi, pair)| {
+                            if cancel() {
+                                return Vec::new();
                             }
-                        }));
-                        tick();
-                    }
-                    out
+                            let ts: Vec<&Template> = pair.iter().map(|(_, t)| t).collect();
+                            let cached: Option<Vec<&[Vec<C32>]>> =
+                                hats.as_ref().map(|h| (0..pair.len()).map(|j| h[2 * pi + j].as_slice()).collect());
+                            let surfaces = correlate_set(&ts, cached.as_deref(), &frame, &layout, rc);
+                            let mut out: Vec<Peak> = Vec::new();
+                            for ((si, t), (pw, ph, ncc)) in pair.iter().zip(surfaces) {
+                                let ((mu, sd), found) =
+                                    find_peaks(&ncc, pw, ph, PEAKS_PER_TEMPLATE, rad_cells(t.s_merc));
+                                out.extend(found.into_iter().map(|(score, fx, fy)| {
+                                    let (lx, ly) = frame.to_level(fx + t.cx, fy + t.cy);
+                                    Peak {
+                                        score,
+                                        surface_mean: mu,
+                                        surface_std: sd,
+                                        mx: ldem.ox + lx * res,
+                                        my: ldem.oy - ly * res,
+                                        s_merc: t.s_merc,
+                                        rot_deg: rot,
+                                        level: lvl,
+                                        tw: t.w,
+                                        th: t.h,
+                                        scale_idx: *si,
+                                        rot_idx: ri,
+                                        scale_step: pass.scale_step,
+                                    }
+                                }));
+                                tick();
+                            }
+                            out
+                        })
+                        .collect::<Vec<Peak>>()
                 })
                 .collect();
             peaks.extend(fpeaks);

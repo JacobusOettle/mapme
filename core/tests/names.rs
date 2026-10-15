@@ -164,10 +164,8 @@ fn names_of_every_fixture() {
     }
 }
 
-/// A dense sheet read by Apple Vision holds a couple of thousand reads: the names and the hint
-/// queries of one take no longer than the rest of the import.
-#[test]
-fn names_of_a_dense_sheet_are_quick() {
+/// A dense sheet's reads as Apple Vision gives them: a credit line and 2 000 names and heights.
+fn dense_sheet_reads() -> Vec<OcrObservation> {
     let syl = ["ka", "ma", "tho", "ba", "lu", "ngo", "si", "the", "pu", "tso", "le", "ra", "mbu", "ze", "di", "kwa"];
     let feats = ["Pass", "Peak", "Hut", "Cave", "River", "Kloof", "Valley", "", "", ""];
     let mut seed = 0x9E37_79B9_7F4A_7C15u64;
@@ -201,10 +199,52 @@ fn names_of_a_dense_sheet_are_quick() {
             confidence: 1.0,
         });
     }
+    obs
+}
+
+/// A dense sheet read by Apple Vision holds a couple of thousand reads: the names and the hint
+/// queries of one take no longer than the rest of the import.
+#[test]
+fn names_of_a_dense_sheet_are_quick() {
+    let obs = dense_sheet_reads();
     let t = std::time::Instant::now();
     let pois = classify_pois(&obs);
     let q = hint_queries(&obs);
     let ms = t.elapsed().as_secs_f64() * 1e3;
     assert!(pois.len() > 1500 && q.len() == 12, "{} {q:?}", pois.len());
     assert!(ms < common::time_budget_ms(1500.0), "{ms:.0} ms");
+}
+
+/// Every response to a request with OCR text lists its hint queries, need_dem rounds too: a
+/// session works them out once, not on every round (0.5 s a round for 2 000 names; a 2 000 km
+/// search runs ~90 rounds).
+#[test]
+fn hint_queries_are_worked_out_once_a_session() {
+    use mapme_core::georef::{GeorefRequest, GpsFix, Session, Status};
+    let obs = dense_sheet_reads();
+    let img = mapme_core::image::Rgb8::from_rgb(800, 600, vec![250u8; 800 * 600 * 3]).unwrap();
+    let session = Session::new(img);
+    let req = GeorefRequest {
+        gps: Some(GpsFix { lat: -25.85, lon: 27.4, accuracy_m: Some(10.0) }),
+        methods: vec!["contours".into()],
+        ocr: obs,
+        ..Default::default()
+    };
+    let mut first: Option<Vec<String>> = None;
+    for round in 0..4 {
+        // No tile is ever sent: every round is a bare need_dem.
+        let t = std::time::Instant::now();
+        let resp = session.georeference(&req);
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(resp.status, Status::NeedDem, "{}", resp.message);
+        let q = resp.hint_queries.expect("hint_queries");
+        assert_eq!(q.len(), 12, "{q:?}");
+        match &first {
+            None => first = Some(q),
+            Some(f) => {
+                assert_eq!(&q, f);
+                assert!(ms < common::time_budget_ms(100.0), "round {round}: {ms:.0} ms");
+            }
+        }
+    }
 }

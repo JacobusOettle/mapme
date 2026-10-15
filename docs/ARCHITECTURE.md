@@ -138,7 +138,11 @@ order:
      its area's best candidate, at 1.35 or more.
    * *Confidence*: coarse peak ratio (best vs best distinct location) +
      refined robust cost + inlier fraction + how much of the map the
-     contours span. If the map is not in the search
+     contours span; the search evidence lifts only a fit that is acceptable
+     on its own (`refine::combine`, fit confidence 0.5 and up: a 30 m/px map
+     at 78° N, refined on zoom-9 tiles whose terrain there is too coarse for
+     it, fitted its true place at 0.45, 140/545 m off, and its peak ratio of
+     3.85 had made that 0.55). If the map is not in the search
      area, the result is a low score and `failed` status, never a confident
      wrong answer. See *Any map: scales, priors, units* for what keeps this
      true beyond 1:25 000 sheets. The ± the app shows (`rms_m`) bounds the
@@ -158,8 +162,8 @@ make that work:
 
 1. **The map, not the page** (`content.rs`). A map smaller than its page (an export placed
    unscaled on an A4 sheet, a sheet reduced onto a page) is found as the block of ink on the
-   paper and everything the contour path sizes by the image is sized by it. See *A map
-   smaller than its page*.
+   paper, text left out, and everything the contour path sizes by the image is sized by it;
+   the fit is judged where the map may lie. See *A map smaller than its page*.
 2. **Effective resolution** (`contour_lines::estimate_level`). A PDF whose 100 ppi raster
    the app renders at 300 dpi spreads every 1 px line over 3–4 soft pixels (or 3 × 3
    blocks). The mask is made on the raster box-averaged back to about its native size
@@ -204,7 +208,10 @@ The core before this work (c66236b), after it (9913526) and now:
 ("now": with the map found on its page and large sheets' projection bend, 9913526 →
 this change; the two maps gained are 1:250 000 UTM sheets that were 112 and 172 m off at
 their edges, and every other 1:100 000–1:250 000 UTM sheet is closer: see *Large
-sheets: the projection's bend*. The real maps' errors are unchanged to the decimetre.)
+sheets: the projection's bend*. The real maps' errors are unchanged to the decimetre.
+The review of that left the counts as they are and added a 30 m/px OpenTopoMap-like map at
+78° N, which no build locates: refined on zoom-9 terrain too coarse for it, it was answered
+138/545 m off at 0.55 and now fails honestly, see *Confidence* above.)
 
 By style (centre, before → now): photocopies 0 → 5 of 5, grey contours 0 → 5 of 6,
 Gaia-like pages 1 → 8 of 10, 1:250 000 hypsometric 0 → 5 of 9, Kompass 3 → 5 of 5, the
@@ -390,10 +397,13 @@ disagree on there as shear and extrapolates it to the far side: 38 m off
    segment is a group), and for each group the fit is redone without it (one
    linearised Gauss–Newton step with the group's share of the normal
    equations removed: one Jacobian evaluation for all groups). The spread of
-   those refits at the corners of the map (`RefineOptions::map_rect`: the
-   image, or the map's rectangle on its page, `content.rs`; the RMS
-   displacement with the jackknife's (k − 1)/k factor, the largest corner)
-   is `RefineResult::spread_m`: ~2–5 m on a whole MCSA sheet or Gaia page,
+   those refits at the corners of the extent where the map may lie
+   (`RefineOptions::extent`, `content::MapContent::extent`: the image, the
+   map's rectangle on its page, or the raster when the map runs to two of
+   its edges and the rest is blank; of two maps on a page, the one the fit
+   places: *A map smaller than its page*; the RMS displacement with the
+   jackknife's (k − 1)/k factor, the largest corner) is
+   `RefineResult::spread_m`: ~2–5 m on a whole MCSA sheet or Gaia page,
    10–30 m when the contours cover a third of the map, more when they cover a
    corner of it. `diagnostics.refined.spread_m`, `.extent_cover` and
    `.stages` (each model tried: its transform, cost, spread, shift from the
@@ -422,10 +432,15 @@ disagree on there as shear and extrapolates it to the far side: 38 m off
    (`refine::span_evidence`, part of `fit_evidence`: full from 35 % of the
    image's 8 × 8 cells, × 0.25 at 10 % and below): the quality-25 raster with
    lowered contrast kept 18 short segments in its west (16 % of the cells) and
-   was placed 115 m off at 0.97; it now fails honestly. The extent is the
-   map's rectangle, so a small map on a large white page does not count as
-   sparse (its title and legend lines, inside the rectangle, widen the ±
-   a little: ±50 m for the Gaia raster on A4 at 4/8 m off).
+   was placed 115 m off at 0.97; it now fails honestly. The extent is
+   where the map may lie (1.), so a small map on a large white page does
+   not count as sparse, while a map whose contours hold a strip of it does
+   (the Gaia page render with all but its western quarter blank, the sea or
+   the land beyond a park as some maps leave it: judged over the inked
+   strip, the page's 1.6 % aspect ratio moved the strip's corners too
+   little to be kept and was extrapolated across the blank part, 57/129 m
+   off at 0.996 with ±43 m; judged over the raster it is kept, 16/33 m with
+   ±108 m: `tests/gaia_contours.rs`).
 
 Calibration: the contour benchmark (76 synthetic maps, the 12 style maps, the
 9 real cases; GPS at the centre and 10–30 km off, 179 answers) and 121
@@ -445,6 +460,8 @@ reported ±:
 | benchmark, with the map's rectangle and the bend | 179 | 97.8 % | 0.46 | 0.85 | 1.01 | 0 | 27 m |
 | perturbed, before | 108 | 53.7 % | 0.96 | 2.25 | 23.0 | 17 | 16 m |
 | perturbed, now (the same with the rectangle and the bend) | 106 | 93.4 % | 0.53 | 0.91 | 2.19 | 1 | 28 m |
+| blank parts (56 maps: below), the inked strip as extent | 52 | 61.5 % | 0.86 | 2.78 | 5.90 | 8 | 30 m |
+| blank parts, where the map may lie as extent | 52 | 92.3 % | 0.49 | 0.85 | 1.18 | 0 | 53 m |
 
 Located (benchmark verdict) at the centre / 10–30 km off: 87 / 86 of 97 as
 before (89 / 88 with the map's rectangle and the bend: *A map smaller than
@@ -461,7 +478,13 @@ with ±59 m (`tests/gaia_contours.rs`, `*_is_honest`). The MCSA sheets are
 fitted as before (similarities: 2–7 m), with ±16–18 m instead of ±12 m; the
 synthetic photos' contour fits (`tests/photo.rs`, 15–22 m off at most) say
 ±20–31 m instead of ±11 m.
-What the ± still misses: a bias the whole fitted area shares. A 3 × 2 km
+Blank parts: the adversarial review's copies of the Gaia rasters and page
+renders and the MCSA sheets with an east, west or south part of 40–85 %, or
+all but a 45 % corner, painted the paper's colour (truth over the whole
+map frame; the fit where the map may lie, *A map smaller than its page*:
+the raster here); answers with a largest error over 100 m at confidence
+≥ 0.5: 4 → 1, the Gaia page with its western 85 % blank, 67/155 m at 0.82
+with ±137 m. What the ± still misses: a bias the whole fitted area shares. A 3 × 2 km
 crop of the Gaia page fits 35/62 m off at a spread of 4 m (its contours and
 the DEM disagree there; the truth fits them worse than the answer) and gets
 ±28 m; on the benchmark the 1:250 000 sheets in UTM are 1.1–1.15× their ±.
@@ -624,19 +647,44 @@ distance and the coarse and fine DEM boxes (the page's footprint pushed the refi
 a 9 m/px map onto zoom-11 tiles: 31/35 m instead of 4/8 m).
 
 `content::map_content` finds the map as the block of ink on the paper: cells of 1/160 of the
-long side holding ≥ 2 % ink pixels (a channel 24 levels darker than the paper), closed over
-3 cells (sparse contours, lakes) and opened over 4 (a frame round the page, lines of text
-and the scale bar are thinner than a map), the bounding box of the largest group and of
-those at least a fifth its size, plus a cell (5–90 ms on 1–17 MP). The contour path works
-on that rectangle (`diagnostics.contours.map_area`) when it covers at most 75 % of the
-page, is ≥ 300 px a side and at most 8 % of the cells outside it hold ink (a full-bleed map
-whose flat part has contours too far apart to close keeps the whole raster: 19 % on the
-grey Kansas map); otherwise, and for photos, the whole raster as before. The mask, skeleton
-and field are made on the rectangle (`ContourProducts::compute_in`; samples in page pixels),
-the coarse search places the rectangle (`Run::to_page` turns its candidates into page
-transforms), the scale bands, DEM boxes, fine plans and refinement reuse use its size and
-corners, and the label hints measure offsets to its centre. Grid fits, photos and the
-response (corners, warp lattice) stay in page pixels.
+long side holding ≥ 2 % ink pixels (a channel 24 levels darker than the paper) that are not
+text, closed over 3 cells (sparse contours, lakes) and opened over 4 (a frame round the page,
+lines of text and the scale bar are thinner than a map), the bounding box of the largest
+group and of those at least a fifth its size, plus a cell (10–50 ms on 1–17 MP). Text is
+the ink of 8-connected pieces at most 4 cells tall and 20 wide (`TEXT_MAX_H_CELLS`: glyphs,
+words, symbols, dashes; 10–12 pt text is 1.2–2.5 cells tall at 300 dpi): a paragraph (a
+guidebook's route description, a trip report) is a solid block of busy cells that no opening
+removes, and was taken into the rectangle 600–900 px away, or pushed it past 75 % of the
+page (the whole page then), while contour lines, tints and hillshade connect over many
+cells and a map's own labels lie among them. A group is cut along every blank band of 3
+cells or more right across it (`split_gutters`: two maps side by side or one over the other,
+which closing joins), and the blocks found are the map's parts (`MapContent::parts`). The
+contour path works on that rectangle (`diagnostics.contours.map_area`) when it covers at
+most 75 % of the page, is ≥ 300 px a side and at most 8 % of the cells outside it hold
+(non-text) ink (a full-bleed map whose flat part has contours too far apart to close keeps
+the whole raster: 19 % on the grey Kansas map); otherwise, and for photos, the whole raster
+as before. The mask, skeleton and field are made on the rectangle
+(`ContourProducts::compute_in`; samples in page pixels), the coarse search places the
+rectangle (`Run::to_page` turns its candidates into page transforms), the scale bands, DEM
+boxes, fine plans and refinement reuse use its size and corners, and the label hints
+measure offsets to its centre. Grid fits, photos and the response (corners, warp lattice)
+stay in page pixels.
+
+Where the map may lie is another matter than what to size the search by: the fit is judged
+over it (the jackknife's corners, the models' shifts, how much of it the samples span:
+*Honest accuracy*). It is the rectangle, unless the rectangle reaches two of the raster's
+edges or more (within the closing's reach: a frame or a margin of a few cells), where a map
+runs to its raster's edge and what lies blank beside it is the map's own blank part (the
+sea, a glacier, the land beyond a park or a survey), not a page margin: then the raster
+(`MapContent::extent`, `diagnostics.contours.map_extent`). Of a rectangle of several parts,
+the refinement keeps the parts whose samples its similarity fit places, those where at least
+half as many lie within 5 m of their segment's level as in the best part (the other of two
+maps: 0.1–0.2 against 0.6–0.8; a part with under 100 samples, a photo or a legend box, is
+none of the map's), refits on them and is judged over them (`refine::fitted_parts`,
+`diagnostics.refined.extent`): the projective stage and the bend no longer fit two maps at
+once (A over B on A4, the GPS at B's centre: a projective fit kept, 55/348 m off with
+±225 m; now the similarity of map A, which covers the GPS too, within its ±). Its DEM is
+still planned for the whole rectangle (zoom 11 or 12 where A alone gets 13).
 
 Maps on pages (`fixtures/tools/page_compose.py`: the real maps resized onto a white A4/A3
 sheet at 300 dpi under a title, with legend lines under them; `synth_topo.py suite pages`:
@@ -669,6 +717,29 @@ contour lines found", 0.3–0.7 s; `tests/map_on_page.rs`). Of the 97 benchmark 
 work on a rectangle (the MCSA-like A3 pages, Kompass, Swiss, USGS and OS pages with their
 legends, 45–71 % of the page; a Gaia-like page, 52 %): no verdict changes, one Kompass
 page 20/32 → 10/24 m.
+
+Pages with paragraphs of text (the adversarial review's: the Gaia rasters or the
+integrator's real pages with 6–40 lines of DejaVu Sans at 10–12 pt above, under or beside
+the map, or 600–900 px under it), GPS at the map centre, median/max error over the map,
+confidence, ±, with text taken for map → left out:
+
+| page | before | now |
+|---|---|---|
+| Gaia raster A on A4, 40 lines under it | 15/19 m, 0.70, ±177 m | 5/9 m, 0.97, ±47 m |
+| Gaia raster A, text wrapped round it (50 px off) | 12/16 m, 0.70, ±154 m | 4/9 m, 0.98, ±47 m |
+| Gaia raster B on landscape A4, 25 lines under it | no match (fit 0.27) | 11/16 m, 1.0, ±35 m |
+| Gaia raster B, text 600–900 px under it (3 pages) | no match | 12/15 m, 1.0, ±37 m |
+| the real Gaia A page + 15 / 30 lines | 9/10, 10/15 m, ±82 / ±160 m | 8/9 m, ±54 m |
+| the real Gaia B page + 15 / 30 lines | 30/41 m, ±54 m | 12/16 m, ±36 m |
+| the reduced MCSA sheets + 15 / 30 lines | 5–6/6–8 m, ±19–22 m | 5–6/7–9 m, ±16–18 m |
+
+`tests/map_on_page.rs` (pseudo-glyph paragraphs above, under and wrapped round Gaia A, under
+Gaia B; two maps on a page) and `content::tests::text_is_no_map` fail without it. Of the
+97 benchmark maps, 14 work on a rectangle now (11 before), without their title and legend
+text: three whose text had joined their map past 75 % of the raster now work on their map
+(two Kompass-like sheets and sparse-drakensberg, a 1:250 000 sheet at 30 m/px, refined on
+zoom 12 instead of 11: 43/92 → 24/57 m; `fixtures/styles/dem` holds its zoom-12 tiles);
+no verdict changes.
 
 ### Large sheets: the projection's bend
 
@@ -793,7 +864,12 @@ into the paper. With `photo: true` the request:
   relaxed default (or picked) contour colour, by a vote of ≥ 2 pixels of
   their 3×3 neighbourhood (the hue of faint lines is noisy). Unlike a colour
   threshold, this keeps dense contours ~2.5 px apart separate instead of
-  blurring them into blobs whose skeleton follows no contour. The coarse
+  blurring them into blobs whose skeleton follows no contour. Its reach (the
+  valley's two pixels each side) is fixed in pixels: the 300 dpi Grootkloof
+  scan run as a photo is located at its own size only (4/6 m), and resampled
+  to 0.7, 0.84 or 1.21 times it (the last its 6 000 px long side, the
+  importer's cap) it finds no match; 1.68 times it, 96/237 m off with ±127 m.
+  A photo at the cap from a 24 or 48 MP camera has no fixture yet. The coarse
   search is unchanged (similarity templates tolerate the residual perspective
   and aspect error; the right location keeps a peak ratio ≈ 1.4–2.2). The
   refinement (`refine::RefineOptions { photo: true }`) runs similarity as
@@ -892,7 +968,14 @@ adds them, and calls again. Tiles that cannot be fetched (offline) are marked
 missing so the core proceeds without them. Every result is cached in the
 session, so each call continues where the last one stopped; a wide search
 takes about one round per chunk, and the app keeps answering until `ok` or
-`failed` (or the user cancels).
+`failed` (or the user cancels). Each call goes through every hint area and
+near step again, cheaply: their searches are kept by area and scale band
+with the coarse tiles they had (8 hints × 4 bands + 5 near steps = 37 at
+most; a cache of 32 emptied in order had missed every one of them on every
+round of a search with 7 hints and a scale bar at 12 m/px: 3.4× the core
+time, `tests/wide.rs`), refinements by start and DEM, and what the OCR text
+gives (`hint_queries`, the map's labels) by its hash: 2 000 names had cost
+0.5 s a round.
 
 ## C ABI (core/include/mapme_core.h)
 
@@ -1049,7 +1132,10 @@ image's pixels, like everything else.
 * `corners` are the image corners TL, TR, BR, BL as `[lat, lon]`.
 * `pois` are map labels classified as place names, peaks, water or spot
   heights, in base-image pixels, without the labels the grid used (see *Names
-  on the map*).
+  on the map*); in answers only (`ok`, `failed`), timed as `timings_ms.pois`
+  (2–3 ms on the MCSA sheets' Vision OCR; the spot heights' check against the
+  DEM looks for the map's rectangle only where the contour path found it:
+  finding it for a grid fit had cost 40–60 ms).
 * `warp` (absent or `null` unless one of these) is a smooth correction: in
   photo mode for paper that does not lie flat (fold creases, curl), and for a
   sheet of more than 40 km in a regional projection (UTM, a national grid)
@@ -1652,9 +1738,12 @@ scale prior, if any: a printed
 scale's ground m/px range `scale_m_per_px` `[lo, hi]` (its bands alone), a
 scale bar's `scale_bar_m_per_px` (its bands first, then the default range),
 or `"scale_known": true` (the typical sheet's 1:25 000 at 300 dpi, ±25 %).
-Both ranges are what a search reports in `diagnostics.scale_range`. The
-answer also gives the planned work (`search_work`, of it
-`search_work_wide`, millions of FFT cells).
+Both ranges are what a search reports in `diagnostics.scale_range`; as in
+the search, a range is cut to the scales a map can have (0.02–500 m/px) and
+ignored outside them, and the image to what a session takes (32 768 px a
+side, 400 MP): a prior of 10⁹ m/px had planned templates of millions of
+cells (minutes for one estimate). The answer also gives the planned work
+(`search_work`, of it `search_work_wide`, millions of FFT cells).
 
 Measured against complete searches (`wide_measure::estimate_check`; the
 fix at Windhoek, or Nairobi for 2 000 km, so that every map is out of reach
@@ -2144,7 +2233,21 @@ library card.
   not nest 2.7–4.3 → 0.3–0.6 s, the others at most 3.0 s (photos of
   objects whose edges happen to run in parallel: a brick wall, a cup; a
   48 MP page whose terrain is not there; noise images at up to 2.2 s, their
-  skeleton's time). Wide search on the reference box: see the tables
+  skeleton's time). After the review of this round (text left out of the map, the fit judged where
+  the map may lie, fits accepted on their own, the per-session caches, the
+  surfaces' memory budget), the same 97 maps and a 30 m/px map at 78° N,
+  alternating with 34fcfa2: verdicts the same but the 78° N map (138/545 m
+  at 0.55 → no answer); core time per run p50 1.00×, p90 1.11× (CPU the
+  same); located 0.79 / 1.84 / 3.9 → 0.75 / 1.82 / 4.3 s, failed 1.80 /
+  3.51 / 5.7 → 1.81 / 3.58 / 6.1 s (p50 / p95 / max). The slowest are at
+  57° N, where the coarse search now keeps two template pairs in flight
+  instead of four (`search::SURFACE_BUDGET_BYTES`, 128 MB of NCC surfaces;
+  where they are small, at most one pair per thread as before): the
+  photocopy 3.9 → 4.3 s, peak RSS of a search that fails there 1.0 → 0.9 GB
+  (n50-scottish 110 km off, 4 threads; 30efdda: 0.90–0.95 GB; heap of the
+  near search on synthetic terrain at 57° N 694 → 571 MB, `tests/memory.rs`),
+  bw-scottish 0.98 → 0.86 GB.
+  Wide search on the reference box: see the tables
   under *Wide search*
   (a whole 1 000 km search that fails: 14 s of core time with a printed
   scale, 29–33 s without, ~20–50 s on an iPhone plus the download; the
@@ -2155,8 +2258,9 @@ library card.
   warp adds ~0.5 s of fit, plus the contour products in the grid path (one
   more `need_dem` round) and the line detection in the contour path: ~1.3–1.5 s
   grid and ~2.4–2.7 s contour path on the real photo. Finding the map on its
-  page (`content.rs`) takes 5–90 ms (one pass over the pixels, 1–17 MP), once
-  per session; a small map on a page then costs what the map alone costs
+  page (`content.rs`) takes 10–80 ms on 1–17 MP and ~130 ms at 48 MP (one pass
+  over the pixels and the connected pieces of ink, to leave text out), once
+  per session, and a grid fit no longer waits for it; a small map on a page then costs what the map alone costs
   (a Gaia raster on an A4 page: 1.1 s instead of 1.6 s, the page's footprint
   no longer refined). A large sheet's projection bend adds 0.3–0.9 s to its
   refinements (mostly the cross validation, which a wrong place skips).

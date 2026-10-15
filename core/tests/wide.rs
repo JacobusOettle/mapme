@@ -1062,6 +1062,51 @@ fn with_scale_bar(img: &mut Rgb8, px: f64, text: &str) -> Value {
     json!({"text": text, "bbox": [cx - 25.0, (yb - 40) as f64, 50.0, 25.0], "confidence": 0.9})
 }
 
+/// Hint and near areas are searched once a session. Eight hints and a
+/// scale bar at 12.3 m/px (its band and the default range each cut at
+/// 12 m/px: four bands) make 37 hint and near searches; they outnumbered
+/// the session's cache of 32 and were all redone on every round after them
+/// (2.2–5.3 s each, 3.4× the core time of the same search with 6 hints).
+/// Once the wide search runs, no round may run a hint or near search again.
+#[test]
+fn hint_and_near_searches_are_not_redone() {
+    let _g = serial();
+    let fix = LatLon::new(46.5, 8.0);
+    // The sheet lies far outside the search: nothing is found.
+    let (mut img, _) = synthetic_sheet(destination(fix, 0.0, 400_000.0));
+    let bar = with_scale_bar(&mut img, 2000.0 / 12.3, "2 km");
+    let hints: Vec<Value> = (0..8)
+        .map(|k| {
+            let p = destination(fix, 45.0 * k as f64, 30_000.0);
+            json!({"lat": p.lat, "lon": p.lon, "radius_m": 15_000.0})
+        })
+        .collect();
+    let s = Session::new(img);
+    let req = json!({"gps": gps(fix), "ocr": [bar], "hints": hints, "methods": ["contours"],
+                     "search_radius_m": 70_000.0});
+    let out = serve(&s, &req, 64, 200, &noise_terrain, &mut |_| {});
+    let r = out.last();
+    summary("8 hints, a bar at 12.3 m/px, 70 km", &out.responses, None);
+    eprintln!("    {}", out.log);
+    assert_eq!(r["status"], "failed", "{}", r["message"]);
+    let areas = r["diagnostics"]["search_areas"].as_array().unwrap();
+    assert!(areas.len() > 32, "{} hint and near searches", areas.len());
+    // The round that finishes the near area starts the wide search; every
+    // round after it (the wide chunks, their refinements, the answer) finds
+    // the hint and near searches done.
+    let first = out.responses.iter().position(|r| r["search"]["stage"] == "wide").expect(&out.log);
+    let after = &out.responses[first + 1..];
+    assert!(after.len() >= 2, "{}", out.log);
+    for (i, r) in after.iter().enumerate() {
+        assert!(
+            r["timings_ms"]["coarse_search"].is_null(),
+            "round {} searched again: {}",
+            first + 2 + i,
+            r["timings_ms"]
+        );
+    }
+}
+
 /// A 1:50 000 sheet 120 km from the fix whose "2 km" bar was read as
 /// "2 mi" (a bar 1.6 times too long on the ground): the bar's scale is a
 /// prior, not a constraint, in the wide search too (as in the hint and near
