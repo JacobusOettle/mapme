@@ -122,7 +122,10 @@ order:
      Gauss-Newton / Levenberg–Marquardt with a robust loss minimises the
      within-segment elevation variance over similarity (4 parameters), then
      a similarity with its own aspect ratio (5, no shear) when the whole map
-     supports it, with DEM gradients giving the Jacobian. The prototype
+     supports it, and for maps over 40 km a projective stage and their
+     projection's bend (*Large sheets*), with DEM gradients giving the
+     Jacobian. Everything is sized by the map's rectangle on its page (*A map
+     smaller than its page*). The prototype
      converged to about 14 m max error over the whole sheet (the SRTM noise
      floor) from starts up to 470 m off, in under a second. A refinement costs
      0.3–0.6 s, so an area's candidates are refined only when its best one
@@ -439,12 +442,17 @@ reported ±:
 |---|---|---|---|---|---|---|---|
 | benchmark, before | 179 | 78.8 % | 0.68 | 1.41 | 2.23 | 2 | 19 m |
 | benchmark, now | 179 | 95.5 % | 0.51 | 0.88 | 1.15 | 0 | 27 m |
+| benchmark, with the map's rectangle and the bend | 179 | 97.8 % | 0.46 | 0.85 | 1.01 | 0 | 27 m |
 | perturbed, before | 108 | 53.7 % | 0.96 | 2.25 | 23.0 | 17 | 16 m |
-| perturbed, now | 106 | 93.4 % | 0.53 | 0.91 | 2.19 | 1 | 28 m |
+| perturbed, now (the same with the rectangle and the bend) | 106 | 93.4 % | 0.53 | 0.91 | 2.19 | 1 | 28 m |
 
 Located (benchmark verdict) at the centre / 10–30 km off: 87 / 86 of 97 as
-before; 90–110 km off: none answered, as before; confidently wrong: none (one
-of the perturbed maps was before: the quality-25 low-contrast raster above).
+before (89 / 88 with the map's rectangle and the bend: *A map smaller than
+its page*, *Large sheets*); 90–110 km off: none answered, as before;
+confidently wrong: none (one of the perturbed maps was before: the
+quality-25 low-contrast raster above). The page and large-sheet cases
+(*Large sheets*, *A map smaller than its page*: 34 maps, 62 answers) are all
+within their ± (true/± at most 0.85).
 Perturbed: 99 → 101 of 121 located (the two repros and a central crop now
 within tolerance; one corner crop with 18 segments, located before by its
 spurious affine, is no longer accepted). The repros: quality 25 at 12/21 m
@@ -633,8 +641,10 @@ response (corners, warp lattice) stay in page pixels.
 Maps on pages (`fixtures/tools/page_compose.py`: the real maps resized onto a white A4/A3
 sheet at 300 dpi under a title, with legend lines under them; `synth_topo.py suite pages`:
 synthetic rasters placed unscaled on A4/A3 PDF pages with their title, legend and scale
-bar), GPS at the map centre, median/max error and confidence, before → after (the runs
-10–30 km off are the same; from 90–110 km away none is located in either build):
+bar), GPS at the map centre, median/max error and confidence, before (30efdda) → after
+(with the honest model selection and ±: the ± covers every page's worst point, at most
+0.85 of it; the runs 10–30 km off are the same; from 90–110 km away none is located in
+either build):
 
 | page | map | before | after |
 |---|---|---|---|
@@ -644,11 +654,11 @@ bar), GPS at the map centre, median/max error and confidence, before → after (
 | Castle Gorge × 0.45 on A4 (real) | 4.2 m/px, 41 % | 13/14 m | 6/8 m |
 | Mhlabatini × 0.7 on A3 (real) | 2.7 m/px, 49 % | 21/24 m | 5/7 m |
 | Gaia-like raster on A4, two places | 9 m/px, 10 % | 8/14, 6/10 m | 7/15, 6/13 m |
-| Gaia-like raster on A4 landscape | 12 m/px, 10 % | 33/49 m | 12/26 m |
-| Gaia-like raster on A4 landscape | 18 m/px, 20 % | no contours found | 50/89 m, 0.57 |
+| Gaia-like raster on A4 landscape | 12 m/px, 10 % | 33/49 m | 13/24 m |
+| Gaia-like raster on A4 landscape | 18 m/px, 20 % | no contours found | 48/80 m, 0.57 |
 | OpenTopoMap-like on A3 | 15 m/px, 9 % | 17/26 m, 0.85 | 14/22 m, 0.59 |
-| Swiss-like on A4 | 10.6 m/px, 15 % | 28/55 m | 19/29 m |
-| USGS-like on A3 | 6.35 m/px, 12 % | 12/25 m | 3/6 m |
+| Swiss-like on A4 | 10.6 m/px, 15 % | 28/55 m | 19/30 m |
+| USGS-like on A3 | 6.35 m/px, 12 % | 12/25 m | 2/8 m |
 
 Confidence 1.00 or 0.98 except where given. Located (benchmark tolerance) 8 → 11 of 12;
 the 18 m/px raster's faint 1 px lines are its own limit (the raster alone: 36/82 m, 0.83),
@@ -672,7 +682,7 @@ out about half. A complex polynomial fitted to the contours could take
 out the rest, but the data cannot place it: on the 1:250 000 benchmark sheets the fitted
 c₂ lands tens of metres from the truth's (generalised contours on 76–306 m DEM cells), and
 on one sheet in the wrong direction altogether (96 m off). The bend is therefore
-predicted, not fitted (`refine::ConformalStage`, `tm_bend`): around the affine fit's
+predicted, not fitted (`refine::ConformalStage`, `tm_bend`): around the planar fit's
 centroid the transverse Mercator → Web Mercator map is evaluated exactly
 (`geo::latlon_to_tm`, `tm_to_latlon`, any central meridian) and its quadratic and cubic
 coefficients taken by least squares over the map's extent, turned into pixel units
@@ -706,28 +716,30 @@ refinement of such a map (the cross validation); smaller maps never run it.
 
 Large sheets of the benchmark (`synth_topo.py suite regional`: UTM, a TM national grid,
 Kompass and USGS 1:100 000 at 31–70°, and Web Mercator exports of the same size), GPS at
-the centre, median/max error at the truth points and confidence, before → after (the
-10–30 km offset runs are the same, the 90–110 km ones fail honestly in both):
+the centre, median/max error at the truth points and confidence, before (30efdda) → after
+(with the honest model selection: the bend on the aspect-ratio similarity; the ± covers
+every sheet's worst point, at most 0.84 of it; the 10–30 km offset runs are the same, the
+90–110 km ones fail honestly in both):
 
 | sheet | m/px, lat, extent | best affine / homography of the truth | before | after |
 |---|---|---|---|---|
-| 1:250 000 Rockies (UTM) | 50, 40°, 112 km | 103/199, 53/99 | 65/170 m, 0.97 | 25/61 m, 0.98 |
-| 1:250 000 High Atlas | 40, 31°, 90 km | 48/93, 25/47 | 53/172 m, 0.96 | 29/65 m, 0.96 |
-| 1:250 000 Garhwal | 30, 31°, 81 km | 38/73, 19/38 | 37/110 m, 0.83 | 22/43 m, 0.82 |
-| 1:250 000 Aurlandsfjord | 20, 61°, 54 km | 51/99, 26/49 | 26/112 m, 0.68 | 15/33 m, 0.78 |
-| 1:250 000 Cradle Mountain | 25, −42°, 56 km | 28/53, 14/27 | 33/87 m, 0.96 | 27/34 m, 0.96 |
+| 1:250 000 Rockies (UTM) | 50, 40°, 112 km | 103/199, 53/99 | 65/170 m, 0.97 | 30/47 m, 0.98 |
+| 1:250 000 High Atlas | 40, 31°, 90 km | 48/93, 25/47 | 53/172 m, 0.96 | 23/49 m, 0.96 |
+| 1:250 000 Garhwal | 30, 31°, 81 km | 38/73, 19/38 | 37/110 m, 0.83 | 20/29 m, 0.82 |
+| 1:250 000 Aurlandsfjord | 20, 61°, 54 km | 51/99, 26/49 | 26/112 m, 0.68 | 14/30 m, 0.79 |
+| 1:250 000 Cradle Mountain | 25, −42°, 56 km | 28/53, 14/27 | 33/87 m, 0.96 | 26/37 m, 0.96 |
 | 1:250 000 Drakensberg | 25, −29°, 68 km | 25/49, 13/25 | 17/51 m, 0.94 | 11/33 m, 0.95 |
-| 1:250 000 Lyngen Alps | 40, 70°, 108 km | 307/596, 159/293 | no answer | 44/65 m, 0.90 |
-| 1:250 000 Bernese Oberland | 35, 47°, 94 km | 93/179, 48/89 | 46/145 m, 0.85 | 10/21 m, 0.91 |
-| 1:250 000 Glen Coe (TM, meridian −2°) | 30, 57°, 81 km | 98/189, 49/96 | 52/175 m, 0.97 | 12/18 m, 0.99 |
-| 1:250 000 Fitz Roy | 45, −49°, 101 km | 117/226, 60/114 | 61/218 m, 0.89 | 23/39 m, 0.89 |
-| Kompass 1:200 000 Norway | 25, 61°, 68 km | 83/160, 43/80 | 61/93 m, 0.58 | 16/43 m, 0.93 |
-| USGS 1:100 000 Rockies | 10, 40°, 36 km | 11/19, 6/11 | 19/37 m, 1.00 | 16/24 m, 1.00 |
+| 1:250 000 Lyngen Alps | 40, 70°, 108 km | 307/596, 159/293 | no answer | 37/56 m, 0.90 |
+| 1:250 000 Bernese Oberland | 35, 47°, 94 km | 93/179, 48/89 | 46/145 m, 0.85 | 9/23 m, 0.91 |
+| 1:250 000 Glen Coe (TM, meridian −2°) | 30, 57°, 81 km | 98/189, 49/96 | 52/175 m, 0.97 | 10/19 m, 0.99 |
+| 1:250 000 Fitz Roy | 45, −49°, 101 km | 117/226, 60/114 | 61/218 m, 0.89 | 24/38 m, 0.89 |
+| Kompass 1:200 000 Norway | 25, 61°, 68 km | 83/160, 43/80 | 61/93 m, 0.58 | 16/37 m, 0.92 |
+| USGS 1:100 000 Rockies | 10, 40°, 36 km | 11/19, 6/11 | 19/37 m, 1.00 | 16/22 m, 1.00 |
 | USGS 1:100 000 High Atlas | 20, 31°, 67 km | 27/51, 14/26 | 29/69 m, 1.00 | 28/44 m, 1.00 |
 | USGS 1:100 000 Blue Ridge | 12, 39°, 46 km | 16/30, 9/17 | 19/35 m, 1.00 | the same (projective kept) |
 | OpenTopoMap, Bernese Oberland | 40, 47°, 90 km | Web Mercator | 11/19 m, 0.97 | the same (no bend) |
 | OpenTopoMap, Lyngen Alps | 30, 70°, 67 km | Web Mercator | 43/49 m, 0.63 | the same (no bend) |
-| Gaia page, High Atlas (EPSG:3857 printed) | 12, 31°, 44 km | Web Mercator | 11/23 m, 0.82 | the same (no bend) |
+| Gaia page, High Atlas (EPSG:3857 printed) | 12, 31°, 44 km | Web Mercator | 11/23 m, 0.82 | 10/14 m, 0.82 (no bend) |
 
 Every UTM/TM sheet located now lies within 2 px or 60 m at its worst truth point (the
 bend itself is right to the decimetre there: what remains is an affine error, the
@@ -1025,8 +1037,10 @@ image's pixels, like everything else.
   a wide match, and `selected.recheck` the local re-check of a hint or near
   match that needed one; `diagnostics.dem_tiles_held` the DEM tiles the
   session holds (256 KB each).
-* `pixel_to_mercator` is affine (last row `[0, 0, 1]`) except in photo mode,
-  where it may be a full homography; always evaluate it projectively.
+* `pixel_to_mercator` is affine (last row `[0, 0, 1]`) except in photo mode
+  and for large maps (a projective stage, or the best homography of a
+  projection's bend, the rest of which is the `warp`), where it may be a full
+  homography; always evaluate it projectively.
 * `scale_m_per_px` is in *ground* metres.
 * `rms_m` is the ± the app shows (ground metres); for a contour fit, how far
   the dot may be off anywhere on the image, including what the contours
@@ -1674,7 +1688,9 @@ core time −14 … +16 % (mean |error| 7 %), tiles −14 … +24 %, megabytes
 almost nothing, so the estimate's average weights overstate a coast), rounds
 −11 … +10 %. A 50 km search takes 1–2 s, and its refinements (0–3 at
 ~0.35 s; 1.5 counted) swing that by ±0.5 s: −31 … +49 % there (within
-0.6 s), tiles −15 … +28 %, megabytes −35 … +1 %.
+0.6 s), tiles −15 … +28 %, megabytes −35 … +1 %. Re-checked with the map's
+rectangle, the honest ± and the bend (the 15 runs of 50–250 km): from 120 km
+−13 … +13 % (mean |error| 7 %), at 50 km −36 … +40 % (within 0.8 s).
 
 From Pretoria, a typical sheet, scale unknown (in brackets: with a scale
 label, `"scale_known": true`):
@@ -1892,9 +1908,9 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
                       choice, run-based components
   src/skeleton.rs     thinning, junction removal, segment extraction, sampling
   src/search.rs       coarse orientation-field FFT search
-  src/refine.rs       contour-constancy least-squares refinement (similarity, affine,
-                      projective for photos and large maps, a large sheet's projection
-                      bend) + scoring
+  src/refine.rs       contour-constancy least-squares refinement (similarity, its page's
+                      aspect ratio, affine for photos, projective for photos and large
+                      maps, a large sheet's projection bend), jackknife spread + scoring
   src/warp.rs         photo warp: offset lattice for paper that is not flat, fitted to
                       traced grid lines and contours, held-out checks, inverse
   src/page.rs         page (paper sheet) finder for photos: mm_detect_page
@@ -2100,31 +2116,34 @@ library card.
   inverse transform, block-wise peak picking: `search.rs`; refinement only of
   candidates that stand out; the coarse band before the near zoom's 50 km
   disc; a stop at 20 km for lines unlike contour lines: `georef.rs`), the
-  whole contour benchmark (97 maps × GPS at the centre, 10–30 km off and
-  90–110 km off) against 725018e, the two builds alternating one process at
-  a time (load 2–5 from other jobs), same verdicts run for run, none
-  confidently wrong:
+  map's rectangle (`content.rs`), the honest model selection and ± (the
+  jackknife of the stages it judges) and a large sheet's bend. The whole
+  contour benchmark (97 maps × GPS at the centre, 10–30 km off and 90–110 km
+  off) against 30efdda, the two builds alternating one process at a time on
+  an otherwise idle box, none confidently wrong in either, verdicts the same
+  but for two 1:250 000 sheets now located (4 runs):
 
-  | runs | old p50 / p95 / max | new p50 / p95 / max |
+  | runs | 30efdda p50 / p95 / max | now p50 / p95 / max |
   |---|---|---|
-  | located (173) | 0.90 / 2.68 / 6.2 s | 0.79 / 1.54 / 3.4 s |
-  | failed (112) | 5.80 / 9.02 / 10.8 s | 2.24 / 3.71 / 6.7 s |
-  | GPS 90–110 km off (97) | 6.01 / 9.22 / 10.8 s | 2.31 / 3.71 / 6.7 s |
+  | located (173 → 177) | 0.75 / 2.26 / 6.6 s | 0.69 / 1.71 / 3.8 s |
+  | failed (112) | 4.00 / 7.17 / 8.2 s | 1.71 / 3.13 / 5.6 s |
+  | GPS 90–110 km off (97) | 4.36 / 7.29 / 8.2 s | 1.63 / 3.18 / 5.6 s |
 
-  Every located run now within 4 s (169 of 173 before), 171 of 173 within
-  4 s on an iPhone (×1.5: 161 before), 288 of 291 runs of any kind within 4 s
-  (193 before); CPU time of a failing run 10.7 → 4.9 s median. The
-  black-and-white photocopy (2 678 × 3 396 px, 5 m/px) 6.2 → 3.4 s with the
-  GPS 22 km off and 7.0 → 3.2 s 98 km off (11–18 s under load before); the
-  23 m/px native Gaia raster 5.2–5.4 → 0.9–1.1 s. The reviewer's non-maps
-  (41 images: photos, noise, blank pages, hillshade, tints, drainage,
-  hachures, roads; GPS at the place and 100 km off; alternating the same
-  way, load ~3): 2.18 → 0.29 s median, 3.90 → 1.74 s p95, 4.5 → 2.7 s at
-  most, none located (the old build placed a photo of a coffee cup at
-  confidence 0.52); those whose lines do not nest 2.7–4.1 → 0.3–0.7 s, the
-  others searched 0.6–4.5 → 0.6–2.7 s (photos of objects whose edges
-  happen to run in parallel: a brick wall, a cup; a 48 MP page whose
-  terrain is not there; noise images unchanged at 0.6–2.3 s, their
+  Every located run within 4 s (170 of 173 before), 175 of 177 within 4 s on
+  an iPhone (×1.5: 169 before), 290 of 291 runs of any kind within 4 s (230
+  before); CPU time of a failing run 10.3 → 5.0 s median. A map both builds
+  locate costs 1.06× (p90 1.24×) what it did: the jackknife, and the bend's
+  cross validation on maps over 40 km (0.3–0.9 s), against the cheaper
+  search. The black-and-white photocopy (2 678 × 3 396 px, 5 m/px) 6.6 →
+  3.8 s with the GPS 22 km off and 7.5 → 3.1 s 98 km off; the 23 m/px
+  native Gaia rasters 4.5–5.2 → 0.7 s. The reviewer's non-maps (41 images:
+  photos, noise, blank pages, hillshade, tints, drainage, hachures, roads;
+  GPS at the place and 100 km off; alternating the same way): 2.12 → 0.30 s
+  median, 4.20 → 1.89 s p95, 4.7 → 3.0 s at most, none answered (30efdda
+  placed a photo of a coffee cup at confidence 0.52); those whose lines do
+  not nest 2.7–4.3 → 0.3–0.6 s, the others at most 3.0 s (photos of
+  objects whose edges happen to run in parallel: a brick wall, a cup; a
+  48 MP page whose terrain is not there; noise images at up to 2.2 s, their
   skeleton's time). Wide search on the reference box: see the tables
   under *Wide search*
   (a whole 1 000 km search that fails: 14 s of core time with a printed
