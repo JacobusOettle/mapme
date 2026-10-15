@@ -10,8 +10,14 @@
 //!
 //! The solve runs coarse-to-fine on a smoothed DEM pyramid (after a small
 //! translation grid on the coarsest level) so initial errors of several
-//! hundred metres still converge: first a 4-parameter similarity, then a full
-//! affine if that lowers the cost meaningfully and stays near-conformal.
+//! hundred metres still converge: first a 4-parameter similarity, then one
+//! with its own aspect ratio (no shear) and, for maps spanning tens of km, a
+//! projective stage, each kept only if the whole map supports it: it must
+//! move the map's corners well beyond its delete-an-area jackknife spread
+//! (`jackknife`, `MODEL_MIN_Z`); then such a map's projection bend
+//! (`ConformalStage`), predicted and kept by cross validation. The spread of
+//! the kept model at the map's corners (`RefineOptions::map_rect`) is what
+//! the reported accuracy is made of (`RefineResult::spread_m`).
 //!
 //! Photos of paper maps (`RefineOptions::photo`) keep some perspective and a
 //! wrong aspect ratio after flattening: the affine then runs coarse-to-fine
@@ -71,6 +77,35 @@ pub struct RefineResult {
     /// Σ|g·t̂| / Σ|g|: how much the contours run along the DEM's slope
     /// instead of across it (`gradient_alignment`; NaN without samples).
     pub gradient_alignment: f64,
+    /// How far the kept transform may be off at the corners of the extent
+    /// it must hold (`RefineOptions::extent`, else the samples' bounding
+    /// box), ground metres: the largest RMS displacement of a corner over
+    /// the delete-a-group jackknife (`jackknife`). NaN when not estimated
+    /// (an evaluation, too few groups of segments), ∞ when a group alone
+    /// holds the fit's parameters.
+    pub spread_m: f64,
+    /// Fraction of that extent the samples cover (`extent_cover`): cells
+    /// of an 8 × 8 grid holding samples.
+    pub extent_cover: f64,
+    /// The models tried, in order (diagnostics).
+    pub stages: Vec<StageFit>,
+}
+
+/// One model the refinement fitted (`RefineResult::stages`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StageFit {
+    /// "similarity", "aniso", "affine" (photos) or "projective".
+    pub model: &'static str,
+    pub homography: Homography,
+    /// Robust cost on the finest level (the soft-L1 sum the stages compare).
+    pub cost: f64,
+    /// `RefineResult::spread_m` of this model.
+    pub spread_m: f64,
+    /// Largest displacement (ground metres) of an extent corner from the
+    /// previous stage's fit (0 for the first).
+    pub shift_m: f64,
+    /// Was it kept?
+    pub kept: bool,
 }
 
 /// Soft-L1 loss scale (metres) on the finest level (doubles per level).
@@ -85,12 +120,25 @@ const MISSING_PENALTY_M: f64 = 10.0;
 const DEM_SMOOTH_SIGMA: f64 = 0.7;
 /// The similarity scale may move at most this far (log units) from the start.
 const MAX_LOG_SCALE_CHANGE: f64 = 0.15;
-/// Affine is kept only if it lowers the cost by this fraction…
+/// Affine (photos) is kept only if it lowers the cost by this fraction…
 const AFFINE_MIN_GAIN: f64 = 0.03;
+/// The anisotropic similarity (maps) if it lowers the cost by this fraction
+/// and is supported (`StageFit::supported`).
+const ANISO_MIN_GAIN: f64 = 0.005;
+/// A richer model is kept only if it moves the corners of the extent at
+/// least this many times its jackknife spread there from the simpler one
+/// (`StageFit::supported`). The jackknife sees the scatter between areas
+/// of the map, not what they share (DEM and drawing disagreeing over a
+/// whole region), and underestimates by 2–4× on maps with few contours:
+/// the free affine of a Gaia raster whose contours survive only in its
+/// west moved the far corners 3–5 spreads, by a spurious shear.
+const MODEL_MIN_Z: f64 = 4.0;
 /// …and its two axis scales differ by less than this ratio.
 const AFFINE_MAX_ANISOTROPY: f64 = 1.08;
+/// `Model::Aniso` keeps its u within this (the same ratio: e^(2u) ≤ 1.08).
+const MAX_LOG_ANISO: f64 = 0.0385;
 /// A map spanning more than this (ground metres, the samples' diagonal) gets
-/// a projective stage after the affine one: a regional projection (UTM, a
+/// a projective stage after the planar ones: a regional projection (UTM, a
 /// national grid) is no affine image of Web Mercator over tens of km (its
 /// scale changes by tan(lat) / R per metre north: ~1 % over 75 km at 40°,
 /// 100 m at the edges of a 1:250 000 sheet that an affine fit cannot take
@@ -119,11 +167,11 @@ const CONFORMAL_MIN_COVER: f64 = 0.6;
 /// a check on the prediction)…
 const CONFORMAL_BOUND: f64 = 1.5;
 const CONFORMAL_SLACK_M: f64 = 2.0;
-/// …its cost is at most this much above the affine's (Web Mercator exports:
-/// 17–23 % above)…
+/// …its cost is at most this much above the planar fit's (Web Mercator
+/// exports: 17–23 % above)…
 const CONFORMAL_PRECHECK: f64 = 0.03;
 /// …and contour segments it was not fitted to agree with it at least as well
-/// as with the affine and the projective fits: in spatial K-fold cross
+/// as with the planar fit without the bend and the projective fit: in spatial K-fold cross
 /// validation (`conformal_cv`) its held-out cost, taken this much lower (a
 /// prior: the bend is what a regional projection must do, not a fitted
 /// shape), is the lowest.
@@ -250,6 +298,10 @@ fn smooth_nan(dem: &DemMosaic, sigma: f64) -> DemMosaic {
 enum Model {
     /// [ln s, θ, tx, ty] as in `Affine::pixel_to_merc_similarity`.
     Similarity,
+    /// A similarity whose image axes are scaled apart: [ln s, θ, tx, ty,
+    /// u], image x scaled by s·eᵘ and image y by s·e⁻ᵘ before the rotation
+    /// (a page rendered or scanned at another aspect ratio; no shear).
+    Aniso,
     /// [a, b, d, e, tx, ty].
     Affine,
     /// Full projective transform (photos), about the Mercator reference
@@ -258,8 +310,8 @@ enum Model {
     /// merc = rm + (a·u + b·v + c, d·u + e·v + f) / (1 + g·u + h·v),
     /// parameters [a, b, c, d, e, f, g, h].
     Projective,
-    /// `Affine` plus a given conformal polynomial (`ConformalFit`,
-    /// `Params::poly`): [a, b, d, e, tx, ty] fitted.
+    /// `Aniso` plus a given conformal polynomial (`ConformalFit`,
+    /// `Params::poly`): [ln s, θ, tx, ty, u] fitted.
     Conformal,
 }
 
@@ -270,9 +322,10 @@ impl Model {
     fn n(self) -> usize {
         match self {
             Model::Similarity => 4,
+            Model::Aniso => 5,
             Model::Affine => 6,
             Model::Projective => 8,
-            Model::Conformal => 6,
+            Model::Conformal => 5,
         }
     }
 }
@@ -341,7 +394,14 @@ impl Params {
                 let ss = -0.5 * (t.b + t.d);
                 [(sc * sc + ss * ss).sqrt().max(1e-12).ln(), ss.atan2(sc), tx, ty, 0.0, 0.0, 0.0, 0.0]
             }
-            Model::Affine | Model::Conformal => [t.a, t.b, t.d, t.e, tx, ty, 0.0, 0.0],
+            Model::Aniso | Model::Conformal => {
+                // Columns (a, d) = s·eᵘ·(cos θ, −sin θ), (b, e) = s·e⁻ᵘ·(−sin θ, −cos θ).
+                let (k1, k2) = (t.a.hypot(t.d).max(1e-12), t.b.hypot(t.e).max(1e-12));
+                let (t1, t2) = ((-t.d).atan2(t.a), (-t.b).atan2(-t.e));
+                let th = (t1.sin() + t2.sin()).atan2(t1.cos() + t2.cos());
+                [0.5 * (k1 * k2).ln(), th, tx, ty, 0.5 * (k1 / k2).ln(), 0.0, 0.0, 0.0]
+            }
+            Model::Affine => [t.a, t.b, t.d, t.e, tx, ty, 0.0, 0.0],
             Model::Projective => [t.a * sn, t.b * sn, 0.0, t.d * sn, t.e * sn, 0.0, 0.0, 0.0],
         };
         Params { model, p, cx, cy, sn, rm: (tx, ty), poly: [0.0; 4] }
@@ -349,17 +409,8 @@ impl Params {
 
     /// Conformal parameters of a `ConformalFit` (about its own centroid).
     fn from_conformal(c: &ConformalFit) -> Params {
-        let (tx, ty) = c.affine.apply(c.cx, c.cy);
-        let t = &c.affine;
-        Params {
-            model: Model::Conformal,
-            p: [t.a, t.b, t.d, t.e, tx, ty, 0.0, 0.0],
-            cx: c.cx,
-            cy: c.cy,
-            sn: c.sn,
-            rm: (tx, ty),
-            poly: [c.c2[0], c.c2[1], c.c3[0], c.c3[1]],
-        }
+        let at = Data { xs: Vec::new(), ys: Vec::new(), seg: Vec::new(), n_segs: 0, cx: c.cx, cy: c.cy, sn: c.sn };
+        Params { poly: [c.c2[0], c.c2[1], c.c3[0], c.c3[1]], ..Params::from_affine(&c.affine, Model::Conformal, &at) }
     }
 
     fn to_conformal(self) -> ConformalFit {
@@ -378,9 +429,15 @@ impl Params {
     #[inline]
     fn conformal(&self, t: &Affine, x: f64, y: f64) -> (f64, f64) {
         let (mx, my) = t.apply(x, y);
-        let (u, v) = ((x - self.cx) / self.sn, (self.cy - y) / self.sn);
-        let (dx, dy) = poly_offset([self.poly[0], self.poly[1]], [self.poly[2], self.poly[3]], u, v);
+        let (dx, dy) = self.poly_offset(x, y);
         (mx + dx, my + dy)
+    }
+
+    /// The polynomial part of `Conformal` at pixel (x, y) (Mercator metres).
+    #[inline]
+    fn poly_offset(&self, x: f64, y: f64) -> (f64, f64) {
+        let (u, v) = ((x - self.cx) / self.sn, (self.cy - y) / self.sn);
+        poly_offset([self.poly[0], self.poly[1]], [self.poly[2], self.poly[3]], u, v)
     }
 
     /// Affine parameters stretched by `1 + k` along image x and `1 − k`
@@ -430,11 +487,30 @@ impl Params {
             Model::Similarity => {
                 Affine::pixel_to_merc_similarity(self.p[0].exp(), self.p[1], self.cx, self.cy, self.p[2], self.p[3])
             }
-            Model::Affine | Model::Conformal => {
+            Model::Aniso | Model::Conformal => {
+                let [ls, th, tx, ty, u, _, _, _] = self.p;
+                let (k1, k2) = ((ls + u).exp(), (ls - u).exp());
+                let (sn, cs) = th.sin_cos();
+                let (a, b, d, e) = (k1 * cs, -k2 * sn, -k1 * sn, -k2 * cs);
+                Affine { a, b, c: tx - a * self.cx - b * self.cy, d, e, f: ty - d * self.cx - e * self.cy }
+            }
+            Model::Affine => {
                 let [a, b, d, e, tx, ty, _, _] = self.p;
                 Affine { a, b, c: tx - a * self.cx - b * self.cy, d, e, f: ty - d * self.cx - e * self.cy }
             }
             Model::Projective => self.to_homography().local_affine(self.cx, self.cy),
+        }
+    }
+
+    /// Mercator position of pixel (x, y).
+    fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+        match self.model {
+            Model::Projective => {
+                let (mx, my, _) = self.project(x, y);
+                (mx, my)
+            }
+            Model::Conformal => self.conformal(&self.to_affine(), x, y),
+            _ => self.to_affine().apply(x, y),
         }
     }
 
@@ -494,6 +570,9 @@ struct Eval {
     /// Per-sample residual and elevation (NaN where unused).
     resid: Vec<f64>,
     elev: Vec<f64>,
+    /// Each segment group's share of `ata` and `atb` (`evaluate_grouped`).
+    group_ata: Vec<[[f64; NP]; NP]>,
+    group_atb: Vec<[f64; NP]>,
 }
 
 /// Elevation, gradient and Mercator position of every sample (NaN = off DEM).
@@ -519,8 +598,17 @@ fn sample_all(d: &Data, dem: &DemMosaic, par: &Params) -> Vec<[f64; 5]> {
 }
 
 /// Evaluate `par` on `dem` for all samples of `d`.
-#[allow(clippy::needless_range_loop)]
 fn evaluate_params(d: &Data, dem: &DemMosaic, par: &Params, c: f64, jac: bool) -> Eval {
+    evaluate_inner(d, dem, par, c, jac, None)
+}
+
+/// `evaluate_params` with normal equations, also split by segment group.
+fn evaluate_grouped(d: &Data, dem: &DemMosaic, par: &Params, c: f64, groups: &Groups) -> Eval {
+    evaluate_inner(d, dem, par, c, true, Some(groups))
+}
+
+#[allow(clippy::needless_range_loop)]
+fn evaluate_inner(d: &Data, dem: &DemMosaic, par: &Params, c: f64, jac: bool, groups: Option<&Groups>) -> Eval {
     let n = d.xs.len();
     let np = par.model.n();
     let samp = sample_all(d, dem, par);
@@ -566,6 +654,9 @@ fn evaluate_params(d: &Data, dem: &DemMosaic, par: &Params, c: f64, jac: bool) -
     }
     let mut ata = [[0.0f64; NP]; NP];
     let mut atb = [0.0f64; NP];
+    let n_groups = groups.map_or(0, |g| g.n);
+    let mut group_ata = vec![[[0.0f64; NP]; NP]; n_groups];
+    let mut group_atb = vec![[0.0f64; NP]; n_groups];
     if jac {
         let row = |i: usize| -> [f64; NP] {
             let [_, gx, gy, mx, my] = samp[i];
@@ -575,8 +666,20 @@ fn evaluate_params(d: &Data, dem: &DemMosaic, par: &Params, c: f64, jac: bool) -
                     let (dx, dy) = (mx - p[2], my - p[3]);
                     [gx * dx + gy * dy, gx * dy - gy * dx, gx, gy, 0.0, 0.0, 0.0, 0.0]
                 }
-                // The polynomial is given: the affine's derivatives.
-                Model::Affine | Model::Conformal => {
+                // `Conformal`: the polynomial is given, the aniso's derivatives
+                // (of its linear part: the position less the polynomial).
+                Model::Aniso | Model::Conformal => {
+                    let (ox, oy) =
+                        if par.model == Model::Conformal { par.poly_offset(d.xs[i], d.ys[i]) } else { (0.0, 0.0) };
+                    let (dx, dy) = (mx - ox - p[2], my - oy - p[3]);
+                    // ∂/∂u: the image x part grows, the y part shrinks.
+                    let s = p[0].exp();
+                    let (bx, by) = ((p[4]).exp() * (d.xs[i] - par.cx), (-p[4]).exp() * (d.ys[i] - par.cy));
+                    let (sn, cs) = p[1].sin_cos();
+                    let (ux, uy) = (s * (cs * bx + sn * by), s * (-sn * bx + cs * by));
+                    [gx * dx + gy * dy, gx * dy - gy * dx, gx, gy, gx * ux + gy * uy, 0.0, 0.0, 0.0]
+                }
+                Model::Affine => {
                     let (x, y) = (d.xs[i] - par.cx, d.ys[i] - par.cy);
                     [gx * x, gx * y, gy * x, gy * y, gx, gy, 0.0, 0.0]
                 }
@@ -625,14 +728,24 @@ fn evaluate_params(d: &Data, dem: &DemMosaic, par: &Params, c: f64, jac: bool) -
                     ata[a][b] += wi * j[a] * j[b];
                 }
             }
+            if let Some(g) = groups.map(|g| g.of_seg[s] as usize).filter(|&g| g < n_groups) {
+                for a in 0..np {
+                    group_atb[g][a] += wi * j[a] * r;
+                    for b in a..np {
+                        group_ata[g][a][b] += wi * j[a] * j[b];
+                    }
+                }
+            }
         }
-        for a in 0..np {
-            for b in 0..a {
-                ata[a][b] = ata[b][a];
+        for m in std::iter::once(&mut ata).chain(group_ata.iter_mut()) {
+            for a in 0..np {
+                for b in 0..a {
+                    m[a][b] = m[b][a];
+                }
             }
         }
     }
-    Eval { cost, ata, atb, resid, elev }
+    Eval { cost, ata, atb, resid, elev, group_ata, group_atb }
 }
 
 /// Samples in a refinement-friendly layout.
@@ -717,6 +830,161 @@ impl Data {
     }
 }
 
+/// Segments are grouped for the jackknife by where they lie: cells of a
+/// `JK_GRID` × `JK_GRID` grid over the samples' bounding box (by segment
+/// centroid)…
+const JK_GRID: usize = 5;
+/// …and the jackknife needs at least this many groups (else each segment
+/// is a group of its own; with fewer segments there is no estimate).
+const JK_MIN_GROUPS: usize = 6;
+
+/// Segment groups: the units `jackknife` leaves out. Contour samples are
+/// not independent (a stretch of map that the DEM or the drawing gets
+/// wrong shifts all its samples together), so the fit's uncertainty is
+/// judged by leaving out whole areas of the map, not samples.
+struct Groups {
+    /// Group of each segment (`u32::MAX`: a segment without samples).
+    of_seg: Vec<u32>,
+    n: usize,
+}
+
+impl Groups {
+    fn new(d: &Data) -> Groups {
+        let mut sum = vec![(0.0f64, 0.0f64, 0usize); d.n_segs];
+        for i in 0..d.xs.len() {
+            let s = &mut sum[d.seg[i] as usize];
+            s.0 += d.xs[i];
+            s.1 += d.ys[i];
+            s.2 += 1;
+        }
+        let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for (&x, &y) in d.xs.iter().zip(&d.ys) {
+            x0 = x0.min(x);
+            x1 = x1.max(x);
+            y0 = y0.min(y);
+            y1 = y1.max(y);
+        }
+        let cell = |v: f64, lo: f64, hi: f64| (((v - lo) / (hi - lo).max(1.0)) * JK_GRID as f64) as usize;
+        let mut id = [u32::MAX; JK_GRID * JK_GRID];
+        let mut of_seg = vec![u32::MAX; d.n_segs];
+        let mut n = 0u32;
+        for (s, &(sx, sy, c)) in sum.iter().enumerate() {
+            if c == 0 {
+                continue;
+            }
+            let (cx, cy) = (sx / c as f64, sy / c as f64);
+            let k = cell(cy, y0, y1).min(JK_GRID - 1) * JK_GRID + cell(cx, x0, x1).min(JK_GRID - 1);
+            if id[k] == u32::MAX {
+                id[k] = n;
+                n += 1;
+            }
+            of_seg[s] = id[k];
+        }
+        if (n as usize) < JK_MIN_GROUPS {
+            // Too compact for areas: segments one by one.
+            n = 0;
+            for (s, &(_, _, c)) in sum.iter().enumerate() {
+                if c > 0 {
+                    of_seg[s] = n;
+                    n += 1;
+                }
+            }
+        }
+        Groups { of_seg, n: n as usize }
+    }
+}
+
+/// Linearised delete-a-group jackknife of the fit `par`: for every group
+/// of segments, the parameters refitted without it (one Gauss–Newton step
+/// from `par` with that group's share of the normal equations removed).
+/// None with too few groups; Some(empty) when leaving a group out leaves
+/// the model undetermined (that group alone holds some of its parameters).
+fn jackknife(d: &Data, dem: &DemMosaic, par: &Params, groups: &Groups) -> Option<Vec<Params>> {
+    if groups.n < JK_MIN_GROUPS {
+        return None;
+    }
+    let np = par.model.n();
+    let e = evaluate_grouped(d, dem, par, LOSS_SCALE_M, groups);
+    let mut reps = Vec::with_capacity(groups.n);
+    for k in 0..groups.n {
+        if e.group_ata[k].iter().all(|r| r.iter().all(|&v| v == 0.0)) {
+            continue; // no sample of this group was used
+        }
+        let mut m: Vec<Vec<f64>> = (0..np)
+            .map(|a| {
+                let mut row: Vec<f64> = (0..np).map(|b| e.ata[a][b] - e.group_ata[k][a][b]).collect();
+                row[a] += 1e-9 * e.ata[a][a].abs() + 1e-12;
+                row.push(-(e.atb[a] - e.group_atb[k][a]));
+                row
+            })
+            .collect();
+        let Some(delta) = crate::geo::solve_dense(&mut m) else {
+            return Some(Vec::new());
+        };
+        let mut p = *par;
+        for (v, dv) in p.p.iter_mut().zip(&delta) {
+            *v += dv;
+        }
+        reps.push(p);
+    }
+    (reps.len() >= JK_MIN_GROUPS).then_some(reps)
+}
+
+/// The jackknife's spread at the corners of `extent` (pixels: x0, y0, x1,
+/// y1): the largest RMS displacement of a corner over the replicates
+/// (Mercator metres), with the jackknife's (k − 1)/k variance factor.
+/// ∞ when the model is undetermined without some group, NaN without an
+/// estimate.
+fn corner_spread(reps: Option<&[Params]>, extent: &[f64; 4]) -> f64 {
+    let Some(reps) = reps else {
+        return f64::NAN;
+    };
+    if reps.is_empty() {
+        return f64::INFINITY;
+    }
+    let k = reps.len() as f64;
+    corners(extent)
+        .iter()
+        .map(|&(x, y)| {
+            let pts: Vec<(f64, f64)> = reps.iter().map(|p| p.apply(x, y)).collect();
+            let mx = pts.iter().map(|p| p.0).sum::<f64>() / k;
+            let my = pts.iter().map(|p| p.1).sum::<f64>() / k;
+            let ss = pts.iter().map(|p| (p.0 - mx).powi(2) + (p.1 - my).powi(2)).sum::<f64>();
+            ((k - 1.0) / k * ss).sqrt()
+        })
+        .fold(0.0, f64::max)
+}
+
+/// Corners TL, TR, BR, BL of an extent (x0, y0, x1, y1).
+fn corners(e: &[f64; 4]) -> [(f64, f64); 4] {
+    [(e[0], e[1]), (e[2], e[1]), (e[2], e[3]), (e[0], e[3])]
+}
+
+/// Largest displacement (Mercator metres) between two fits at the corners of `extent`.
+fn corner_shift(a: &Params, b: &Params, extent: &[f64; 4]) -> f64 {
+    corners(extent)
+        .iter()
+        .map(|&(x, y)| {
+            let (p, q) = (a.apply(x, y), b.apply(x, y));
+            (p.0 - q.0).hypot(p.1 - q.1)
+        })
+        .fold(0.0, f64::max)
+}
+
+/// Fraction of the cells of an 8 × 8 grid over `extent` that hold samples.
+fn extent_cover(d: &Data, extent: &[f64; 4]) -> f64 {
+    const G: usize = 8;
+    let (w, h) = ((extent[2] - extent[0]).max(1.0), (extent[3] - extent[1]).max(1.0));
+    let mut hit = [false; G * G];
+    for (&x, &y) in d.xs.iter().zip(&d.ys) {
+        let (u, v) = ((x - extent[0]) / w, (y - extent[1]) / h);
+        if (0.0..1.0).contains(&u) && (0.0..1.0).contains(&v) {
+            hit[(v * G as f64) as usize * G + (u * G as f64) as usize] = true;
+        }
+    }
+    hit.iter().filter(|&&b| b).count() as f64 / (G * G) as f64
+}
+
 /// Levenberg–Marquardt from `start`. Returns (params, cost, iterations, converged).
 fn lm(
     d: &Data,
@@ -756,8 +1024,11 @@ fn lm(
         for (p, dv) in cand.p.iter_mut().zip(&delta) {
             *p += dv;
         }
-        if cand.model == Model::Similarity {
+        if matches!(cand.model, Model::Similarity | Model::Aniso | Model::Conformal) {
             cand.p[0] = cand.p[0].clamp(log_scale_bounds.0, log_scale_bounds.1);
+        }
+        if matches!(cand.model, Model::Aniso | Model::Conformal) {
+            cand.p[4] = cand.p[4].clamp(-MAX_LOG_ANISO, MAX_LOG_ANISO);
         }
         let next = evaluate_params(d, dem, &cand, c, true);
         if next.cost < cur.cost {
@@ -765,9 +1036,10 @@ fn lm(
             // Step size in Mercator metres at the map extent.
             let step_m = match par.model {
                 Model::Similarity => delta[2].hypot(delta[3]) + 3000.0 * (delta[0].abs() + delta[1].abs()),
-                Model::Affine | Model::Conformal => {
-                    delta[4].hypot(delta[5]) + 1500.0 * delta[..4].iter().map(|v| v.abs()).sum::<f64>()
+                Model::Aniso | Model::Conformal => {
+                    delta[2].hypot(delta[3]) + 3000.0 * (delta[0].abs() + delta[1].abs() + delta[4].abs())
                 }
+                Model::Affine => delta[4].hypot(delta[5]) + 1500.0 * delta[..4].iter().map(|v| v.abs()).sum::<f64>(),
                 Model::Projective => {
                     let extent = 0.5 * (par.p[0].abs() + par.p[4].abs());
                     delta[2].hypot(delta[5])
@@ -800,9 +1072,11 @@ pub struct RefineOptions {
     /// residual perspective and aspect errors are expected, so the affine
     /// stage may be strongly anisotropic and a projective stage follows.
     pub photo: bool,
-    /// The map's extent in pixels [x0, y0, x1, y1] (the image, or the map
-    /// content on a page): the conformal stage needs samples across most of
-    /// it (`CONFORMAL_MIN_COVER`). None: the samples' own extent.
+    /// The map's extent in pixels [x0, y0, x1, y1]: the image, or the map
+    /// content on a page (`content::map_content`). The transform must hold
+    /// it: `RefineResult::spread_m` is measured at its corners and
+    /// `extent_cover` over it; the conformal stage needs samples across most
+    /// of it (`CONFORMAL_MIN_COVER`). None: the samples' bounding box.
     pub map_rect: Option<[f64; 4]>,
     /// The map says it is drawn in Web Mercator ("EPSG:3857" printed on a
     /// web map's export): it has no projection bend.
@@ -888,58 +1162,162 @@ pub fn refine_prepared_with(
     }
     let fine = &dem.levels[0];
     let sim_cost = evaluate_params(&fine_data, fine, &par, LOSS_SCALE_M, false).cost;
+    let judge = Judge::new(&fine_data, fine, opts.map_rect);
     if opts.photo {
         let stages =
             PhotoStages { full: &full, fine_data: &fine_data, dem, level_data: &level_data, loss: &loss, bounds };
-        return stages.run(par, sim_cost, iterations, converged);
+        return stages.run(par, sim_cost, iterations, converged, &judge);
     }
-    // Full affine on the finest level, kept only if clearly better and near-conformal.
-    let aff_start = Params::from_affine(&par.to_affine(), Model::Affine, &full);
-    let (aff, aff_cost, it, aff_conv) = lm(&fine_data, fine, aff_start, LOSS_SCALE_M, 25, bounds);
+    let mut stages = vec![judge.stage("similarity", &par, sim_cost, None, false)];
+    // The page's aspect ratio: a map rendered or scanned at another aspect
+    // ratio than its ground (a Gaia PDF page: 1.6 %; scanners: tenths of a
+    // percent). No shear: no map is drawn sheared, and a free affine fitted
+    // to contours over part of the map takes up whatever the DEM and the
+    // drawing disagree on there as shear, which grows towards the far side
+    // (`MODEL_MIN_Z`).
+    let ani_start = Params::from_affine(&par.to_affine(), Model::Aniso, &full);
+    let (ani, ani_cost, it, ani_conv) = lm(&fine_data, fine, ani_start, LOSS_SCALE_M, 25, bounds);
     iterations += it;
-    let ta = aff.to_affine();
-    let mut out = par.to_affine();
-    let mut is_affine = false;
-    let mut best_cost = sim_cost;
-    if aff_cost < sim_cost * (1.0 - AFFINE_MIN_GAIN)
-        && anisotropy(&ta) < AFFINE_MAX_ANISOTROPY
-        && (ta.mean_scale() / out.mean_scale()).ln().abs() < 0.05
+    let mut st = judge.stage("aniso", &ani, ani_cost, Some(&par), true);
+    let (mut kept, mut kept_cost, mut is_affine) = (par, sim_cost, false);
+    if ani_cost < sim_cost * (1.0 - ANISO_MIN_GAIN)
+        && ani.p[4].abs() < 0.99 * MAX_LOG_ANISO
+        && (ani.p[0] - par.p[0]).abs() < 0.05
+        && st.supported()
     {
-        out = ta;
-        is_affine = true;
-        converged = aff_conv;
-        best_cost = aff_cost;
+        (kept, kept_cost, is_affine, converged) = (ani, ani_cost, true, ani_conv);
+        stages[0].kept = false;
+    } else {
+        st.kept = false;
     }
+    stages.push(st);
+    let out = kept.to_affine();
     // A large map: a little perspective, or its projection's curvature.
     let (_, my) = out.apply(full.cx, full.cy);
     let lat = crate::geo::merc_to_latlon(0.0, my).0;
     let span_m = 2.0 * full.sn * out.mean_scale() * lat.to_radians().cos();
-    let mut fit = (Fit::Affine(out), best_cost, converged, is_affine);
-    if span_m > REGIONAL_SPAN_M {
-        let start = Params::from_affine(&out, Model::Projective, &full);
-        let (proj, proj_cost, it, proj_conv) = lm(&fine_data, fine, start, LOSS_SCALE_M, 25, bounds);
-        iterations += it;
-        if proj_cost < best_cost * (1.0 - REGIONAL_MIN_GAIN) && plausible_regional(&proj, &out) {
-            fit = (Fit::Projective(proj.to_homography()), proj_cost, proj_conv, true);
-        }
-        if !opts.web_mercator && samples_cover(&full, opts.map_rect, CONFORMAL_MIN_COVER) {
-            let stage = ConformalStage {
-                full: &full,
-                fine_data: &fine_data,
-                prepared: dem,
-                dem: fine,
-                bounds,
-                map_rect: opts.map_rect,
-            };
-            let kept = matches!(fit.0, Fit::Projective(_)).then_some(&proj);
-            let (found, it) = stage.run(&out, best_cost, kept);
-            iterations += it;
-            if let Some((c, cost, conv)) = found {
-                fit = (Fit::Conformal(c), cost, conv, true);
-            }
+    if span_m <= REGIONAL_SPAN_M {
+        return judge.finish(metrics(&full, dem, &Fit::Affine(out), iterations, converged, is_affine), stages, &kept);
+    }
+    let start = Params::from_affine(&out, Model::Projective, &full);
+    let (proj, proj_cost, it, proj_conv) = lm(&fine_data, fine, start, LOSS_SCALE_M, 25, bounds);
+    iterations += it;
+    let mut st = judge.stage("projective", &proj, proj_cost, Some(&kept), true);
+    st.kept = proj_cost < kept_cost * (1.0 - REGIONAL_MIN_GAIN) && plausible_regional(&proj, &out) && st.supported();
+    let proj_kept = st.kept;
+    if proj_kept {
+        for s in stages.iter_mut() {
+            s.kept = false;
         }
     }
-    metrics(&full, dem, &fit.0, iterations, fit.2, fit.3)
+    stages.push(st);
+    let (mut fit, mut fin, mut fin_conv) = if proj_kept {
+        (Fit::Projective(proj.to_homography()), proj, proj_conv)
+    } else {
+        (Fit::Affine(out), kept, converged)
+    };
+    // The projection's bend (`ConformalStage`) on the kept planar model.
+    if !opts.web_mercator && samples_cover(&full, opts.map_rect, CONFORMAL_MIN_COVER) {
+        let stage = ConformalStage {
+            full: &full,
+            fine_data: &fine_data,
+            prepared: dem,
+            dem: fine,
+            bounds,
+            map_rect: opts.map_rect,
+        };
+        let (found, it) = stage.run(&kept, kept_cost, proj_kept.then_some(&proj));
+        iterations += it;
+        if let Some((c, tm, cost, conv)) = found {
+            let st = judge.stage("conformal", &tm, cost, Some(&fin), true);
+            for s in stages.iter_mut() {
+                s.kept = false;
+            }
+            stages.push(st);
+            (fit, fin, fin_conv) = (Fit::Conformal(c), tm, conv);
+        }
+    }
+    let affine = is_affine || !matches!(fit, Fit::Affine(_));
+    judge.finish(metrics(&full, dem, &fit, iterations, fin_conv, affine), stages, &fin)
+}
+
+/// Judges the fits of one refinement: their spread at the corners of the
+/// extent (`jackknife`), how far apart two of them are there, how much of
+/// the extent the samples cover.
+struct Judge<'a> {
+    data: &'a Data,
+    dem: &'a DemMosaic,
+    groups: Groups,
+    extent: [f64; 4],
+}
+
+impl<'a> Judge<'a> {
+    fn new(data: &'a Data, dem: &'a DemMosaic, extent: Option<[f64; 4]>) -> Judge<'a> {
+        let extent = extent.unwrap_or_else(|| {
+            let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+            for (&x, &y) in data.xs.iter().zip(&data.ys) {
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+            }
+            if x0 <= x1 {
+                [x0, y0, x1, y1]
+            } else {
+                [0.0; 4]
+            }
+        });
+        Judge { data, dem, groups: Groups::new(data), extent }
+    }
+
+    /// Ground metres per Mercator metre at the extent's centre under `p`.
+    fn cos(&self, p: &Params) -> f64 {
+        let (_, my) = p.apply(0.5 * (self.extent[0] + self.extent[2]), 0.5 * (self.extent[1] + self.extent[3]));
+        crate::geo::merc_to_latlon(0.0, my).0.to_radians().cos()
+    }
+
+    /// `RefineResult::spread_m` of `p`.
+    fn spread(&self, p: &Params) -> f64 {
+        corner_spread(jackknife(self.data, self.dem, p, &self.groups).as_deref(), &self.extent) * self.cos(p)
+    }
+
+    /// A stage fitted from `prev`; its spread only when `judged` (a model
+    /// the selection tests: `StageFit::supported`), else NaN until kept.
+    fn stage(&self, model: &'static str, p: &Params, cost: f64, prev: Option<&Params>, judged: bool) -> StageFit {
+        StageFit {
+            model,
+            homography: p.to_homography(),
+            cost,
+            spread_m: if judged { self.spread(p) } else { f64::NAN },
+            shift_m: prev.map_or(0.0, |q| corner_shift(p, q, &self.extent) * self.cos(p)),
+            kept: true,
+        }
+    }
+
+    /// `r` with the spread of its kept stage (`kept`, judged now if it was
+    /// not and the fit could be reported at all), the cover and the stages.
+    fn finish(&self, mut r: RefineResult, mut stages: Vec<StageFit>, kept: &Params) -> RefineResult {
+        let hopeless = fit_quality(&r) == 0.0;
+        if let Some(st) = stages.iter_mut().rev().find(|s| s.kept) {
+            if st.spread_m.is_nan() && !hopeless {
+                st.spread_m = self.spread(kept);
+            }
+            r.spread_m = st.spread_m;
+        }
+        r.extent_cover = extent_cover(self.data, &self.extent);
+        r.stages = stages;
+        r
+    }
+}
+
+impl StageFit {
+    /// Do the samples support this model over the previous one: does it
+    /// move the extent's corners clearly further than its own jackknife
+    /// spread there (`MODEL_MIN_Z`)? Its extra parameters must be held by
+    /// the whole map, not by one area of it.
+    fn supported(&self) -> bool {
+        self.spread_m.is_finite() && self.shift_m >= MODEL_MIN_Z * self.spread_m
+    }
 }
 
 /// A regional projection's perspective: tiny terms, the local affine part
@@ -1095,16 +1473,26 @@ impl ConformalStage<'_> {
     /// The bend of a transverse Mercator sheet (`tm_bend`: UTM and national
     /// grids; to first order Lambert conics, oblique Mercator and polar
     /// stereographic sheets too, whose scale against Web Mercator changes
-    /// about as fast) on the affine fit `out` (cost `aff_cost`), the affine
+    /// about as fast) on the kept planar fit `kept` (a similarity or one
+    /// with its page's aspect ratio, cost `kept_cost`), whose linear part
+    /// (`Model::Aniso`'s: no shear, as both projections are conformal) is
     /// refitted under it: the meridian of the map's UTM zone, or the map's
     /// own when that fits better (a national grid's is near the map). Kept
-    /// when plausible, within `CONFORMAL_PRECHECK` of the affine's cost and
-    /// best in cross validation against the affine and the kept projective
-    /// fit `proj` (`CONFORMAL_PRIOR`; a fit that explains nothing, a wrong
-    /// place, is not cross validated). Returns the fit, its cost and
-    /// convergence, and the LM iterations spent.
-    fn run(&self, out: &Affine, aff_cost: f64, proj: Option<&Params>) -> (Option<(ConformalFit, f64, bool)>, usize) {
+    /// when plausible, within `CONFORMAL_PRECHECK` of the planar fit's cost
+    /// and best in cross validation against the same linear model without
+    /// the bend and the kept projective fit `proj` (`CONFORMAL_PRIOR`; a fit
+    /// that explains nothing, a wrong place, is not cross validated).
+    /// Returns the fit, its parameters, cost and convergence, and the LM
+    /// iterations spent.
+    #[allow(clippy::type_complexity)]
+    fn run(
+        &self,
+        kept: &Params,
+        kept_cost: f64,
+        proj: Option<&Params>,
+    ) -> (Option<(ConformalFit, Params, f64, bool)>, usize) {
         let d = self.full;
+        let out = &kept.to_affine();
         let m0 = out.apply(d.cx, d.cy);
         let (lat, lon) = crate::geo::merc_to_latlon(m0.0, m0.1);
         let c1 = complex_scale(out, d.sn);
@@ -1143,7 +1531,7 @@ impl ConformalStage<'_> {
                 }
             }
         }
-        if !(plausible_conformal(&tm, out, lat) && tm_cost <= aff_cost * (1.0 + CONFORMAL_PRECHECK)) {
+        if !(plausible_conformal(&tm, out, lat) && tm_cost <= kept_cost * (1.0 + CONFORMAL_PRECHECK)) {
             return (None, iterations);
         }
         // A fit that explains nothing (a wrong place) needs no cross validation.
@@ -1151,12 +1539,12 @@ impl ConformalStage<'_> {
         if fit_quality(&metrics(d, self.prepared, &Fit::Conformal(fit), 0, false, true)) <= 0.0 {
             return (None, iterations);
         }
-        let mut models = vec![Params::from_affine(out, Model::Affine, d)];
+        let mut models = vec![Params::from_affine(out, Model::Aniso, d)];
         models.extend(proj.copied());
         let held = conformal_cv(self.fine_data, self.dem, &models, &tm, self.bounds);
         let (others, bent) = held.split_at(held.len() - 1);
         if bent[0] * (1.0 - CONFORMAL_PRIOR) <= others.iter().copied().fold(f64::INFINITY, f64::min) {
-            (Some((fit, tm_cost, tm_conv)), iterations)
+            (Some((fit, tm, tm_cost, tm_conv)), iterations)
         } else {
             (None, iterations)
         }
@@ -1243,8 +1631,16 @@ impl PhotoStages<'_> {
         (par, cost, iterations, converged)
     }
 
-    fn run(&self, sim: Params, sim_cost: f64, mut iterations: usize, mut converged: bool) -> RefineResult {
+    fn run(
+        &self,
+        sim: Params,
+        sim_cost: f64,
+        mut iterations: usize,
+        mut converged: bool,
+        judge: &Judge,
+    ) -> RefineResult {
         let ts = sim.to_affine();
+        let mut stages = vec![judge.stage("similarity", &sim, sim_cost, None, false)];
         // Anisotropic affine (a document scanner guesses the page aspect
         // ratio), from the similarity as is and stretched either way: the
         // plausible result with the lowest cost.
@@ -1262,19 +1658,33 @@ impl PhotoStages<'_> {
         if let Some(&(aff, aff_cost, _, aff_conv)) =
             runs.iter().filter(|r| plausible(&r.0.to_affine())).min_by(|a, b| a.1.total_cmp(&b.1))
         {
+            let mut st = judge.stage("affine", &aff, aff_cost, Some(&sim), false);
             if aff_cost < sim_cost * (1.0 - AFFINE_MIN_GAIN) {
                 (best, best_cost, is_affine, converged) = (aff, aff_cost, true, aff_conv);
+                stages[0].kept = false;
+            } else {
+                st.kept = false;
             }
+            stages.push(st);
         }
         // Projective: the perspective left by imperfect page corners.
         let start = Params::from_affine(&best.to_affine(), Model::Projective, self.full);
         let (proj, proj_cost, it, proj_conv) = self.descend(start, PHOTO_PROJECTIVE_LEVEL);
         iterations += it;
+        let mut st = judge.stage("projective", &proj, proj_cost, Some(&best), false);
         if proj_cost < best_cost * (1.0 - PROJECTIVE_MIN_GAIN) && self.plausible_projective(&proj, &ts) {
+            for s in stages.iter_mut() {
+                s.kept = false;
+            }
+            stages.push(st);
             let h = proj.to_homography();
-            return metrics(self.full, self.dem, &Fit::Projective(h), iterations, proj_conv, true);
+            let r = metrics(self.full, self.dem, &Fit::Projective(h), iterations, proj_conv, true);
+            return judge.finish(r, stages, &proj);
         }
-        metrics(self.full, self.dem, &Fit::Affine(best.to_affine()), iterations, converged, is_affine)
+        st.kept = false;
+        stages.push(st);
+        let r = metrics(self.full, self.dem, &Fit::Affine(best.to_affine()), iterations, converged, is_affine);
+        judge.finish(r, stages, &best)
     }
 
     /// Small projective terms, no fold over the samples' extent, a plausible
@@ -1408,6 +1818,9 @@ fn metrics(d: &Data, dem: &PreparedDem, fit: &Fit, iterations: usize, converged:
         px_ground_m,
         dem_cell_m,
         gradient_alignment: f64::NAN,
+        spread_m: f64::NAN,
+        extent_cover: f64::NAN,
+        stages: Vec::new(),
     };
     let Some(fine) = dem.levels.first() else {
         return empty;
@@ -1486,6 +1899,9 @@ fn metrics(d: &Data, dem: &PreparedDem, fit: &Fit, iterations: usize, converged:
         px_ground_m,
         dem_cell_m,
         gradient_alignment,
+        spread_m: f64::NAN,
+        extent_cover: f64::NAN,
+        stages: Vec::new(),
     }
 }
 
@@ -1684,15 +2100,35 @@ const ZOOM13_CELL_M: f64 = 19.1;
 const SEG_STD_PER_PX: f64 = 0.35;
 
 /// The factors of `fit_confidence` that say how much there was to judge by
-/// (0..1): contour segments that landed on the DEM and the terrain relief
-/// under them. Near 0, a low fit confidence says nothing (a map without
-/// contours, flat ground, no terrain data).
+/// (0..1): contour segments that landed on the DEM, the terrain relief
+/// under them and how much of the map they span (`span_evidence`). Near 0,
+/// a low fit confidence says nothing (a map without contours, flat ground,
+/// no terrain data).
 pub fn fit_evidence(r: &RefineResult) -> f64 {
     if r.n_samples == 0 || !r.cost_m.is_finite() {
         return 0.0;
     }
-    (ramp(r.n_segments as f64, 5.0, 20.0) * ramp(r.relief_m, 10.0, 30.0)).clamp(0.0, 1.0)
+    (ramp(r.n_segments as f64, 5.0, 20.0) * ramp(r.relief_m, 10.0, 30.0) * span_evidence(r)).clamp(0.0, 1.0)
 }
+
+/// How much of the map the samples span (`RefineResult::extent_cover`;
+/// 1 when unknown): full from `SPAN_FULL` of its 8 × 8 cells, falling to
+/// `SPAN_FLOOR` at `SPAN_NONE`. A fit to contours left in a corner of the
+/// map places that corner, and says little about the rest: a Gaia raster at
+/// JPEG quality 25 and lowered contrast kept 18 short segments in its west
+/// (16 % of the cells) and fitted them 115 m off at 0.97.
+fn span_evidence(r: &RefineResult) -> f64 {
+    if r.extent_cover.is_finite() {
+        SPAN_FLOOR + (1.0 - SPAN_FLOOR) * ramp(r.extent_cover, SPAN_NONE, SPAN_FULL)
+    } else {
+        1.0
+    }
+}
+
+/// `span_evidence` limits.
+const SPAN_NONE: f64 = 0.1;
+const SPAN_FULL: f64 = 0.35;
+const SPAN_FLOOR: f64 = 0.25;
 
 /// Overall confidence (0..1) that a contour match is right, combining the
 /// coarse search's distinctiveness with the fine fit.
@@ -1755,6 +2191,17 @@ mod tests {
         for (x, y) in [(0.0, 0.0), (3500.0, 4900.0)] {
             let (a, b) = (t.apply(x, y), back.apply(x, y));
             assert!((a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6);
+        }
+        // Aniso: a similarity round-trips with u = 0; a page stretched along
+        // image x by 1.5 % round-trips with u = ln(1.015) / 2.
+        let a = Params::from_affine(&t, Model::Aniso, &d);
+        assert!(a.p[4].abs() < 1e-12 && (a.p[1] - 0.05).abs() < 1e-12);
+        let wide = Affine { a: t.a * 1.015, d: t.d * 1.015, ..t };
+        let a = Params::from_affine(&wide, Model::Aniso, &d);
+        assert!((a.p[4] - 0.5 * 1.015f64.ln()).abs() < 1e-9, "{a:?}");
+        for (x, y) in [(0.0, 0.0), (3500.0, 4900.0)] {
+            let (p, q) = (wide.apply(x, y), a.to_affine().apply(x, y));
+            assert!((p.0 - q.0).abs() < 1e-6 && (p.1 - q.1).abs() < 1e-6);
         }
         let q = Params::from_affine(&t, Model::Affine, &d).to_affine();
         assert!((q.a - t.a).abs() < 1e-12 && (q.f - t.f).abs() < 1e-6);
@@ -2042,6 +2489,70 @@ mod tests {
         let r = refine_prepared_with(&s, &PreparedDem::new(&dem), &affine, &opts);
         assert!(r.conformal.is_none(), "{r:?}");
         assert!(max_err(&|x, y| r.transform.apply(x, y), &|x, y| affine.apply(x, y)) < 15.0, "{r:?}");
+    }
+
+    /// Largest corner error (Mercator metres) of `m` against `truth` over a 2000 × 2400 image.
+    fn corner_error(m: &Affine, truth: &Affine) -> f64 {
+        [(0.0, 0.0), (2000.0, 0.0), (2000.0, 2400.0), (0.0, 2400.0)]
+            .iter()
+            .map(|&(x, y)| {
+                let (a, b) = (m.apply(x, y), truth.apply(x, y));
+                (a.0 - b.0).hypot(a.1 - b.1)
+            })
+            .fold(0.0, f64::max)
+    }
+
+    /// A page drawn 1.5 % wider than its ground (the Gaia PDF pages: 1.6 %)
+    /// is recovered by the anisotropic similarity, which the jackknife
+    /// supports; its spread is small with contours all over the image.
+    #[test]
+    fn recovers_page_aspect_ratio() {
+        let sim = Affine::pixel_to_merc_similarity(2.0, 0.02, 1000.0, 1200.0, 3.0e6, -2.98e6);
+        let (sx, cx, cy) = (1.015, 1000.0, 1200.0);
+        let (tx, ty) = sim.apply(cx, cy);
+        let (a, d) = (sim.a * sx, sim.d * sx);
+        let truth = Affine { a, d, c: tx - a * cx - sim.b * cy, f: ty - d * cx - sim.e * cy, ..sim };
+        let (s, dem) = synthetic_case(&|x, y| truth.apply(x, y), &refine_dem_box(&truth, 2000, 2400));
+        let init = Affine::pixel_to_merc_similarity(2.03, 0.0, 1000.0, 1200.0, 3.0e6 + 200.0, -2.98e6 - 150.0);
+        let opts = RefineOptions { map_rect: Some([0.0, 0.0, 2000.0, 2400.0]), ..Default::default() };
+        let r = refine_prepared_with(&s, &PreparedDem::new(&dem), &init, &opts);
+        let models: Vec<(&str, bool)> = r.stages.iter().map(|s| (s.model, s.kept)).collect();
+        assert_eq!(models, [("similarity", false), ("aniso", true)], "{:?}", r.stages);
+        assert!(r.affine && r.homography.is_none());
+        let err = corner_error(&r.transform, &truth);
+        assert!(err < 8.0, "corner error {err:.1} m");
+        assert!(r.spread_m > 0.0 && r.spread_m < 5.0, "{}", r.spread_m);
+        assert!(r.extent_cover > 0.95, "{}", r.extent_cover);
+        // The similarity alone is ~15 m off at the corners: the stage's shift.
+        assert!(r.stages[1].shift_m > 10.0, "{:?}", r.stages[1]);
+    }
+
+    /// Contours on the western 40 % of the image only: the fit holds there,
+    /// but its corners swing further (the far side is extrapolated) and the
+    /// samples cover less of the image, which `span_evidence` and the
+    /// spread report.
+    #[test]
+    fn partial_coverage_widens_the_spread() {
+        let truth = Affine::pixel_to_merc_similarity(2.0, 0.02, 1000.0, 1200.0, 3.0e6, -2.98e6);
+        let (s, dem) = synthetic_case(&|x, y| truth.apply(x, y), &refine_dem_box(&truth, 2000, 2400));
+        let mut west = ContourSamples { n_segs: s.n_segs, ..Default::default() };
+        for (p, &g) in s.pts.iter().zip(&s.seg) {
+            if p[0] < 800.0 {
+                west.pts.push(*p);
+                west.seg.push(g);
+            }
+        }
+        let init = Affine::pixel_to_merc_similarity(2.04, 0.0, 1000.0, 1200.0, 3.0e6 + 250.0, -2.98e6 - 200.0);
+        let opts = RefineOptions { map_rect: Some([0.0, 0.0, 2000.0, 2400.0]), ..Default::default() };
+        let prep = PreparedDem::new(&dem);
+        let all = refine_prepared_with(&s, &prep, &init, &opts);
+        let part = refine_prepared_with(&west, &prep, &init, &opts);
+        assert!(corner_error(&part.transform, &truth) < 10.0, "{part:?}");
+        assert!(part.spread_m > 1.5 * all.spread_m, "spread {} vs {}", part.spread_m, all.spread_m);
+        assert!((0.35..=0.5).contains(&part.extent_cover), "{}", part.extent_cover);
+        assert!(span_evidence(&part) == 1.0 && span_evidence(&all) == 1.0);
+        let thin = RefineResult { extent_cover: 0.15, ..part.clone() };
+        assert!(span_evidence(&thin) < 0.4 && fit_confidence(&thin) < 0.5 * fit_confidence(&part));
     }
 
     /// Photo mode on an exactly similar map: no spurious projective terms.

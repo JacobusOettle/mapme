@@ -410,7 +410,12 @@ fn refine_z13(c: &Case, t: &Affine) -> (f64, usize, f64) {
     let dem = s.mosaic(13, &b);
     let tm = Instant::now();
     let prep = PreparedDem::new_cropped(&dem, &b);
-    let r = refine_prepared_with(&c.prod.samples, &prep, t, &RefineOptions { photo: c.photo, ..Default::default() });
+    let r = refine_prepared_with(
+        &c.prod.samples,
+        &prep,
+        t,
+        &RefineOptions { photo: c.photo, map_rect: Some(c.prod.rect.bounds()), ..Default::default() },
+    );
     (fit_confidence(&r), n, tm.elapsed().as_secs_f64())
 }
 
@@ -825,8 +830,16 @@ fn estimate_check() {
         let cpu = cpu_seconds() - cpu0;
         let r = rs.last().unwrap();
         let sr = &r["diagnostics"]["scale_range"];
+        // The search sizes itself by the map's rectangle on its page (`content.rs`).
+        let size = match r["diagnostics"]["contours"]["map_area"].as_array().map(|a| a.as_slice()) {
+            Some([x0, y0, x1, y1]) => [
+                x1.as_u64().unwrap_or(0).saturating_sub(x0.as_u64().unwrap_or(0)) as usize,
+                y1.as_u64().unwrap_or(0).saturating_sub(y0.as_u64().unwrap_or(0)) as usize,
+            ],
+            _ => [img.w, img.h],
+        };
         let mut ereq = json!({"radius_m": radius_km * 1000.0, "gps": {"lat": ll[0], "lon": ll[1]},
-                              "image_size": [img.w, img.h]});
+                              "image_size": size});
         match sr["source"].as_str() {
             Some("scale_label") => ereq["scale_m_per_px"] = json!([sr["min"], sr["max"]]),
             Some("scale_bar") => ereq["scale_bar_m_per_px"] = json!([sr["min"], sr["max"]]),

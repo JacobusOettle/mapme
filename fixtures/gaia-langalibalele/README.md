@@ -37,6 +37,7 @@ logo over its top-left corner and the north arrow over its top-right corner.
 | `map.jpg` | the page as the app renders it (300 dpi, 3508 × 2480), raster upsampled smoothly (bicubic) – **the app's input** |
 | `map_nearest.jpg` | the same with the raster upsampled by pixel repetition (nearest neighbour) |
 | `native.png` | the embedded raster, pixel for pixel (1118 × 791) |
+| `native_q25.jpg`, `native_crop50.jpg` | `native.png` saved at JPEG quality 25 (then 88), and its central 50 % (559 × 395 px from (279, 197), quality 88): the adversarial review's partial-coverage repros (`core/tests/gaia_contours.rs`, `*_is_honest`); at quality 25 the contours survive only in the western 40 % |
 | `truth.json` | pixel → Web Mercator for `native.png` and for the page, how it was measured, the checks |
 | `case.json`, `case_nearest.json`, `case_native.json` | benchmark cases (common case format, `fixtures/tools/bench_contours.py`) for `map.jpg`, `map_nearest.jpg`, `native.png` |
 | `ocr.json`, `ocr_native.json` | RapidOCR stand-ins for Apple Vision on `map.jpg` / `native.png` |

@@ -309,7 +309,7 @@ fn check_fit(img: &Rgb8, req: &GeorefRequest, dem_dir: Option<&Path>, t: &Affine
         );
     };
     show("given", &evaluate_prepared(&prod.samples, &prep, t));
-    let opts = RefineOptions { photo: req.photo, ..Default::default() };
+    let opts = RefineOptions { photo: req.photo, map_rect: Some(rect.bounds()), web_mercator: false };
     for (dx, dy) in [(0.0, 0.0), (300.0, 0.0), (0.0, -1000.0), (2000.0, 2000.0)] {
         let k = 1.0 / cos;
         let start = Affine { c: t.c + dx * k, f: t.f + dy * k, ..*t };

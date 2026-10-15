@@ -70,7 +70,8 @@ char *mm_session_georeference(MMSession *session, const char *request_json);
  *    "hints": [{"lat","lon","radius_m"}], "max_tiles_per_round": 64, "scale_known": false,
  *    "image_size": [w, h], "scale_m_per_px": [lo, hi] | "scale_bar_m_per_px": [lo, hi]}
  * (every field optional; radius clamped to 1 000 ... 2 000 000 m, default 50 000; without
- * "image_size" a typical 300-dpi A3 sheet; the scale ranges as a search's
+ * "image_size" a typical 300-dpi A3 sheet; for a map on a larger page its rectangle, as a
+ * search's diagnostics.contours.map_area reports it; the scale ranges as a search's
  * diagnostics.scale_range reports them, a printed scale's or a scale bar's).
  * Response: {"status":"ok","radius_m","coarse_zoom","tiles","approx_bytes","approx_seconds",
  *   "approx_compute_seconds","approx_download_seconds","approx_megabytes","rounds","chunks",
