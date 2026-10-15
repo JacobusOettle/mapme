@@ -712,25 +712,47 @@ pub fn time_budget_ms(ms: f64) -> f64 {
     ms * speed_factor()
 }
 
-/// How much slower this machine is than the one the time budgets were set on, from 1 to 4:
-/// the best of 5 runs of a fixed single-threaded workload (`reference_workload`, 15 ms there)
-/// times the shortfall in threads (budgets were set with 4; rayon spreads most of the core's
-/// work over all of them). Measured once per test binary.
+/// How much slower this machine is than the one the time budgets were set on, from 1 to 4,
+/// measured once per test binary from a fixed workload (`reference_workload`, 15 ms there):
+/// - its best single-threaded time against 15 ms (a slower CPU);
+/// - the threads it has against the 4 the budgets were set with (rayon spreads most of the
+///   core's work over all of them);
+/// - one copy per thread run at once against one alone (other processes competing for the
+///   cores: a loaded CI runner or parallel builds), beyond the 25 % an idle machine shows.
 pub fn speed_factor() -> f64 {
     static FACTOR: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *FACTOR.get_or_init(|| {
         const REFERENCE_MS: f64 = 15.0;
         const REFERENCE_THREADS: f64 = 4.0;
-        let best = (0..5)
-            .map(|_| {
-                let t = std::time::Instant::now();
-                std::hint::black_box(reference_workload());
-                t.elapsed().as_secs_f64() * 1e3
-            })
-            .fold(f64::INFINITY, f64::min);
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
-        let factor = ((best / REFERENCE_MS).max(1.0) * (REFERENCE_THREADS / threads).max(1.0)).min(4.0);
-        eprintln!("[timing] budgets ×{factor:.2}: reference workload {best:.1} ms ({REFERENCE_MS} ms where they were set), {threads} threads");
+        const IDLE_CONTENTION: f64 = 1.25;
+        let best_of = |runs: usize, work: &dyn Fn()| {
+            (0..runs)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    work();
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let single = best_of(5, &|| {
+            std::hint::black_box(reference_workload());
+        });
+        let all = best_of(3, &|| {
+            std::thread::scope(|s| {
+                for _ in 0..threads {
+                    s.spawn(|| std::hint::black_box(reference_workload()));
+                }
+            });
+        });
+        let cpu = (single / REFERENCE_MS).max(1.0);
+        let fewer_threads = (REFERENCE_THREADS / threads as f64).max(1.0);
+        let contention = (all / single / IDLE_CONTENTION).max(1.0);
+        let factor = (cpu * fewer_threads * contention).min(4.0);
+        eprintln!(
+            "[timing] budgets ×{factor:.2}: reference workload {single:.1} ms ({REFERENCE_MS} ms where they were set), \
+             {threads} threads, all at once {all:.1} ms"
+        );
         factor
     })
 }
