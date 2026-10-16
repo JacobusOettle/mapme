@@ -46,6 +46,9 @@ struct RegionMapView: UIViewRepresentable {
         container.selection.relayout()
     }
 
+    /// On the main actor: it writes the representable's binding and lays the selection out (the
+    /// map calls its delegate on the main thread).
+    @MainActor
     final class Coordinator: NSObject, MKMapViewDelegate {
         var parent: RegionMapView
         weak var container: RegionMapContainer?

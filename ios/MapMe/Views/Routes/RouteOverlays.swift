@@ -634,8 +634,9 @@ final class RouteOverlay: CanvasOverlay {
             if first { line.move(to: v) } else { line.addLine(to: v) }
             first = false
         }
-        // The stroke being traced, live.
-        for v in session.liveTrace {
+        // The stroke being traced, live (kept in map pixels, like the points).
+        for p in session.liveTrace {
+            let v = frame.viewPoint(forMap: p)
             if first { line.move(to: v) } else { line.addLine(to: v) }
             first = false
         }

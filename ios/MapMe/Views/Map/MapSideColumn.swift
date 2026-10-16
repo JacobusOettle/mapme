@@ -35,7 +35,8 @@ struct SideColumnLayout: Layout {
     var spacing: CGFloat = 10
 
     /// The subviews' indices per column, the rightmost column first (sizes of zero are skipped).
-    static func columns(_ sizes: [CGSize], maxHeight: CGFloat, spacing: CGFloat) -> [[Int]] {
+    /// Pure, so `nonisolated` whatever isolation `Layout` brings (the unit tests call it).
+    nonisolated static func columns(_ sizes: [CGSize], maxHeight: CGFloat, spacing: CGFloat) -> [[Int]] {
         var result: [[Int]] = []
         var current: [Int] = []
         var height: CGFloat = 0
@@ -55,7 +56,7 @@ struct SideColumnLayout: Layout {
     }
 
     /// The size of `columns` laid out side by side.
-    static func size(of columns: [[Int]], sizes: [CGSize], spacing: CGFloat) -> CGSize {
+    nonisolated static func size(of columns: [[Int]], sizes: [CGSize], spacing: CGFloat) -> CGSize {
         var width: CGFloat = 0
         var height: CGFloat = 0
         for (n, column) in columns.enumerated() {

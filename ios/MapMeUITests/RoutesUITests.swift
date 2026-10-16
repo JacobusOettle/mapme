@@ -11,11 +11,13 @@ final class RoutesUITests: XCTestCase {
         continueAfterFailure = true
     }
 
+    @MainActor
     private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: id).firstMatch
     }
 
     /// The route menu's item (menu items are found by their title).
+    @MainActor
     private func menuItem(_ app: XCUIApplication, _ title: String) -> XCUIElement {
         app.buttons[title].firstMatch
     }

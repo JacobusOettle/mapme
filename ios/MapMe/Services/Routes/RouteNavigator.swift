@@ -368,7 +368,7 @@ final class RouteNavigator {
     }
 
     /// The next point with a name ahead (an anchor's, a GPX rtept's), or the end.
-    static func nextNamedPoint(route: Route, line: RouteLine, after alongM: Double) -> (name: String, alongM: Double)? {
+    nonisolated static func nextNamedPoint(route: Route, line: RouteLine, after alongM: Double) -> (name: String, alongM: Double)? {
         let points = route.points
         guard points.count == line.cumulative.count, !points.isEmpty else { return nil }
         for i in points.indices where line.cumulative[i] > alongM + 10 {
@@ -378,14 +378,14 @@ final class RouteNavigator {
     }
 
     /// Where the route takes you: its last named point, else "the end of <route>".
-    static func destinationName(of route: Route) -> String {
+    nonisolated static func destinationName(of route: Route) -> String {
         if let name = route.points.last?.name, !name.isEmpty { return name }
         return "the end of \(route.name)"
     }
 
     /// Where the daylight banner says you arrive: the route's last named point still ahead (a hut
     /// before the walk out), else its end.
-    static func destination(route: Route, line: RouteLine, after alongM: Double) -> (name: String, alongM: Double) {
+    nonisolated static func destination(route: Route, line: RouteLine, after alongM: Double) -> (name: String, alongM: Double) {
         let points = route.points
         if points.count == line.cumulative.count {
             for i in points.indices.reversed() where line.cumulative[i] > alongM + 10 {

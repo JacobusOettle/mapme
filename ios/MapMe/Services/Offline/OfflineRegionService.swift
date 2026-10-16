@@ -419,7 +419,7 @@ final class OfflineRegionService {
             $0.message = nil
         }
         saveRegions(force: true)
-        var policy = downloader.policy
+        var policy = self.downloader.policy
         policy.allowsExpensive = region.allowsCellular ?? model?.settings.offlineDownloadsOnCellular ?? false
         let downloader = self.downloader.with(policy)
         let pinned = self.pinned
@@ -582,7 +582,7 @@ final class OfflineRegionService {
         activeTrailheadID = mapID
         trailheads[mapID]?.status = .downloading
         trailheads[mapID]?.message = nil
-        var policy = downloader.policy
+        var policy = self.downloader.policy
         policy.allowsExpensive = true
         policy.concurrency = Self.trailheadConcurrency
         let downloader = self.downloader.with(policy)
