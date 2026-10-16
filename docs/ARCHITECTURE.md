@@ -1477,18 +1477,22 @@ KONG POOL" were among them, "DOTKLOOF" first.
 
 Elevations, route profiles, 3D height grids, contour rendering and tile plans for the explorer
 features (routes, the elevation profile, the terrain beyond a sheet's edge, the world view, the
-3D view, offline regions: docs/design/explorer.md). Rust in `core/src/terrain.rs`, C ABI in
-`core/src/ffi/terrain.rs`, Swift in `Core/TerrainStore.swift` and `Core/TerrainTypes.swift`.
+3D view, offline regions: docs/design/explorer.md). Rust in `core/src/terrain.rs` (the JSON
+contract) and `core/src/terrain/` (`store.rs`, `sample.rs`, `query.rs`, `render.rs`, `plan.rs`),
+C ABI in `core/src/ffi/terrain.rs`, Swift in `Core/TerrainStore.swift` and
+`Core/TerrainTypes.swift`; `examples/terrain_cli.rs` runs every query from the command line
+(render a PNG, profile a route, a grid, a plan) with tiles from a directory.
 
 `MMTerrain` is one store of decoded Terrarium tiles that the app feeds; every function on it is
 safe on any thread at any time, concurrently (CATiledLayer's drawing threads, the 3D builder,
 route statistics). It never downloads. At most `max_bytes` of elevations are held (0 = 64 MiB;
 clamped to 4 MiB … 1 GiB; a tile counts what it takes, 256 KiB as f32), the least recently used
-dropped past it; missing marks (at most 100 000) are not counted. Pinning tiles on disk is the
-app's (`PinnedTerrainStore`). `mm_terrain_add_tile` returns `MM_OK`, `MM_ERR_DECODE` (then
-marked missing), `MM_ERR_ARGUMENT` (NULL, empty, z > 15, x/y outside 2^z) or `MM_ERR_PANIC`;
-`mm_terrain_free` ignores NULL, freed and foreign pointers. An entry point not in a build answers
-`MM_ERR_NOT_IMPLEMENTED` (−4) or `{"status":"failed","message":"not implemented: …"}`.
+dropped past it; missing marks (at most 100 000, oldest dropped) are not counted. Pinning tiles on
+disk is the app's (`PinnedTerrainStore`). `mm_terrain_add_tile` returns `MM_OK`, `MM_ERR_DECODE`
+(then marked missing), `MM_ERR_ARGUMENT` (NULL, empty, z > 15, x/y outside 2^z) or
+`MM_ERR_PANIC`; marking a held tile missing does nothing (a tile held is better than none);
+`mm_terrain_free` ignores NULL, freed and foreign pointers. `MM_ERR_NOT_IMPLEMENTED` (−4) stays in
+the ABI for builds without the engine; this one implements every function.
 
 Every query answers `"status": "ok" | "need_dem" | "failed"`. `need_dem` lists in `"need_tiles"`
 (`[{"z","x","y"}]`, at most `"max_tiles"`, default 64, nearest the query's centre first) the
@@ -1517,28 +1521,152 @@ used (the finest that contributed).
   hillshade into 8-bit sRGB RGBA, premultiplied alpha, every pixel written.
   `{"space":"map"|"mercator","rect":[…],"pixel_to_mercator":[9],"warp":{…}|null,
   "style":"dark"|"paper","interval_m":null,"scale_m_per_pt":null,"index_every":5,"hillshade":0,
-  "line_scale":1,"background":[r,g,b,a]|null}`. Space `map`: `rect` is `[x0, y0, x1, y1]` in the
-  map's base-image pixels through its georeference (warp applied exactly); buffer pixel (i, j) is
-  centred at (x0 + (i + ½)(x1 − x0)/width, y0 + (j + ½)(y1 − y0)/height). Space `mercator`:
-  `[min_x, min_y, max_x, max_y]`, row 0 along max_y. The interval, when not given, is the smallest
-  of 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000 m at least 4 × `scale_m_per_pt` (ground metres
-  per point; default from the rect's centre; tiled views pass one value per level so tiles agree);
-  `line_scale` is buffer pixels per point. `background` null = the style's paper, opaque;
-  `[0,0,0,0]` = lines only. A rectangle drawn whole or as any grid of tiles gives the same pixels;
-  below 0 m only the 0 m line (the coast) is drawn. → `{"status","interval_m","index_interval_m",
-  "zoom","missing_fraction","need_tiles"}`.
+  "line_scale":1,"background":[r,g,b,a]|null,"labels":true}`. Space `map`: `rect` is
+  `[x0, y0, x1, y1]` in the map's base-image pixels through its georeference (warp applied
+  exactly); buffer pixel (i, j) is centred at (x0 + (i + ½)(x1 − x0)/width,
+  y0 + (j + ½)(y1 − y0)/height). Space `mercator`: `[min_x, min_y, max_x, max_y]`, row 0 along
+  max_y. The interval, when not given, is the smallest of 5, 10, 20, 25, 50, 100, 200, 250, 500,
+  1000 m at least 4 × `scale_m_per_pt` (ground metres per point; default from the rect's centre;
+  tiled views pass one value per level so tiles agree); `line_scale` is buffer pixels per point.
+  `background` null = the style's paper, opaque; `[0,0,0,0]` = lines only. A rectangle drawn whole
+  or as any grid of tiles gives the same pixels; below 0 m only the 0 m line (the coast) is drawn,
+  and no hillshade. `labels` (default true) writes the elevation on index lines. →
+  `{"status","interval_m","index_interval_m","zoom","missing_fraction","need_tiles"}`.
 * `mm_tile_plan` (stateless): `{"areas":[{"bbox":[s,w,n,e]} | {"circle":[lat,lon,radius_m]} |
   {"quad":[[lat,lon]×4],"margin_m"}, each with "zooms":[…]}], "trailhead":{"corners":[[lat,lon]×4]}}`
   → `{"status","tiles","bytes","bytes_high","zooms":[{"z","tiles","bytes","bytes_high",
   "ranges":[[x0,x1,y0,y1],…]}],"dropped":[{"z","tiles","reason"}]}`: the union of the areas' tiles
   per zoom as disjoint inclusive rectangles; a bbox with west > east crosses the antimeridian.
-  `bytes` uses `terrain::tile_bytes_typical` (SRTM terrain: 82, 74, 61, 53, 44, 35 KB at zooms
-  8–13), `bytes_high` `tile_bytes_high` (3DEP and European sources: 82, 102, 94, 127, 117, 103 KB),
-  measured on s3 in nine regions (docs/design/explorer.md, appendix). The **trailhead** rule (what
-  the app keeps around every located map): zooms 9 and 10 within 50 km of the corners' centre,
-  11 within 30 km, 12 over the quad grown by the continuation margin (half the sheet's long side,
-  3 … 15 km: `terrain::continuation_margin_m`), 13 over the quad + 3 km; a zoom whose part exceeds
-  400 tiles is dropped and listed in `dropped`.
+  `bytes` uses `terrain::tile_bytes_typical` (SRTM mountains: 82, 74, 61, 53, 44, 35 KB at zooms
+  8–13), `bytes_high` `tile_bytes_high` (high-resolution sources in mountains: 90, 147, 142,
+  136, 127, 113 KB; *Tile sizes* below). The **trailhead** rule (what the app keeps around every
+  located map): zooms 9 and 10 within 50 km of the corners' centre, 11 within 30 km, 12 over the
+  quad grown by the continuation margin (half the sheet's long side, 3 … 15 km:
+  `terrain::continuation_margin_m`), 13 over the quad + 3 km; a zoom whose part exceeds 400 tiles
+  is dropped and listed in `dropped` ("more than 400 tiles around the map").
+
+**The store** (`store.rs`). One mutex over the bookkeeping: tiles (`Arc<Vec<f32>>`, 65 536 values),
+a use stamp per tile in a `BTreeMap` (least recently used first), missing marks with their own
+order. It is held only to look tiles up or insert one (a PNG is decoded before it is taken): a
+query copies the `Arc`s of every tile it may touch under one lock, marking them used, and computes
+without it, so a tile evicted meanwhile lives until the query is done. A query that needs more
+tiles than the budget holds still answers (it keeps its copies); the next one asks for the evicted
+ones again, so keep the budget above one query's tiles (a 512 px render touches 4–16, a 384² grid
+of a 30 km sheet ~16; the default holds 256).
+
+**Sampling** (`sample.rs`). A query's zooms form a chain, finest first. A sample walks it: held
+tiles answer, missing ones (and rows beyond the poles) send it coarser, unknown ones are noted as
+needed and it goes on coarser for a partial answer without noting their unknown tiles — so
+`need_tiles` holds the tiles of the zoom the query would use next, as the contract says. Global
+pixel coordinates (`u = (mx + πR) / res(z)`) make the same point at zoom z − k simply `u / 2^k`;
+columns wrap at the antimeridian. Elevations, profiles and grids sample bilinearly. Renders sample
+a cubic B-spline (C², about a Gaussian of half a cell: smooth curves, even line widths, no kinks at
+cell edges when zoomed far in, and SRTM's cell noise damped); three evaluations give the same
+surface: the separable weights on the 4 × 4 taps (single precision, columns first so it
+vectorises), each cell's bicubic polynomial cached while a row of pixels stays in it (≥ 2.5 output
+pixels per cell), and for Mercator renders zoomed out the vertical half once per output row
+(`RowBand`, summed in the same order, so the same bits). A render picks one path per level from its
+scale, so tiles agree. A grid or render that would touch more than 1 024 tiles of a zoom uses a
+coarser zoom.
+
+**Profiles** (`query.rs`). The line is densified evenly at half a DEM cell of `max_zoom` (8.6 m at
+zoom 13 at 26° S; at most 200 000 samples, the spacing grows beyond), sampled bilinearly, smoothed
+with a Gaussian of one cell of the zoom used that skips unknown samples and leaves them unknown
+(three box passes beyond a radius of 64 samples). Climbs are counted from turning point to turning
+point: a rise counts once it exceeds the hysteresis, and then whole, so a long climb is not
+shortened by the last partial step as a 3 m stepping count would (a 400 m cone: 400 ± 1 m up and
+down; wiggles under 3 m count nothing). `min_m`/`max_m` are of the smoothed profile, the vertices'
+elevations unsmoothed; the output samples interpolate the smoothed profile linearly at
+`distance × k / (max_samples − 1)`. Longitudes are unwrapped along the line (the antimeridian is
+crossed the short way). A 9 km route (≈ 1 000 samples): 0.3 ms.
+
+**Rendering** (`render.rs`). Each output pixel is a function of its own position: its centre goes
+to Web Mercator (space `map`: the homography, then the warp's offset `B(p)`, exactly as
+`Warp::apply`; pixels where the projective denominator falls below a tenth of its value at pixel
+(0, 0) are beyond the horizon and stay background) and on to DEM pixel coordinates; the Jacobian
+of buffer pixel → DEM pixel comes from the neighbours' mapping (one apron pixel), so the gradient
+in buffer pixels is exact under any rotation, perspective or warp. The line: the distance to the
+nearest level, `|h − level| / |∇h|` in buffer pixels, anti-aliased over one pixel, 0.7 pt wide
+(index lines 1.12 pt, every `index_every`-th level and the coast); lines fade out where they crowd
+closer than about two widths (minor lines first). Hillshade: light from the north-west at 45°,
+`(½ (p − q) + 1/√2) / √(1 + p² + q²)` against flat ground's 1/√2 (p, q the slopes east and north
+from the ground gradient), drawn as a black veil on slopes facing away (1.6 × strength in dark,
+1.2 × on paper, at most 85 %) and a white one facing the light (0.9 ×, 0.8 ×, at most 50 %), so it
+works over a transparent background too. Styles: dark = paper `Theme.uiOffMapNightPaper`
+(27, 27, 29), contours #836545 at 85 %, index lines #B08C64, labels #C4A076; paper =
+`Theme.uiOffMapPaper` (232, 230, 222), contours #AC7646 at 80 %, index #8C582C, labels #804E26.
+The DEM zoom follows `scale_m_per_pt` (map space: turned into Mercator at the latitude of the
+map's pixel (0, 0), the same for every tile; Mercator space: the tile's own size), so tiles of a
+level use the same zoom, path and interval.
+
+Labels: anchors on a hexagonal lattice 220 pt apart, fixed in the frame's own coordinates (map
+pixels, or Mercator metres), each move by Newton steps (at most 40 pt each) onto the nearest index
+level within 0.3 of the spacing; a label is kept where index lines are at least 14 pt apart and
+the line stays within 3 pt of the chord between its ends over the label's length, written along
+that chord, upright, 8.5 pt high in a stroke font (digits drawn as polylines, coverage by
+distance to the strokes), the line gapped 0.3 em around it. Labels are computed on the DEM two
+zooms coarser (smoother, and a sixteenth of the tiles over the margin they need beyond the
+buffer: ~230 pt), and no computation samples farther than 128 pt from its anchor, so every tile a
+label reaches computes it alike. Anchors a spacing apart moving 0.3 of it at most keep labels at
+least 0.4 spacings (88 pt) apart.
+
+Tilings: a map's tiles of one level (CATiledLayer: rectangles on a power-of-two grid) give
+identical bytes whole or tiled, warp and perspective included (`tests/terrain.rs`); Mercator tiles
+(the world view's) agree to within the rounding of their edges' coordinates (≤ 2/255 on < 0.1 %
+of the values). Checked on the real sheet against its true georeference: the DEM's 20 m contours
+follow the printed ones (`terrain_cli render --over`), and four printed spot heights read within
+20 m (`spot_heights_of_the_sheet`).
+
+**Plans** (`plan.rs`). Per zoom, every area adds an interval of tile columns to each tile row it
+touches (two across the antimeridian); a row keeps its intervals merged; consecutive rows with the
+same intervals become one rectangle per interval — disjoint, exactly the union. Boxes are exact;
+circles too (on the sphere: the longitude half-width at the row's edges and at the circle's widest
+latitude, `asin(sin φ / cos d)`; a circle over a pole takes whole rows); quads grow by the margin
+as the quad's extent within the row band grown by it, plus it on either side (a few corner tiles
+more than a rounded outline). South Africa at zooms 8–13 (170 306 tiles): 0.2 ms. The trailhead of
+the Grootkloof 1:25 000 sheet: 59 tiles, 3.0 MB (7.9 MB high): zoom 9 4, 10 14, 11 17, 12 9,
+13 15 tiles; a 1:250 000 sheet drops zoom 13.
+
+**Tile sizes, measured** (HEAD on `s3.amazonaws.com/elevation-tiles-prod/terrarium`, October 2026;
+blocks of 3 × 3 tiles at zooms 8–9, 4 × 4 at 10–12, 5 × 5 at 13; mean KB):
+
+| around | z8 | z9 | z10 | z11 | z12 | z13 |
+|---|---|---|---|---|---|---|
+| open sea, South Atlantic (−35.0, 5.0) | 115 | 100 | 80 | 1 | 1 | 1 |
+| open sea, Indian Ocean (−30.0, 60.0) | 145 | 138 | 124 | 1 | 1 | 1 |
+| coast, Cape Peninsula (−34.2, 18.45) | 101 | 92 | 83 | 11 | 19 | 17 |
+| coast, Wild Coast (−31.9, 29.4) | 102 | 97 | 81 | 30 | 14 | 2 |
+| flat, Free State (−28.5, 26.5) | 61 | 44 | 29 | 27 | 25 | 20 |
+| flat, Kalahari (−24.5, 21.0) | 40 | 34 | 24 | 26 | 26 | 20 |
+| mountains, Drakensberg (−29.3, 29.4) | 82 | 82 | 69 | 60 | 48 | 37 |
+| mountains, Swiss Alps (46.55, 8.0) | 86 | 152 | 145 | 138 | 133 | 122 |
+| flat, Kansas (38.5, −98.5) | 51 | 43 | 30 | 104 | 92 | 83 |
+
+The sea carries bathymetry to zoom 10 (heavier than land there) and none beyond: ~1 KB a tile.
+Every tile of six regions against the plan's priors:
+
+| region (bbox), zooms | tiles | measured | `bytes` | `bytes_high` |
+|---|---|---|---|---|
+| uKhahlamba-Drakensberg (−29.9, 28.8, −28.6, 29.6), 8–13 | 942 | 37.7 MB | 37.7 MB | 113.9 MB |
+| Cape Peninsula (−34.4, 18.3, −33.9, 18.6), 8–13 | 167 | 3.2 MB | 6.7 MB | 20.1 MB |
+| Free State (−29.0, 26.0, −28.0, 27.0), 8–12 | 260 | 7.5 MB | 12.9 MB | 34.5 MB |
+| Western Cape coast (−34.9, 18.0, −33.0, 20.5), 8–12 | 1 118 | 34.3 MB | 54.5 MB | 148.5 MB |
+| Yosemite (37.5, −119.9, 38.2, −119.2), 8–13 | 503 | 62.7 MB | 20.1 MB | 60.6 MB |
+| Bernese Oberland (46.4, 7.6, 46.8, 8.2), 8–13 | 293 | 36.5 MB | 11.7 MB | 35.4 MB |
+
+So `bytes` is right for SRTM mountains and high (1.6–2.1×) for flat land and coasts; `bytes_high`
+is right (−3 %) for high-resolution mountains, where the earlier table (82, 102, 94, 127, 117,
+103 KB, a mean with flat Kansas and Colorado's SRTM zooms in) said 12 % less than they weigh, and
+3× high for SRTM terrain. Which applies is the data source's, not known offline: the app measures
+16 sample tiles when online (docs/design/explorer.md, Offline regions).
+
+**Cost** (release, one thread, the 4-core Linux box of the other budgets; the iPhone runs the
+same code with native floor/round and saturating conversions and NEON): a 512 × 512 render of
+the terrain beyond a sheet (map space, zoom 13 at 4.5 output pixels per cell, hillshade, labels)
+12–19 ms (21 ms with 10 m contours and the test profile's debug assertions); a zoomed-out Mercator tile (a new cell for nearly every pixel) 14 ms;
+a 384² grid 3 ms; a profile of 1 000 samples 0.3 ms; a country's plan 0.2 ms; a tile added
+(PNG decode) ~1 ms. `tests/terrain.rs` holds the render at 30 ms, the profile at 20 ms, the grid
+at 30 ms and the plan at 5 ms (× `time_budget_ms`).
 
 ## Wide search
 
@@ -2095,8 +2223,13 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
   src/georef.rs       Session + orchestrator (request → response): hint areas, near area
   src/georef/wide_search.rs  the wide search: chunks, zoom-11 re-checks, acceptance
   src/ffi.rs          C ABI
-  src/terrain.rs      terrain store for the explorer features: elevations, profiles, grids,
-                      contour rendering, tile plans (C ABI in src/ffi/terrain.rs)
+  src/terrain.rs      terrain for the explorer features: the JSON contract and the store
+                      (C ABI in src/ffi/terrain.rs); src/terrain/: store.rs (tiles, LRU,
+                      missing marks), sample.rs (zoom chains, bilinear and B-spline sampling),
+                      query.rs (elevations, profiles, grids), render.rs (contours, hillshade,
+                      labels), plan.rs (tile plans, the trailhead rule)
+  examples/           georef_cli.rs (georeference an image), terrain_cli.rs (render, profile,
+                      grid, plan with tiles from a directory)
   include/mapme_core.h
   tests/              integration tests on fixtures/grootkloof (photo.rs: synthetic
                       photos of the sheet, flattened from imperfect corners;
@@ -2112,7 +2245,8 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
                       their scale bars, names, feet, the 23 m/px raster; styles.rs:
                       the synthetic maps of many styles in fixtures/styles;
                       map_on_page.rs: a Gaia raster unscaled on an A4 page, blank
-                      and text pages; terrain_contract.rs: the terrain ABI's contract)
+                      and text pages; terrain_contract.rs: the terrain ABI's contract;
+                      terrain.rs: the terrain engine on synthetic and the sheet's tiles)
 fixtures/grootkloof/  the real map (PDF + extracted JPEG), DEM tiles, OCR fixture, truth
 fixtures/castle-gorge/, fixtures/mhlabatini/  two more sheets of the series: PDF, JPEG,
                       DEM tiles, truth, RapidOCR (ocr.json) and Apple Vision OCR
@@ -2360,6 +2494,9 @@ library card.
   (a Gaia raster on an A4 page: 1.1 s instead of 1.6 s, the page's footprint
   no longer refined). A large sheet's projection bend adds 0.3–0.9 s to its
   refinements (mostly the cross validation, which a wrong place skips).
+* Terrain (explorer features; *C ABI*, Terrain, Cost): a 512 px contour + hillshade tile 12–19 ms
+  on one core here (budget: < 30 ms in `tests/terrain.rs`, < 15 ms on an A15), a 384² grid for the
+  3D view 3 ms, a 1 000-sample profile 0.3 ms, a country's tile plan 0.2 ms, a tile added 1 ms.
 * Map interaction at 60/120 fps, because tiles are drawn off the main thread
   by CATiledLayer and overlays are cheap CAShapeLayers.
 * Release core: `opt-level=3`, LTO, `codegen-units=1`, `panic=unwind` (needed

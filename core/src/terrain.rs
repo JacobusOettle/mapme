@@ -3,15 +3,26 @@
 //! `MMTerrain`), and the queries on it: elevations at points, statistics and an elevation profile
 //! along a polyline (planned routes, GPX tracks, the recorded trail), height grids over a Web
 //! Mercator rectangle (the 3D view's mesh), contour and hillshade rendering in a map's pixel space
-//! (terrain beyond the sheet's edge) or in Web Mercator (the world view, the 3D view's texture),
+//! (terrain beyond the sheet's edge, the 3D view's texture) or in Web Mercator (the world view),
 //! and tile plans (offline regions, the terrain cached around a located map).
 //!
 //! The request and response types below are the JSON contract (docs/ARCHITECTURE.md, "C ABI",
-//! Terrain). The query bodies answer `not implemented` until they are written; the store's
-//! bookkeeping, the interval rule, the tile-size tables and the trailhead rule are final.
+//! Terrain). The work is in the submodules: `store` (the tiles held, least recently used dropped
+//! past the byte budget, missing marks), `sample` (a query's snapshot of the tiles per zoom,
+//! bilinear and B-spline sampling, the fallback to coarser zooms), `query` (elevations, profiles,
+//! grids), `render` (contours, hillshade, labels) and `plan` (tile plans).
 //!
 //! The store never downloads: a query that needs tiles it does not hold answers `need_dem` with
 //! the tiles to add (`need_tiles`), and still answers from what it holds.
+
+mod plan;
+mod query;
+mod render;
+mod sample;
+mod store;
+
+pub use query::climbs;
+pub use render::{INDEX_WIDTH_PT, LABEL_HEIGHT_PT, LABEL_SPACING_PT, MINOR_WIDTH_PT};
 
 use crate::dem::TileId;
 use serde::{Deserialize, Serialize};
@@ -46,6 +57,14 @@ pub const DEFAULT_INDEX_EVERY: u32 = 5;
 pub const DEFAULT_HYSTERESIS_M: f64 = 3.0;
 /// Default number of profile samples returned.
 pub const DEFAULT_MAX_SAMPLES: usize = 1000;
+/// Most points a profile densifies a line into (its spacing grows beyond: 200 000 samples are
+/// 1 700 km at zoom 13's default 8.6 m).
+pub const MAX_PROFILE_SAMPLES: usize = 200_000;
+/// Most tiles one query looks at per zoom: a grid or render over a larger area uses a coarser
+/// zoom than its scale asks for (the store holds 256 tiles in its default 64 MiB anyway).
+pub const MAX_QUERY_TILES_PER_ZOOM: usize = 1024;
+/// What a held tile counts against the byte budget: 256 × 256 elevations as f32.
+pub const TILE_BYTES: u64 = (crate::dem::TILE_SIZE * crate::dem::TILE_SIZE * 4) as u64;
 
 /// Trailhead caching (`"trailhead"` in a tile plan): what the app keeps on the device around
 /// every map it locates, so matching nearby maps, profiles, the terrain beyond the sheet and the
@@ -87,7 +106,12 @@ pub fn auto_interval_m(scale_m_per_pt: f64) -> f64 {
 /// Mean Terrarium tile size (bytes) per zoom where the terrain comes from SRTM alone (most of the
 /// world outside the US and Europe): HEAD requests on s3 elevation-tiles-prod, October 2026, 9–25
 /// tiles per zoom around the Drakensberg, the Magaliesberg, the Khumbu, Tasmania and Patagonia
-/// (docs/design/explorer.md, Offline regions).
+/// (docs/design/explorer.md, Offline regions). Checked on every tile of whole regions: the
+/// uKhahlamba-Drakensberg box (z8–13, 942 tiles) weighs 37.7 MB, this table says 37.7 MB; flat
+/// SRTM terrain weighs less (the Free State, z8–12: 7.5 MB, the table 12.9 MB), and so does
+/// the sea from zoom 11 on (~1 KB a tile: Terrarium has no bathymetry finer than zoom 10; the Cape
+/// Peninsula, z8–13: 3.2 MB, the table 6.7 MB), so for those the estimate is high, never low
+/// (docs/ARCHITECTURE.md, C ABI, Terrain).
 pub fn tile_bytes_typical(z: u8) -> f64 {
     let kb = match z {
         0..=8 => 82.0,
@@ -101,16 +125,19 @@ pub fn tile_bytes_typical(z: u8) -> f64 {
 }
 
 /// Mean Terrarium tile size (bytes) per zoom over high-resolution sources (US 3DEP, European
-/// DEMs): the Swiss Alps, the Colorado Rockies, the Scottish Highlands and Kansas, measured as
-/// `tile_bytes_typical`. The largest tile seen was 156 KB.
+/// DEMs) in mountains: blocks around the Swiss Alps, the Scottish Highlands and the Colorado
+/// Rockies (from zoom 11, where 3DEP starts) and every tile of the Bernese Oberland and Yosemite
+/// boxes, measured as `tile_bytes_typical`. The upper prior: those two regions weigh 36.5 and
+/// 62.7 MB (z8–13), this table says 35.4 and 60.7 MB (the earlier table, a mean with flat Kansas
+/// in, said 12 % less than they weigh). The largest tile seen was 156 KB.
 pub fn tile_bytes_high(z: u8) -> f64 {
     let kb = match z {
-        0..=8 => 82.0,
-        9 => 102.0,
-        10 => 94.0,
-        11 => 127.0,
-        12 => 117.0,
-        _ => 103.0,
+        0..=8 => 90.0,
+        9 => 147.0,
+        10 => 142.0,
+        11 => 136.0,
+        12 => 127.0,
+        _ => 113.0,
     };
     kb * 1024.0
 }
@@ -306,6 +333,13 @@ pub struct RenderRequest {
     pub min_zoom: Option<u8>,
     #[serde(default = "default_max_tiles")]
     pub max_tiles: usize,
+    /// Label index contours with their elevation (default true).
+    #[serde(default = "default_labels")]
+    pub labels: bool,
+}
+
+fn default_labels() -> bool {
+    true
 }
 
 fn default_index_every() -> u32 {
@@ -395,10 +429,23 @@ pub struct PlanResponse {
 }
 
 /// The store behind `MMTerrain`. Every method takes `&self` and is safe to call from many
-/// threads at once (the implementation locks internally).
-#[derive(Debug)]
+/// threads at once: one mutex guards the bookkeeping and is held only for lookups and inserts
+/// (a query copies `Arc`s of its tiles under it and computes without it; a PNG is decoded before
+/// it is taken).
 pub struct TerrainStore {
     max_bytes: u64,
+    tiles: store::Tiles,
+}
+
+impl std::fmt::Debug for TerrainStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let c = self.tiles.counts();
+        f.debug_struct("TerrainStore")
+            .field("max_bytes", &self.max_bytes)
+            .field("tiles", &c.tiles)
+            .field("missing", &c.missing)
+            .finish()
+    }
 }
 
 impl TerrainStore {
@@ -406,70 +453,103 @@ impl TerrainStore {
     /// clamped to `MIN_MAX_BYTES ..= MAX_MAX_BYTES`).
     pub fn new(max_bytes: u64) -> TerrainStore {
         let max_bytes = if max_bytes == 0 { DEFAULT_MAX_BYTES } else { max_bytes.clamp(MIN_MAX_BYTES, MAX_MAX_BYTES) };
-        TerrainStore { max_bytes }
+        TerrainStore { max_bytes, tiles: store::Tiles::new(max_bytes) }
     }
 
     pub fn max_bytes(&self) -> u64 {
         self.max_bytes
     }
 
-    /// Add a Terrarium PNG tile (replaces one held, clears a missing mark).
+    /// Add a Terrarium PNG tile (replaces one held, clears a missing mark). A PNG that does not
+    /// decode to 256 × 256 elevations marks the tile missing.
     pub fn add_png(&self, t: TileId, png: &[u8]) -> Result<(), TerrainError> {
         check_tile(t)?;
         if png.is_empty() {
             return Err(TerrainError::Argument("empty PNG".into()));
         }
-        Err(TerrainError::NotImplemented)
+        match crate::dem::terrarium_decode_png(png) {
+            Ok(elev) => {
+                self.tiles.insert(t, elev);
+                Ok(())
+            }
+            Err(e) => {
+                self.tiles.mark_missing(t);
+                Err(TerrainError::Decode(e))
+            }
+        }
     }
 
-    /// Record that a tile is unavailable.
+    /// Add a tile's elevations directly (`TILE_SIZE²` metres, row-major; tests and tools).
+    pub fn add_elevations(&self, t: TileId, elev: Vec<f32>) -> Result<(), TerrainError> {
+        check_tile(t)?;
+        if elev.len() != crate::dem::TILE_SIZE * crate::dem::TILE_SIZE {
+            return Err(TerrainError::Argument(format!("{} elevations, not 256 × 256", elev.len())));
+        }
+        self.tiles.insert(t, elev);
+        Ok(())
+    }
+
+    /// Record that a tile is unavailable (a tile held stays held).
     pub fn mark_missing(&self, t: TileId) -> Result<(), TerrainError> {
         check_tile(t)?;
-        Err(TerrainError::NotImplemented)
+        self.tiles.mark_missing(t);
+        Ok(())
     }
 
     /// Forget every missing mark.
-    pub fn clear_missing(&self) {}
+    pub fn clear_missing(&self) {
+        self.tiles.clear_missing();
+    }
 
     pub fn stats(&self) -> TerrainStats {
-        TerrainStats { status: Status::Ok, tiles: 0, missing: 0, bytes: 0, max_bytes: self.max_bytes, evicted: 0 }
+        let c = self.tiles.counts();
+        TerrainStats {
+            status: Status::Ok,
+            tiles: c.tiles,
+            missing: c.missing,
+            bytes: c.bytes,
+            max_bytes: self.max_bytes,
+            evicted: c.evicted,
+        }
     }
 
-    pub fn elevations(&self, _req: &ElevationsRequest) -> Result<ElevationsResponse, String> {
-        Err(format!("{NOT_IMPLEMENTED}: mm_terrain_elevations"))
+    /// Elevations at points (bilinear).
+    pub fn elevations(&self, req: &ElevationsRequest) -> Result<ElevationsResponse, String> {
+        query::elevations(&self.tiles, req)
     }
 
-    pub fn profile(&self, _req: &ProfileRequest) -> Result<ProfileResponse, String> {
-        Err(format!("{NOT_IMPLEMENTED}: mm_terrain_profile"))
+    /// Distance, smoothed climbs and the elevation profile along a polyline.
+    pub fn profile(&self, req: &ProfileRequest) -> Result<ProfileResponse, String> {
+        query::profile(&self.tiles, req)
     }
 
     /// Fill `heights` (`cols × rows`, row 0 north) over the request's rectangle.
     pub fn grid(
         &self,
-        _req: &GridRequest,
-        _heights: &mut [f32],
-        _cols: usize,
-        _rows: usize,
+        req: &GridRequest,
+        heights: &mut [f32],
+        cols: usize,
+        rows: usize,
     ) -> Result<GridResponse, String> {
-        Err(format!("{NOT_IMPLEMENTED}: mm_terrain_grid"))
+        query::grid(&self.tiles, req, heights, cols, rows)
     }
 
     /// Render into `rgba` (`w × h` pixels, rows `stride` bytes apart).
     pub fn render(
         &self,
-        _req: &RenderRequest,
-        _rgba: &mut [u8],
-        _w: usize,
-        _h: usize,
-        _stride: usize,
+        req: &RenderRequest,
+        rgba: &mut [u8],
+        w: usize,
+        h: usize,
+        stride: usize,
     ) -> Result<RenderResponse, String> {
-        Err(format!("{NOT_IMPLEMENTED}: mm_terrain_render"))
+        render::render(&self.tiles, req, rgba, w, h, stride)
     }
 }
 
 /// The tiles covering a plan's areas (stateless).
-pub fn tile_plan(_req: &PlanRequest) -> Result<PlanResponse, String> {
-    Err(format!("{NOT_IMPLEMENTED}: mm_tile_plan"))
+pub fn tile_plan(req: &PlanRequest) -> Result<PlanResponse, String> {
+    plan::tile_plan(req)
 }
 
 /// Tile coordinates within zoom `MAX_ZOOM` and the zoom's range.
