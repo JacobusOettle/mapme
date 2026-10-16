@@ -95,6 +95,17 @@ struct Track: Codable, Hashable, Identifiable {
         return out
     }
 
+    /// The track as a route to follow again ("Save as Route"): every fix a point, none a handle
+    /// except the ends, the GPS altitude kept as the points' elevation.
+    func asRoute() -> Route {
+        var points = self.points.map { RoutePoint(lat: $0.lat, lon: $0.lon, ele: $0.altitude, isAnchor: false) }
+        if !points.isEmpty {
+            points[0].isAnchor = true
+            points[points.count - 1].isAnchor = true
+        }
+        return Route(name: name, kind: .gpxTrack, points: points, createdAt: startedAt)
+    }
+
     static func xmlEscaped(_ s: String) -> String {
         var r = ""
         r.reserveCapacity(s.count)
