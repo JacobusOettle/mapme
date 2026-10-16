@@ -1,6 +1,8 @@
 import Foundation
 
-/// Terrarium DEM tiles from AWS Open Data with an on-disk cache (Caches/dem/z/x/y.png).
+/// Terrarium DEM tiles from AWS Open Data: pinned offline terrain first (`PinnedTerrainStore`:
+/// offline regions, the terrain kept around located maps), then an on-disk cache
+/// (Caches/dem/z/x/y.png), then the network (docs/design/explorer.md, Pinned store).
 ///
 /// A wide search ("Search wider", up to 2 000 km) can fetch thousands of tiles, so:
 /// * at most `maxConcurrentDownloads` requests run at once;
@@ -8,9 +10,14 @@ import Foundation
 ///   times with a growing pause; offline and 4xx fail at once (the core is told the tile is missing);
 /// * the cache is least-recently-used and capped at `cacheCapBytes`: a cache hit refreshes the
 ///   file's date, and once enough has been written since the last check the oldest tiles go until
-///   the cache is back to `cacheTrimFraction` of the cap.
+///   the cache is back to `cacheTrimFraction` of the cap. Pinned tiles are never in the cache, so
+///   the trim never sees them; a download of a tile some owner covers goes straight to the pinned
+///   store (an offline region downloading meanwhile then finds it there).
+///
+/// Inside `TerrainFetchScope.onDevice` nothing is downloaded: only pinned and cached tiles are
+/// answered (the need_dem loop after a cutoff, offline matching from a region).
 final class DEMService: TerrainTileSource {
-    static let shared = DEMService()
+    static let shared = DEMService(pinned: .shared)
 
     static let maxConcurrentDownloads = 6
     static let defaultCacheCapBytes: Int64 = 400 * 1_000_000
@@ -23,6 +30,8 @@ final class DEMService: TerrainTileSource {
 
     let cacheDirectory: URL
     let cacheCapBytes: Int64
+    /// Offline terrain read before the cache (nil: none, as the unit tests' services).
+    let pinned: PinnedTerrainStore?
     private let session: URLSession
     private let retryDelays: [Double]
 
@@ -31,11 +40,14 @@ final class DEMService: TerrainTileSource {
     private var writtenSinceCheck: Int64?
     private var trimming = false
 
+    /// - Parameter pinned: offline terrain to read first. Only `shared` has one by default, so a
+    ///   service made for a test never sees the device's offline regions.
     init(cacheDirectory: URL? = nil, session: URLSession? = nil, cacheCapBytes: Int64 = DEMService.defaultCacheCapBytes,
-         retryDelays: [Double] = DEMService.defaultRetryDelays) {
+         retryDelays: [Double] = DEMService.defaultRetryDelays, pinned: PinnedTerrainStore? = nil) {
         self.cacheDirectory = cacheDirectory ?? URL.cachesDirectory.appendingPathComponent("dem", isDirectory: true)
         self.cacheCapBytes = cacheCapBytes
         self.retryDelays = retryDelays
+        self.pinned = pinned
         if let session {
             self.session = session
         } else {
@@ -71,14 +83,36 @@ final class DEMService: TerrainTileSource {
         return (0..<n).contains(t.x) && (0..<n).contains(t.y)
     }
 
-    /// PNG bytes of one tile, or nil if unavailable (offline / 404 / retries used up).
-    func tile(_ t: TileID) async -> Data? {
+    /// The tile from the device: pinned offline terrain, then the cache (refreshing its date).
+    /// Nil when it is not on the device. Blocking (one small file read).
+    func tileOnDevice(_ t: TileID) -> Data? {
+        if let url = pinned?.pinnedTile(t), let data = try? Data(contentsOf: url), Self.isPNG(data) {
+            return data
+        }
         let file = cacheURL(for: t)
         if let cached = try? Data(contentsOf: file), Self.isPNG(cached) {
             // Least recently used goes first when the cache is trimmed.
             try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
             return cached
         }
+        return nil
+    }
+
+    /// The tiles on the device (pinned, cached); never downloads.
+    func tilesOnDevice(_ ts: [TileID]) async -> [TileID: Data] {
+        var out: [TileID: Data] = [:]
+        for t in Set(ts) {
+            if let data = tileOnDevice(t) { out[t] = data }
+        }
+        return out
+    }
+
+    /// PNG bytes of one tile, or nil if unavailable (offline / 404 / retries used up; inside
+    /// `TerrainFetchScope.onDevice`, not on the device).
+    func tile(_ t: TileID) async -> Data? {
+        if let local = tileOnDevice(t) { return local }
+        if TerrainFetchScope.deviceOnly { return nil }
+        let file = cacheURL(for: t)
         guard let url = Self.remoteURL(for: t) else { return nil }
         var attempt = 0
         while true {
@@ -88,6 +122,10 @@ final class DEMService: TerrainTileSource {
                 let (data, response) = try await session.data(from: url)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                 if status == 200, Self.isPNG(data) {
+                    // A tile an offline region or a map's trailhead covers is kept for good.
+                    if let pinned, pinned.covers(t), (try? pinned.store(data, for: t)) == true {
+                        return data
+                    }
                     try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
                     if (try? data.write(to: file, options: .atomic)) != nil {
                         noteWritten(Int64(data.count))
@@ -124,8 +162,10 @@ final class DEMService: TerrainTileSource {
     }
 
     /// Fetch many tiles concurrently (at most `maxConcurrentDownloads` at once). Missing tiles are
-    /// absent from the result.
+    /// absent from the result. Inside `TerrainFetchScope.onDevice`: the tiles on the device only,
+    /// without progress reports (nothing is downloading).
     func tiles(_ ts: [TileID], progress: ((Int, Int) -> Void)? = nil) async -> [TileID: Data] {
+        if TerrainFetchScope.deviceOnly { return await tilesOnDevice(ts) }
         var seen = Set<TileID>()
         let unique = ts.filter { seen.insert($0).inserted }
         let total = unique.count

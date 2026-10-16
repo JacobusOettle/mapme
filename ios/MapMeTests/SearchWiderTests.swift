@@ -82,10 +82,12 @@ final class SearchWiderTests: XCTestCase {
         policy.maxFinishingCalls = 5
         var fetched = 0
         var missing = 0
-        // A core that always wants 30 more tiles.
+        // A core that always wants 30 more tiles. Nothing is on the device: after the cap the
+        // loop's device-only fetches (docs/design/explorer.md, Matching offline) find nothing.
         let result = try await TerrainPullLoop(policy: policy).run(
             call: { i in Self.needDEM((0..<30).map { TileID(z: 9, x: i * 30 + $0, y: 1) }) },
             fetch: { tiles in
+                if TerrainFetchScope.deviceOnly { return [:] }
                 fetched += tiles.count
                 return Self.serve(tiles)
             },
@@ -106,7 +108,7 @@ final class SearchWiderTests: XCTestCase {
             call: { i in
                 sawMissing ? Self.failed("No match.") : Self.needDEM((0..<60).map { TileID(z: 9, x: i * 60 + $0, y: 2) })
             },
-            fetch: { Self.serve($0) },
+            fetch: { TerrainFetchScope.deviceOnly ? [:] : Self.serve($0) },
             add: { _, _ in true },
             markMissing: { _ in sawMissing = true },
             isCancelled: { false })
@@ -142,7 +144,8 @@ final class SearchWiderTests: XCTestCase {
         let result = try await TerrainPullLoop().run(
             call: { i in i < 4 ? Self.needDEM([TileID(z: 11, x: i, y: 0)]) : Self.failed("Terrain data couldn't be downloaded.") },
             fetch: { _ in
-                fetches += 1
+                // Downloads only: after the cutoff the loop still looks on the device.
+                if !TerrainFetchScope.deviceOnly { fetches += 1 }
                 return [:]
             },
             add: { _, _ in true },

@@ -15,11 +15,38 @@ protocol GeorefEngine: AnyObject {
 
 extension GeorefSession: GeorefEngine {}
 
-/// Where terrain tiles come from: `DEMService` (disk cache + network), or a fake in tests.
+/// Where terrain tiles come from: `DEMService` (pinned offline terrain, disk cache, network), or a
+/// fake in tests.
 protocol TerrainTileSource: AnyObject {
     /// PNG bytes of the tiles that could be had; missing ones are absent. `progress(done, total)`
-    /// may be called from any thread.
+    /// may be called from any thread. Inside `TerrainFetchScope.onDevice` only tiles already on
+    /// the device are answered (no download).
     func tiles(_ ts: [TileID], progress: ((Int, Int) -> Void)?) async -> [TileID: Data]
+
+    /// The tiles already on the device (pinned offline terrain, the cache); never downloads.
+    func tilesOnDevice(_ ts: [TileID]) async -> [TileID: Data]
+}
+
+extension TerrainTileSource {
+    /// A source without a store of its own has nothing on the device.
+    func tilesOnDevice(_ ts: [TileID]) async -> [TileID: Data] { [:] }
+}
+
+/// How far a terrain fetch may go, carried as a task-local value so it reaches `DEMService`
+/// through any fetch closure (the georeferencer's, the terrain provider's) and the child tasks
+/// that download in parallel, without changing their signatures (docs/design/explorer.md,
+/// Matching offline).
+enum TerrainFetchScope {
+    /// True inside `onDevice`: answer from the tiles on the device only.
+    @TaskLocal static var deviceOnly: Bool = false
+
+    /// Runs `operation` with every fetch limited to the tiles on the device: offline regions, the
+    /// terrain kept around located maps, the terrain cache. Nothing is downloaded.
+    static func onDevice<T>(_ operation: () async -> T) async -> T {
+        await $deviceOnly.withValue(true) {
+            await operation()
+        }
+    }
 }
 
 /// Answers the core's `need_dem` rounds until it is done (`ok` / `failed`), the work is cancelled,
@@ -29,9 +56,13 @@ protocol TerrainTileSource: AnyObject {
 /// the tile cap.
 ///
 /// * Tile cap: once the next round would take the total past `tileCap`, nothing more is
-///   downloaded; every tile asked for is marked missing so the core can finish with what it has
-///   (at most `maxFinishingCalls` more calls).
-/// * Offline: when the first `maxEmptyRounds` rounds bring no tile at all, the same.
+///   downloaded; the tiles asked for that are already on the device (offline regions, terrain
+///   kept around located maps, the cache: `TerrainFetchScope.onDevice`) are still handed over,
+///   the others are marked missing, so the core can finish with what there is (at most
+///   `maxFinishingCalls` more calls).
+/// * Offline: when the first `maxEmptyRounds` rounds bring no tile at all, the same. A search
+///   that starts offline outside a downloaded region thereby still uses the region once it gets
+///   there.
 /// * Stalled: the core asking only for tiles it was already given (or told are missing) without
 ///   its search advancing, more than `maxStalledRounds` times in a row, ends the loop.
 struct TerrainPullLoop {
@@ -73,6 +104,8 @@ struct TerrainPullLoop {
         var fetched = 0
         /// Tiles marked missing (unavailable, or skipped after a cutoff).
         var missing = 0
+        /// Tiles handed over from the device after a cutoff (included in `fetched`).
+        var fromDevice = 0
     }
 
     struct Result {
@@ -87,7 +120,9 @@ struct TerrainPullLoop {
 
     /// - Parameters:
     ///   - call: one core call; its argument counts the calls made so far.
-    ///   - fetch: downloads tiles (bounded parallelism, disk cache).
+    ///   - fetch: downloads tiles (bounded parallelism, pinned terrain and disk cache first); after
+    ///     a cutoff it is called inside `TerrainFetchScope.onDevice` and must then answer only
+    ///     what is on the device.
     ///   - add: hands a tile to the core; false when it could not be decoded.
     ///   - markMissing: tells the core a tile is unavailable.
     ///   - isCancelled: polled between steps.
@@ -138,11 +173,25 @@ struct TerrainPullLoop {
                         return Result(response: current, end: .callLimit, cutoff: cutoff, tally: tally)
                     }
                 }
+                // No more downloads, but what is on the device still counts: a downloaded region
+                // answers here even when the search started offline outside it.
+                var onDevice: [TileID: Data] = [:]
+                if cutoff != nil, !fresh.isEmpty {
+                    onDevice = await TerrainFetchScope.onDevice { await fetch(fresh) }
+                    if isCancelled() { return Result(response: response, end: .cancelled, cutoff: cutoff, tally: tally) }
+                }
+                var got = 0
                 for t in asked {
-                    markMissing(t)
+                    if !answered.contains(t), let png = onDevice[t], add(t, png) {
+                        got += 1
+                    } else {
+                        markMissing(t)
+                    }
                     answered.insert(t)
                 }
-                tally.missing += fresh.count
+                tally.fetched += got
+                tally.fromDevice += got
+                tally.missing += fresh.count - got
                 continue
             }
 
