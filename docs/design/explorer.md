@@ -180,7 +180,11 @@ One `TerrainStore` (C `MMTerrain`, Swift `Core/TerrainStore.swift`) for the whol
 default, least recently used dropped) and answers queries; it never downloads. A query lacking tiles
 answers `need_dem` with `need_tiles` and a partial result; `TerrainProvider.resolve` loads them
 (`DEMService`: pinned, then cache, then network; missing ones marked missing) and asks again, at
-most 6 rounds. Pinning is the app's (`PinnedTerrainStore`); the core store is only a cache. When
+most 6 rounds. Callers share downloads: a tile another call is loading is waited for, not skipped
+(neighbouring canvas tiles, the route card and the navigator, the 3D view and the canvas ask for
+the same tiles at once), and each download runs in a task of its own, so a caller that gives up (a
+closed card, a new tap while planning) neither aborts it nor gets its tiles marked missing.
+Pinning is the app's (`PinnedTerrainStore`); the core store is only a cache. When
 terrain may have arrived later (a region or a map's trailhead finished, the network came back, the
 3D view's Retry), `TerrainProvider.terrainDidArrive()` forgets the missing marks and posts
 `terrainDidArriveNotification`; the terrain beyond the sheet (`OffMapTerrainLayer`) and the world
@@ -320,7 +324,9 @@ profile when available, GPS altitude otherwise, and say which).
 
 **Sun** (`SunTimes.compute`, NOAA solar calculator, on the device): sunrise and sunset at −0.833°,
 civil dawn/dusk at −6°, for the calendar day of the device's time zone at your position; polar
-day/night handled ("The sun doesn't set today").
+day/night handled ("The sun doesn't set today"). The banner and the sheet use `SunTimes.around`:
+today's times, or yesterday's while yesterday's evening is not over (after midnight at high
+latitudes the sun can still be up: Rovaniemi in early July sets at 00:54).
 
 **Walking time** (`PaceModel`): Tobler's hiking function v = 6 · e^(−3.5 · |S + 0.05|) km/h on each
 profile segment (S = Δh/Δd of the smoothed profile), summed, × your pace factor. The factor is
@@ -334,8 +340,12 @@ moving pace on this walk is blended in (up to half the weight). Moving time only
 of daylight remain and you have a fix. "2 h 10 min of daylight left · at your pace you reach
 Bannerman Hut at 17:40" (the route's last named anchor, else "the end of <route>"); without a
 route "1 h 40 min of daylight left · sunset 18:02". Amber when the ETA is within 15 min of sunset,
-red after civil dusk ("you reach … 40 min after dark"). Tap → a sheet with sunrise, sunset, civil
-dusk, daylight left, pace and the ETA's parts. `-mockNow <ISO8601>` fixes the clock in Debug.
+red after civil dusk ("you reach … 40 min after dark"). Before sunrise (an alpine start) it says
+"Dark until 06:31 · sunrise 06:56" (after civil dawn "Sunrise at 06:56"), red when you arrive
+before first light ("you reach Bannerman Hut at 06:00, before first light"), amber in the morning
+twilight; without a route from two hours before first light. Tap → a sheet with first light,
+sunrise, sunset, civil dusk, daylight left (before sunrise: "Sunrise in …"), pace and the ETA's
+parts. `-mockNow <ISO8601>` fixes the clock in Debug.
 
 ### 7.3 Maps: auto-switching, world view, walking off a map (maps)
 
@@ -359,7 +369,9 @@ opened.
 centre and the tracking mode; toast "Switched to Mhlabatini · more detailed here" with Undo, a
 selection haptic. Undo switches back and excludes that map from auto-switching until you leave
 its sheet (or 15 min). Opening a map from the library never auto-switches away from it in the
-first 30 s.
+first 30 s; the screen of the map already shown appearing again (back from the world view) keeps
+a map picked in "Maps here" and the dwell clocks. A map that is not located is never switched
+away from (there is no sheet to walk off).
 
 **Maps here** (`MapsHereButton`): `square.stack.3d.up` with a badge counting the maps covering you
 (or the view's centre when you are not near); its menu lists them (name, scale as "1:25 000-ish"
@@ -442,7 +454,7 @@ Exactly what it changes — all of it within what iOS allows an app:
 | map redraw | up to 120 Hz | ≤ 30 Hz (`CADisplayLink.preferredFrameRateRange`) |
 | idle animations | breathing puck | off (they keep the render server drawing when nothing moves) |
 | keep screen awake | the setting | suspended: auto-lock applies |
-| network | OSM places, terrain prefetch, trailhead caching | on demand only; trailhead caching waits |
+| network | OSM places, terrain prefetch, trailhead caching | on demand only; the terrain around a map you locate is still saved at once (3–14 MB while there is signal at the trailhead), maps queued from before wait |
 | terrain detail | zoom 13 | zoom ≤ 12 for off-map, world and 3D |
 | 3D | 60 fps, 4× MSAA | 30 fps, no MSAA |
 
@@ -511,9 +523,12 @@ too thin):
 **Detail levels and caps.** Standard = zooms 8–12: locating maps offline (the coarse search on
 8–11 and a refinement on zoom 12, ~38 m cells: typically ±10–20 m instead of ±5–10 m; the ±
 the app shows stays honest), profiles, terrain beyond sheets, 3D. High = 8–13: as online. Caps:
-60 000 tiles (≈ 15 min on good Wi-Fi) and 2.5 GB of estimate; free space must exceed the
-estimate × 1.25 + 500 MB. Too large → "Too large for High detail: pick a smaller area or
-Standard".
+60 000 tiles (≈ 15 min on good Wi-Fi) and 2.5 GB of estimate; free space must exceed (the
+estimate + what the regions already queued, downloading or paused have still to write) × 1.25 +
+500 MB. Too large → "Too large for High detail: pick a smaller area or Standard". While
+downloading (regions and trailheads), free space is looked at before the first request and every
+100 requests or 5 s: below 500 MB the download pauses "Paused: storage full", before iOS purges
+caches and notes, photos and tracks can no longer be saved.
 
 **Sizes, measured** (HEAD requests on s3 elevation-tiles-prod, October 2026, 9–25 tiles per zoom
 in nine regions: the appendix). Terrarium tiles weigh 2–4× more where the source is
@@ -579,8 +594,14 @@ trim only ever sees `Caches/dem`, so pinned tiles are never evicted. Settings �
 (zooms 9–10 within 50 km, 11 within 30 km, 12 over the sheet + continuation margin, 13 over the
 sheet + 3 km; a fine zoom over 400 tiles is dropped: 3–14 MB for a 1:25 000 sheet), downloaded at
 utility priority and pinned for owner `.map(id)`; deleted with the map. Located offline (from a
-region) → remembered and done when the network is back (`NetworkPathObserver`). The 3D view and
-the off-map layer thereby work offline around every located map.
+region) → remembered and done when the network is back (`NetworkPathObserver`). The map located
+last goes first: it stops the trailhead download running (that one resumes afterwards, skipping
+the tiles it has), and maps queued at launch (located before, or while the setting was off) come
+after every map located here. Neither the battery saver nor mobile data holds back the map you
+just located; Low Data Mode and no network do, and the saver holds back the queued ones. Tiles
+that failed (a weak signal: retries used up) are tried again when the network comes back, on
+Wi-Fi, at the next launch, or with the row's Retry (Settings → Offline terrain → Terrain Around
+Maps). The 3D view and the off-map layer thereby work offline around every located map.
 
 **Matching offline**: with the tiles pinned, `TerrainPullLoop` gets them from `DEMService`
 instantly. Two changes (offline builder): after a cutoff (tile cap, offline) the loop still asks
