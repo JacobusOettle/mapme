@@ -152,8 +152,9 @@ int32_t mm_dark_render(const MMDarkStyle *style, uint8_t *rgba, uint32_t width, 
  * ---------------------------------------------------------------------------------------------
  */
 
-/* Returned by an entry point whose implementation is not in this build yet (int functions; the
- * JSON functions answer {"status":"failed","message":"not implemented: <function>"}). */
+/* Returned by an entry point whose implementation is not in a build (int functions; the JSON
+ * functions would answer {"status":"failed","message":"not implemented: <function>"}). Every
+ * terrain function of this build is implemented; the code stays part of the ABI. */
 #define MM_ERR_NOT_IMPLEMENTED (-4)
 
 /*
@@ -270,10 +271,13 @@ char *mm_terrain_grid(const MMTerrain *terrain, const char *request_json, float 
  *    "index_every":5, "hillshade":0.0 (strength 0 ... 1), "line_scale":1.0 (buffer pixels per point),
  *    "background":[r, g, b, a]|null   (0 ... 255, straight alpha; null: the style's paper, opaque;
  *                               [0,0,0,0]: transparent, lines only),
+ *    "labels":true,             index lines labelled with their elevation where they run straight
+ *                               and uncrowded (placed on the DEM two zooms coarser),
  *    "max_zoom":13, "min_zoom":null, "max_tiles":64}
  * Response: {"status","interval_m","index_interval_m","zoom","missing_fraction","need_tiles"}
  * A rectangle drawn as one buffer or as any grid of tiles gives the same pixels. Areas without
- * elevations are left as background; below 0 m only the 0 m line (the coast) is drawn. Never NULL.
+ * elevations are left as background; below 0 m only the 0 m line (the coast) is drawn, and no
+ * hillshade. Never NULL.
  */
 char *mm_terrain_render(const MMTerrain *terrain, const char *request_json, uint8_t *rgba, uint32_t width,
                         uint32_t height, uint32_t bytes_per_row);
@@ -292,8 +296,9 @@ char *mm_terrain_render(const MMTerrain *terrain, const char *request_json, uint
  *            "zooms":[{"z","tiles","bytes","bytes_high","ranges":[[x0, x1, y0, y1], ...]}],
  *            "dropped":[{"z","tiles","reason"}]}
  * Tiles are the union over the areas per zoom; ranges are disjoint inclusive tile rectangles
- * covering exactly them. bytes uses the mean tile size of SRTM-only terrain, bytes_high that of
- * the high-resolution sources (US 3DEP, European DEMs: 2-3x larger at zoom 11-13).
+ * covering exactly them. bytes uses the mean tile size of SRTM-only mountains, bytes_high that of
+ * high-resolution sources in mountains (US 3DEP, European DEMs: 2-4x larger at zoom 11-13); flat
+ * land and the sea (about 1 KB a tile from zoom 11) weigh less (docs/ARCHITECTURE.md).
  * Or {"status":"failed","message"}. Never NULL.
  */
 char *mm_tile_plan(const char *request_json);

@@ -18,7 +18,8 @@ use std::ffi::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Mutex, MutexGuard};
 
-/// An entry point not implemented in this build (int functions).
+/// An entry point not implemented in a build (int functions). Every terrain function of this build
+/// is implemented; the code stays part of the ABI.
 pub const MM_ERR_NOT_IMPLEMENTED: i32 = -4;
 
 /// Opaque terrain store handle (`MMTerrain` in C).
@@ -89,8 +90,8 @@ pub unsafe extern "C" fn mm_terrain_free(terrain: *mut MMTerrain) {
     }));
 }
 
-/// Add a Terrarium PNG tile. Returns 0, -1 (not decodable: marked missing), -2 (arguments),
-/// -3 (internal error) or -4 (not implemented).
+/// Add a Terrarium PNG tile. Returns 0, -1 (not decodable: marked missing), -2 (arguments) or
+/// -3 (internal error).
 ///
 /// # Safety
 /// `terrain` must be NULL or a live store; `png` NULL or `len` readable bytes.
@@ -117,7 +118,7 @@ pub unsafe extern "C" fn mm_terrain_add_tile(
     .unwrap_or(MM_ERR_PANIC)
 }
 
-/// Record that a tile is unavailable. Returns 0, -2 (arguments) or -4 (not implemented).
+/// Record that a tile is unavailable. Returns 0 or -2 (arguments).
 ///
 /// # Safety
 /// `terrain` must be NULL or a live store.
