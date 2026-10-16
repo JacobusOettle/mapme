@@ -166,6 +166,71 @@ final class DaylightTests: XCTestCase {
         XCTAssertEqual(dark.text, "The sun doesn't rise today")
     }
 
+    func testBannerBeforeDawn() throws {
+        // An alpine start: the day ahead, not "14 h of daylight left" in the dark.
+        let tz = try zone("Africa/Johannesburg")
+        let start = try local(2026, 6, 21, 3, 0, 0, tz)
+        let sun = SunTimes.around(start, at: LatLon(lat: -25.8405, lon: 27.3920), timeZone: tz)
+        // This calculator's times for the day (PyEphem: within a minute).
+        assertTime(sun.civilDawn, try local(2026, 6, 21, 6, 31, 19, tz), "dawn of the day ahead")
+        assertTime(sun.sunrise, try local(2026, 6, 21, 6, 56, 33, tz), "sunrise of the day ahead")
+        XCTAssertNil(sun.daylightLeft(at: start), "no daylight is left before it has begun")
+        XCTAssertEqual(try XCTUnwrap(sun.timeToSunrise(at: start)), 3 * 3600 + 56 * 60 + 33, accuracy: 60)
+        XCTAssertNil(sun.timeToSunrise(at: try local(2026, 6, 21, 12, 0, 0, tz)))
+
+        let dark = try XCTUnwrap(DaylightForecast.make(now: start, sun: sun, eta: try local(2026, 6, 21, 6, 0, 0, tz),
+                                                       destination: "Bannerman Hut", time: time))
+        XCTAssertEqual(dark.text, "Dark until 06:31 · sunrise 06:56 · you reach Bannerman Hut at 06:00, before first light")
+        XCTAssertEqual(dark.level, .red)
+        XCTAssertNil(dark.daylightLeft)
+        let twilight = try XCTUnwrap(DaylightForecast.make(now: start, sun: sun, eta: try local(2026, 6, 21, 6, 45, 0, tz),
+                                                           destination: "Bannerman Hut", time: time))
+        XCTAssertEqual(twilight.text, "Dark until 06:31 · sunrise 06:56 · at your pace you reach Bannerman Hut at 06:45")
+        XCTAssertEqual(twilight.level, .amber)
+        let day = try XCTUnwrap(DaylightForecast.make(now: start, sun: sun, eta: try local(2026, 6, 21, 9, 0, 0, tz),
+                                                      destination: "Bannerman Hut", time: time))
+        XCTAssertEqual(day.level, .normal)
+        // A long day out: arriving after this evening's dusk is still red.
+        let long = try XCTUnwrap(DaylightForecast.make(now: start, sun: sun, eta: try local(2026, 6, 21, 18, 33, 0, tz),
+                                                       destination: "Camp", time: time))
+        XCTAssertEqual(long.level, .red)
+        XCTAssertTrue(long.text.hasSuffix("you reach Camp 40 min after dark"), long.text)
+
+        // Without a route: nothing in the middle of the night, then the dark and the sunrise.
+        XCTAssertNil(DaylightForecast.make(now: start, sun: sun, eta: nil, destination: nil, time: time))
+        let early = try XCTUnwrap(DaylightForecast.make(now: try local(2026, 6, 21, 5, 0, 0, tz), sun: sun, eta: nil,
+                                                        destination: nil, time: time))
+        XCTAssertEqual(early.text, "Dark until 06:31 · sunrise 06:56")
+        XCTAssertEqual(early.level, .amber)
+        let dawn = try XCTUnwrap(DaylightForecast.make(now: try local(2026, 6, 21, 6, 40, 0, tz), sun: sun, eta: nil,
+                                                       destination: nil, time: time))
+        XCTAssertEqual(dawn.text, "Sunrise at 06:56")
+        XCTAssertEqual(dawn.level, .normal)
+    }
+
+    func testTheEveningGoesOnAfterMidnightAtHighLatitudes() throws {
+        // Rovaniemi in early July: the sun sets at 00:54, after midnight, and the night never gets
+        // darker than civil twilight. At 00:20 it is still the evening before; today's sunset is a
+        // whole day away (this calculator's times).
+        let tz = try zone("Europe/Helsinki")
+        let rovaniemi = LatLon(lat: 66.5039, lon: 25.7294)
+        let now = try local(2026, 7, 8, 0, 20, 0, tz)
+        let sun = SunTimes.around(now, at: rovaniemi, timeZone: tz)
+        assertTime(sun.sunset, try local(2026, 7, 8, 0, 53, 51, tz), "the evening's sunset")
+        XCTAssertNil(sun.civilDusk)
+        XCTAssertEqual(try XCTUnwrap(sun.daylightLeft(at: now)), 33 * 60 + 51, accuracy: 60)
+        let following = try XCTUnwrap(DaylightForecast.make(now: now, sun: sun, eta: try local(2026, 7, 8, 1, 30, 0, tz),
+                                                             destination: "Hut"))
+        XCTAssertLessThan(try XCTUnwrap(following.daylightLeft), 3600, following.text)
+        XCTAssertEqual(following.level, .amber, "you arrive after sunset")
+
+        // After that sunset: today's sunrise (01:51) is next, and in the morning today's sunset.
+        let night = SunTimes.around(try local(2026, 7, 8, 1, 10, 0, tz), at: rovaniemi, timeZone: tz)
+        assertTime(night.sunrise, try local(2026, 7, 8, 1, 50, 45, tz), "today's sunrise")
+        let morning = SunTimes.around(try local(2026, 7, 8, 9, 0, 0, tz), at: rovaniemi, timeZone: tz)
+        assertTime(morning.sunset, try local(2026, 7, 9, 0, 45, 16, tz), "today's sunset, after midnight")
+    }
+
     func testDurationWording() {
         XCTAssertEqual(RouteFormat.duration(2 * 3600 + 10 * 60), "2 h 10 min")
         XCTAssertEqual(RouteFormat.duration(2 * 3600 + 10), "2 h")

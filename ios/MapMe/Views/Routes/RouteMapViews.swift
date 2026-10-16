@@ -127,7 +127,7 @@ struct RouteGuidanceBanner: View {
         let now = RoutesClock.now()
         // The day's sun where you are (or, without a fix, along the route you follow).
         let place = fix.map { LatLon($0.coordinate) } ?? navigator.activeRoute?.points.first?.latLon
-        let sun = place.map { SunTimes.compute(on: now, at: $0) }
+        let sun = place.map { SunTimes.around(now, at: $0) }
         if let route = navigator.activeRoute {
             let progress = navigator.progress
             let forecast = sun.flatMap { s in

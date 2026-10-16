@@ -54,10 +54,34 @@ struct SunTimes: Equatable, Sendable {
         return out
     }
 
-    /// Daylight left at `now` (until sunset; 0 after it; nil when unknown or polar).
+    /// The sun times that matter at `now` (the banner's and the daylight sheet's): today's, or
+    /// yesterday's while yesterday's evening is not over. After midnight at high latitudes the sun
+    /// can still be up, or civil dusk still to come, from the day before (Rovaniemi in early July:
+    /// sunset at 00:54), and today's evening then lies a whole day ahead.
+    static func around(_ now: Date, at position: LatLon, timeZone: TimeZone = .current) -> SunTimes {
+        let today = compute(on: now, at: position, timeZone: timeZone)
+        // Once the sun has risen today, yesterday is over.
+        if let sunrise = today.sunrise, now >= sunrise { return today }
+        var local = Calendar(identifier: .gregorian)
+        local.timeZone = timeZone
+        guard let dayBefore = local.date(byAdding: .day, value: -1, to: now) else { return today }
+        let yesterday = compute(on: dayBefore, at: position, timeZone: timeZone)
+        if let evening = yesterday.civilDusk ?? yesterday.sunset, now < evening { return yesterday }
+        return today
+    }
+
+    /// Daylight left at `now`: until sunset, 0 after it. Nil before sunrise (the day's light is
+    /// still to come: `timeToSunrise`), when unknown, or polar.
     func daylightLeft(at now: Date) -> TimeInterval? {
         guard let sunset else { return nil }
+        if let sunrise, now < sunrise { return nil }
         return max(0, sunset.timeIntervalSince(now))
+    }
+
+    /// Time until sunrise while `now` is before it (an alpine start); nil otherwise.
+    func timeToSunrise(at now: Date) -> TimeInterval? {
+        guard let sunrise, now < sunrise else { return nil }
+        return sunrise.timeIntervalSince(now)
     }
 
     // MARK: - NOAA solar calculator
@@ -357,15 +381,17 @@ struct DaylightForecast: Equatable {
     enum Level: Equatable {
         /// Plenty of time.
         case normal
-        /// The ETA is within 15 min of sunset (or after it, before dark).
+        /// The ETA is within 15 min of sunset (or after it, before dark), or in the morning
+        /// twilight; without a route: the last 15 min of the day, the evening twilight, the dark
+        /// before dawn.
         case amber
-        /// You arrive after civil dusk.
+        /// You arrive after civil dusk, or before civil dawn.
         case red
     }
 
     var text: String
     var level: Level
-    /// Seconds of daylight left (nil: polar, or unknown).
+    /// Seconds of daylight left (nil: polar, unknown, or before sunrise).
     var daylightLeft: TimeInterval?
 
     /// Amber from this long before sunset.
@@ -373,9 +399,10 @@ struct DaylightForecast: Equatable {
     /// Without a route the banner shows from this long before sunset.
     static let showBefore: TimeInterval = 2 * 3600
 
-    /// The banner text at `now`. `eta` and `destination` while following ("Bannerman Hut", "the
-    /// end of Bannerman Pass"); nil `eta` without one. Nil when nothing needs saying (more than
-    /// two hours of daylight and no route; after dark without a route).
+    /// The banner text at `now`, from the sun times around it (`SunTimes.around`). `eta` and
+    /// `destination` while following ("Bannerman Hut", "the end of Bannerman Pass"); nil `eta`
+    /// without one. Nil when nothing needs saying (more than two hours of daylight and no route;
+    /// after dark without a route, until two hours before first light).
     static func make(now: Date, sun: SunTimes, eta: Date?, destination: String?,
                      time: (Date) -> String = { $0.formatted(date: .omitted, time: .shortened) }) -> DaylightForecast? {
         let following = eta != nil && destination != nil
@@ -393,6 +420,10 @@ struct DaylightForecast: Equatable {
                                     level: dark ? .red : .amber, daylightLeft: nil)
         }
         guard let sunset = sun.sunset else { return nil }
+        if let sunrise = sun.sunrise, now < sunrise {
+            return beforeSunrise(now: now, sun: sun, sunrise: sunrise, sunset: sunset, eta: eta,
+                                 destination: destination, time: time)
+        }
         let left = max(0, sunset.timeIntervalSince(now))
         let dusk = sun.civilDusk
         if !following {
@@ -415,6 +446,39 @@ struct DaylightForecast: Equatable {
         let level: Level = eta > sunset.addingTimeInterval(-amberMargin) ? .amber : .normal
         return DaylightForecast(text: "\(head) · at your pace you reach \(destination) at \(time(eta))",
                                 level: level, daylightLeft: left)
+    }
+
+    /// Before sunrise (an alpine start): "Dark until 06:31 · sunrise 06:56" until civil dawn (a
+    /// light is needed), "Sunrise at 06:56" in the morning twilight. While following: red when you
+    /// arrive before first light, amber in the twilight, and the day's rules for an arrival late in
+    /// the day. Without a route: from two hours before first light.
+    private static func beforeSunrise(now: Date, sun: SunTimes, sunrise: Date, sunset: Date, eta: Date?,
+                                      destination: String?, time: (Date) -> String) -> DaylightForecast? {
+        // Nil once civil dawn is past, or on a night that never gets that dark (white nights).
+        let darkUntil: Date? = sun.civilDawn.flatMap { now < $0 ? $0 : nil }
+        let head: String
+        if let darkUntil {
+            head = "Dark until \(time(darkUntil)) · sunrise \(time(sunrise))"
+        } else {
+            head = "Sunrise at \(time(sunrise))"
+        }
+        guard let eta, let destination else {
+            let firstLight = darkUntil ?? sunrise
+            guard firstLight.timeIntervalSince(now) < showBefore else { return nil }
+            return DaylightForecast(text: head, level: darkUntil == nil ? .normal : .amber, daylightLeft: nil)
+        }
+        if let dusk = sun.civilDusk, eta > dusk {
+            let late = eta.timeIntervalSince(dusk)
+            return DaylightForecast(text: "\(head) · you reach \(destination) \(RouteFormat.duration(late)) after dark",
+                                    level: .red, daylightLeft: nil)
+        }
+        if let dawn = sun.civilDawn, eta < dawn {
+            return DaylightForecast(text: "\(head) · you reach \(destination) at \(time(eta)), before first light",
+                                    level: .red, daylightLeft: nil)
+        }
+        let level: Level = eta < sunrise || eta > sunset.addingTimeInterval(-amberMargin) ? .amber : .normal
+        return DaylightForecast(text: "\(head) · at your pace you reach \(destination) at \(time(eta))",
+                                level: level, daylightLeft: nil)
     }
 }
 

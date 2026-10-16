@@ -415,7 +415,7 @@ struct DaylightSheet: View {
         let now = RoutesClock.now()
         let navigator = model.navigator
         let place = model.location.location.map { LatLon($0.coordinate) } ?? navigator.activeRoute?.points.first?.latLon
-        let sun = place.map { SunTimes.compute(on: now, at: $0) }
+        let sun = place.map { SunTimes.around(now, at: $0) }
         let units = model.settings.units
         let pace = navigator.currentPace(now: now)
         NavigationStack {
@@ -427,12 +427,19 @@ struct DaylightSheet: View {
                         } else if sun.isPolarNight {
                             Text("The sun doesn't rise today.")
                         }
+                        row("First light (civil dawn)", sun.civilDawn.map { Self.time($0) } ?? "—", symbol: "sun.haze.fill")
                         row("Sunrise", sun.sunrise.map { Self.time($0) } ?? "—", symbol: "sunrise.fill")
                         row("Sunset", sun.sunset.map { Self.time($0) } ?? "—", symbol: "sunset.fill")
                         row("Dark (civil dusk)", sun.civilDusk.map { Self.time($0) } ?? "—", symbol: "moon.stars.fill")
-                        row("Daylight left", sun.daylightLeft(at: now).map { RouteFormat.duration($0) } ?? "—",
-                            symbol: "sun.max.fill")
-                            .accessibilityIdentifier("daylightLeftRow")
+                        if let toSunrise = sun.timeToSunrise(at: now) {
+                            // Before dawn the day's light is still to come.
+                            row("Sunrise in", RouteFormat.duration(toSunrise), symbol: "sun.horizon.fill")
+                                .accessibilityIdentifier("daylightLeftRow")
+                        } else {
+                            row("Daylight left", sun.daylightLeft(at: now).map { RouteFormat.duration($0) } ?? "—",
+                                symbol: "sun.max.fill")
+                                .accessibilityIdentifier("daylightLeftRow")
+                        }
                     } else {
                         Text("Waiting for your position.")
                             .foregroundStyle(.secondary)
