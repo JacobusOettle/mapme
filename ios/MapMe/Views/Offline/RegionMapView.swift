@@ -290,7 +290,8 @@ final class RegionSelectionOverlay: UIView {
             onChange?(next, ended)
         case .cancelled, .failed:
             anchor = nil
-            if let current = box { onChange?(current, true) }
+            // `box` is unwrapped by the guard above; report the box as it stands now.
+            if let current = self.box { onChange?(current, true) }
         default:
             break
         }
