@@ -11,13 +11,20 @@ import Foundation
 /// Thread-safe. Queries are CPU work in the core: call `resolve` from a background task, and
 /// `store` directly from CATiledLayer's drawing threads (then `prefetch` what it asks for and
 /// redraw when it arrives). Owned by the offline feature (docs/design/explorer.md, Terrain).
+///
+/// Callers share downloads: a tile another call is already loading is waited for, not loaded
+/// twice and not skipped, so every caller asks the store again only once its tiles are there (the
+/// neighbouring canvas tiles beyond a sheet, the route card and the navigator, the 3D view and
+/// the canvas all need the same DEM tiles at once). A download runs in a task of its own, so a
+/// caller that gives up (a closed card, a new tap while planning) neither aborts it for the
+/// others nor has its tiles marked missing.
 final class TerrainProvider: @unchecked Sendable {
     /// Nil only when the core could not make a store; every query then answers nil.
     let store: TerrainStore?
     private let source: TerrainTileSource
     private let lock = NSLock()
-    /// Tiles being loaded now: asking again for one of them does not load it twice.
-    private var loading: Set<TileID> = []
+    /// The download each tile being loaded belongs to: asking again for one of them waits for it.
+    private var inFlight: [TileID: Task<Void, Never>] = [:]
     /// Bumped by `terrainDidArrive`: views drawn from partial terrain redraw when it changes.
     private var _generation = 0
 
@@ -50,28 +57,64 @@ final class TerrainProvider: @unchecked Sendable {
     }
 
     /// Loads tiles into the store: the ones `source` has are added, the others marked missing.
-    /// Tiles already being loaded by another call are left to it.
+    /// Returns once every tile asked for is in the store or marked missing, including tiles another
+    /// call was already loading (waited for, not loaded twice, whether that call was `deviceOnly`
+    /// or not). A cancelled caller still waits for the download under way (one round at most) but
+    /// never aborts it.
     func load(_ tiles: [TileID], deviceOnly: Bool = false) async {
-        guard let store else { return }
-        let fresh: [TileID] = lock.withLock {
+        guard store != nil, !tiles.isEmpty else { return }
+        // Task-locals do not reach a detached task: carry the caller's scope over by hand.
+        let onDevice = deviceOnly || TerrainFetchScope.deviceOnly
+        let priority = Task.currentPriority
+        let downloads: [Task<Void, Never>] = lock.withLock {
             var seen = Set<TileID>()
-            let wanted = tiles.filter { !loading.contains($0) && seen.insert($0).inserted }
-            loading.formUnion(wanted)
-            return wanted
+            var fresh: [TileID] = []
+            var waits: [Task<Void, Never>] = []
+            for t in tiles where seen.insert(t).inserted {
+                if let running = inFlight[t] {
+                    waits.append(running)
+                } else {
+                    fresh.append(t)
+                }
+            }
+            guard !fresh.isEmpty else { return waits }
+            let batch = fresh
+            // Registered under the lock before it can finish: its own clean-up takes the lock too.
+            let download = Task.detached(priority: priority) { [self] in
+                await self.fetch(batch, onDevice: onDevice)
+            }
+            for t in batch { inFlight[t] = download }
+            waits.append(download)
+            return waits
         }
-        guard !fresh.isEmpty else { return }
+        for download in downloads {
+            await download.value
+        }
+    }
+
+    /// One download of `load`: adds the tiles `source` has to the store and marks the others
+    /// missing, then lets the tiles go (waiters ask the store again after this). Runs detached;
+    /// should it ever be cancelled, the tiles it did not get are left unmarked (a cancelled
+    /// download says nothing about whether the terrain can be had).
+    private func fetch(_ tiles: [TileID], onDevice: Bool) async {
+        defer {
+            lock.withLock {
+                for t in tiles { inFlight[t] = nil }
+            }
+        }
+        guard let store else { return }
         let source = self.source
         let got: [TileID: Data]
-        if deviceOnly {
-            got = await TerrainFetchScope.onDevice { await source.tiles(fresh, progress: nil) }
+        if onDevice {
+            got = await TerrainFetchScope.onDevice { await source.tiles(tiles, progress: nil) }
         } else {
-            got = await source.tiles(fresh, progress: nil)
+            got = await source.tiles(tiles, progress: nil)
         }
-        for t in fresh {
+        let aborted = Task.isCancelled
+        for t in tiles {
             if let png = got[t], store.addTile(t, png: png) { continue }
-            store.markMissing(t)
+            if !aborted { store.markMissing(t) }
         }
-        lock.withLock { loading.subtract(fresh) }
     }
 
     /// `load` without waiting, for CATiledLayer's drawing threads; `completion` runs afterwards on

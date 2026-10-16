@@ -2304,7 +2304,8 @@ scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
     `OfflineBackground` (iOS 26 continued processing, iOS 17–18 background URLSession),
     `RegionPickerView`; `DEMService` reads pinned tiles first and `TerrainPullLoop` uses the tiles
     on the device after a cutoff (`TerrainFetchScope.onDevice`). `TerrainProvider` (Terrain/) holds
-    the one core store; `terrainDidArrive()` tells the views drawn without terrain.
+    the one core store (callers share the downloads in flight, which no caller's cancellation
+    aborts); `terrainDidArrive()` tells the views drawn without terrain.
   * **3D** (`Views/Terrain3D/`): `Terrain3DBuilder` (grid, texture: core contours and the sheet's
     raster draped through the georeference with its warp), `Terrain3DGeometry.swift` (area, mesh,
     UVs, ribbons), `Terrain3DSceneView` (SceneKit), `Terrain3DScreen`.
