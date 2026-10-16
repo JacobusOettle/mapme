@@ -187,9 +187,15 @@ enum OfflineText {
         n == 1 ? "1 tile" : "\(SearchText.grouped(n)) tiles"
     }
 
+    /// "≈ 342 MB", "< 1 MB" (already a bound, no "≈").
+    static func approximateSize(bytes: Double) -> String {
+        let text = size(bytes: bytes)
+        return text.hasPrefix("<") ? text : "\u{2248} " + text
+    }
+
     /// "≈ 342 MB · 2 475 tiles · measured".
     static func estimateLine(_ estimate: OfflineEstimate) -> String {
         let how = estimate.isMeasured ? "measured" : "estimated"
-        return "\u{2248} \(size(bytes: estimate.bytes)) \u{00B7} \(tiles(estimate.plan.tiles)) \u{00B7} \(how)"
+        return "\(approximateSize(bytes: estimate.bytes)) \u{00B7} \(tiles(estimate.plan.tiles)) \u{00B7} \(how)"
     }
 }

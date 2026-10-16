@@ -165,8 +165,10 @@ final class PinnedTerrainStore: @unchecked Sendable {
     // MARK: - Tiles
 
     /// Writes a downloaded tile into place (atomically). Throws on a full disk and other write
-    /// errors. Any thread.
-    func store(_ data: Data, for t: TileID) throws {
+    /// errors. False when no owner covers the tile any more (released while it downloaded): it is
+    /// not kept. Any thread.
+    @discardableResult
+    func store(_ data: Data, for t: TileID) throws -> Bool {
         let url = tileURL(for: t)
         do {
             try data.write(to: url, options: .atomic)
@@ -175,10 +177,11 @@ final class PinnedTerrainStore: @unchecked Sendable {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try data.write(to: url, options: .atomic)
         }
+        return keepIfCovered(url, t)
     }
 
     /// Moves a file (a tile from the terrain cache, a background download) into place. False when
-    /// it could not be moved. Any thread.
+    /// it could not be moved, or no owner covers the tile any more. Any thread.
     @discardableResult
     func adopt(_ file: URL, for t: TileID) -> Bool {
         let url = tileURL(for: t)
@@ -190,10 +193,19 @@ final class PinnedTerrainStore: @unchecked Sendable {
         }
         do {
             try fm.moveItem(at: file, to: url)
-            return true
         } catch {
             return false
         }
+        return keepIfCovered(url, t)
+    }
+
+    /// A release drops its owner from the index before it deletes files, so a tile written after
+    /// its owner's release passed it is caught here: covered still, or deleted now. Either way no
+    /// tile is left on disk without an owner.
+    private func keepIfCovered(_ url: URL, _ t: TileID) -> Bool {
+        if covers(t) { return true }
+        try? FileManager.default.removeItem(at: url)
+        return false
     }
 
     /// Bytes on disk of all pinned tiles. Blocking.

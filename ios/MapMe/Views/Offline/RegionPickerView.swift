@@ -68,8 +68,9 @@ enum RegionPlaceSearch {
 /// Settings → Offline terrain → Add Region… (docs/design/explorer.md, Pick a region): search a
 /// country, state, province, park or place, or start from "Around me" (50 km) or "Around my maps"
 /// (all located maps + 30 km); adjust the rectangle's corners on the map; pick Standard or High
-/// detail; see what it takes (measured from sample tiles when online) and download. Offline,
-/// the search is off and the presets and the rectangle still work.
+/// detail; see what each takes (tiles from the core's plan, bytes measured from sample tiles when
+/// online: the level on screen first, then the other to compare) and download. Offline, the
+/// search is off and the presets and the rectangle still work.
 struct RegionPickerView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -83,7 +84,8 @@ struct RegionPickerView: View {
     @State private var results: [RegionSearchResult] = []
     @State private var searching = false
     @State private var searchMessage: String?
-    @State private var estimate: EstimateState = .idle
+    /// Both detail levels' estimates for the current box (missing: still working).
+    @State private var estimates: [OfflineDetail: EstimateState] = [:]
     @State private var fitRequest = 0
     @State private var visible: GeoBounds?
     @State private var confirmCellular = false
@@ -298,6 +300,14 @@ struct RegionPickerView: View {
                 .foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             estimateView
+            if let comparison = comparisonLine {
+                Text(comparison)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+                    .monospacedDigit()
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("regionOtherEstimateText")
+            }
             Button {
                 download()
             } label: {
@@ -360,6 +370,20 @@ struct RegionPickerView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// The other detail level, to compare: "High detail: ≈ 1.2 GB · 9 443 tiles".
+    private var comparisonLine: String? {
+        guard bounds != nil else { return nil }
+        let other: OfflineDetail = detail == .standard ? .high : .standard
+        guard case .ready(let e)? = estimates[other] else { return nil }
+        return Self.comparisonLine(e, detail: other)
+    }
+
+    static func comparisonLine(_ e: OfflineEstimate, detail: OfflineDetail) -> String {
+        var line = "\(detail.label): \(OfflineText.approximateSize(bytes: e.bytes)) \u{00B7} \(OfflineText.tiles(e.plan.tiles))"
+        if e.refusal != nil { line += " \u{00B7} too large to download" }
+        return line
+    }
+
     /// "Wi-Fi recommended · 48 GB free" / "Estimated offline: sizes vary 2–4× by region".
     static func footnote(_ e: OfflineEstimate, online: Bool, expensive: Bool) -> String {
         var parts: [String] = []
@@ -379,15 +403,22 @@ struct RegionPickerView: View {
         model.library.maps.compactMap { OfflinePlanner.corners(of: $0) }.flatMap { $0 }
     }
 
+    /// The estimate of the level on screen.
+    private var estimate: EstimateState {
+        guard bounds != nil else { return .idle }
+        return estimates[detail] ?? .working
+    }
+
     private var canDownload: Bool {
         guard bounds != nil, case .ready(let e) = estimate else { return false }
         return e.refusal == nil && e.plan.tiles > 0
     }
 
-    /// Changes when the estimate must be redone (the box to ~100 m, the detail).
+    /// Changes when the estimates must be redone (the box to ~100 m; both levels are worked out
+    /// for every box, so switching the level does not).
     private var estimateKey: String {
-        guard let b = bounds else { return "none|\(detail.rawValue)" }
-        return String(format: "%.3f,%.3f,%.3f,%.3f|", b.south, b.west, b.north, b.east) + detail.rawValue
+        guard let b = bounds else { return "none" }
+        return String(format: "%.3f,%.3f,%.3f,%.3f", b.south, b.west, b.north, b.east)
     }
 
     private var cellularMessage: String {
@@ -398,19 +429,21 @@ struct RegionPickerView: View {
     }
 
     private func refreshEstimate() async {
-        guard let bounds else {
-            estimate = .idle
-            return
-        }
-        estimate = .working
+        estimates = [:]
+        guard let bounds else { return }
         // Dragging a corner: wait for a pause.
         try? await Task.sleep(nanoseconds: 450_000_000)
         if Task.isCancelled { return }
-        let result = await model.offline.makeEstimate(bounds, detail: detail)
-        if Task.isCancelled { return }
-        switch result {
-        case .success(let e): estimate = .ready(e)
-        case .failure(let failure): estimate = .failed("Couldn\u{2019}t work out this area: \(failure.message)")
+        // The level on screen first (online about a second each: a core plan and 16 HEAD
+        // requests), then the other one, so the two sizes can be compared before downloading.
+        let order = [detail] + OfflineDetail.allCases.filter { $0 != detail }
+        for level in order {
+            let result = await model.offline.makeEstimate(bounds, detail: level)
+            if Task.isCancelled { return }
+            switch result {
+            case .success(let e): estimates[level] = .ready(e)
+            case .failure(let failure): estimates[level] = .failed("Couldn\u{2019}t work out this area: \(failure.message)")
+            }
         }
     }
 

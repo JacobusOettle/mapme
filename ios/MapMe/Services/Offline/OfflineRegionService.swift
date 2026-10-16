@@ -142,6 +142,7 @@ final class OfflineRegionService {
         var folder = directory ?? URL.applicationSupportDirectory.appendingPathComponent("OfflineRegions", isDirectory: true)
         var tileSession = session
         var cache = cacheDirectory
+        var networkNow = network
         if OfflineMocks.mocksDownloads, pinned == nil, directory == nil {
             // UI tests: a fake server and folders of their own, emptied at every launch.
             let mockTerrain = URL.applicationSupportDirectory.appendingPathComponent("Terrain-mock", isDirectory: true)
@@ -151,13 +152,16 @@ final class OfflineRegionService {
             store = PinnedTerrainStore(rootURL: mockTerrain)
             tileSession = OfflineMocks.session()
             cache = nil
+            // The fake server needs no network: estimates and downloads behave as on Wi-Fi
+            // whatever the test machine's connection.
+            if networkNow == nil { networkNow = { .wifi } }
         }
         var policy = TileDownloader.Policy()
         if let retryDelays { policy.retryDelays = retryDelays }
         self.pinned = store
         self.directory = folder
         self.downloader = TileDownloader(pinned: store, cacheDirectory: cache, session: tileSession, policy: policy)
-        self.network = network ?? { OfflineNetwork.current }
+        self.network = networkNow ?? { OfflineNetwork.current }
         self.planner = plan ?? { OfflinePlanner.plan($0) }
     }
 
@@ -381,7 +385,9 @@ final class OfflineRegionService {
             return
         }
         saveRegions(force: true)
-        if OfflineContinuedProcessing.shared.isActive {
+        // Nothing left to download: end the continued-processing task, also one asked for that
+        // iOS has not started (it is then completed as soon as it starts).
+        if OfflineContinuedProcessing.shared.isRequested {
             OfflineContinuedProcessing.shared.finish(success: true)
         }
     }

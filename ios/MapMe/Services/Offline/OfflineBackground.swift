@@ -26,10 +26,11 @@ enum OfflineBackgroundMode: Equatable, Sendable {
 /// to complete it.
 ///
 /// The identifier is a fixed one (`project.yml`, BGTaskSchedulerPermittedIdentifiers), registered
-/// once, just before the first submit: continued-processing tasks may be registered late, and a
-/// handler registered for a wildcard does not receive concrete identifiers (Apple DTS, Developer
-/// Forums thread 799126), so the exact identifier is registered. One region downloads at a time,
-/// so one task at a time is enough.
+/// once with that exact identifier just before the first submit: Apple's "Performing long-running
+/// tasks on iOS and iPadOS" registers its handler that way, on demand rather than at launch, and
+/// asks for no background mode. One region downloads at a time, so one task at a time is enough. A
+/// request iOS could not start at once (`strategy = .fail`), or one that starts after the queue
+/// emptied, is completed straight away.
 @MainActor
 final class OfflineContinuedProcessing {
     static let shared = OfflineContinuedProcessing()
@@ -39,6 +40,8 @@ final class OfflineContinuedProcessing {
     var onExpired: (() -> Void)?
     /// A task is granted and running.
     private(set) var isActive = false
+    /// A task was asked for (it may not have started yet) and not finished.
+    var isRequested: Bool { isActive || submitted }
 
     private var registered = false
     private var submitted = false
@@ -113,10 +116,16 @@ final class OfflineContinuedProcessing {
             bgTask.setTaskCompleted(success: false)
             return
         }
+        // Finished (or never wanted) before iOS got round to starting it: nothing to keep going.
+        guard submitted else {
+            continued.setTaskCompleted(success: true)
+            return
+        }
         task = continued
         isActive = true
         continued.progress.totalUnitCount = 1_000
-        continued.expirationHandler = {
+        // Called on a queue of the system's choosing: hop to the main actor.
+        continued.expirationHandler = { @Sendable in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     OfflineContinuedProcessing.shared.expired()

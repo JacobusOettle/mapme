@@ -123,7 +123,7 @@ final class DEMService: TerrainTileSource {
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                 if status == 200, Self.isPNG(data) {
                     // A tile an offline region or a map's trailhead covers is kept for good.
-                    if let pinned, pinned.covers(t), (try? pinned.store(data, for: t)) != nil {
+                    if let pinned, pinned.covers(t), (try? pinned.store(data, for: t)) == true {
                         return data
                     }
                     try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)

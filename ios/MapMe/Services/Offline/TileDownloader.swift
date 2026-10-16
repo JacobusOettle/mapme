@@ -202,7 +202,8 @@ final class TileDownloader: @unchecked Sendable {
                     // The region was deleted meanwhile: nothing may be written for it.
                     guard pinned.covers(t) else { return .cancelled }
                     do {
-                        try pinned.store(data, for: t)
+                        // Not kept: the region was deleted while the tile was on its way.
+                        guard try pinned.store(data, for: t) else { return .cancelled }
                         return .downloaded(Int64(data.count))
                     } catch {
                         return Self.isOutOfSpace(error) ? .stop(.storageFull) : .failed

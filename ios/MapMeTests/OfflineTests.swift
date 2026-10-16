@@ -210,6 +210,29 @@ final class OfflineTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: journal.path))
     }
 
+    /// A tile that lands after its region was deleted (the download was on its way) is not kept:
+    /// nothing stays on disk without an owner.
+    func testATileWrittenAfterItsOwnerWasReleasedIsNotKept() throws {
+        let root = try makeTemporaryDirectory("pinned-late-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = PinnedTerrainStore(rootURL: root)
+        let owner = TerrainOwner.region(UUID())
+        let range = TileRange(z: 12, x0: 7, x1: 8, y0: 7, y1: 7)
+        store.setRanges([range], for: owner)
+        let first = TileID(z: 12, x: 7, y: 7)
+        XCTAssertTrue(try store.store(Self.png, for: first))
+        store.release(owner)
+        XCTAssertFalse(store.hasTile(first), "released with its region")
+
+        let late = TileID(z: 12, x: 8, y: 7)
+        XCTAssertFalse(try store.store(Self.png, for: late), "no owner: not kept")
+        XCTAssertFalse(store.hasTile(late))
+        let file = root.appendingPathComponent("late.png")
+        try Self.png.write(to: file)
+        XCTAssertFalse(store.adopt(file, for: late))
+        XCTAssertFalse(store.hasTile(late))
+    }
+
     func testDownloadsOfCoveredTilesArePinnedOthersCached() async throws {
         let root = try makeTemporaryDirectory("pinned-dem-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -640,6 +663,21 @@ final class OfflineTests: XCTestCase {
         trailhead.bytesOnDisk = 8_200_000
         XCTAssertEqual(TrailheadStatus.text(trailhead), "Saved \u{00B7} 8.2 MB")
         XCTAssertEqual(TrailheadStatus.short(trailhead), "Terrain offline")
+    }
+
+    /// The region picker shows the other detail level's size to compare.
+    @MainActor
+    func testRegionPickerComparesTheOtherDetailLevel() {
+        let plan = Self.plan([TileRange(z: 13, x0: 0, x1: 96, y0: 0, y1: 96)])   // 9 409 tiles
+        var high = OfflineEstimate(plan: plan, bytes: 1_211_000_000, isMeasured: true, refusal: nil)
+        XCTAssertEqual(RegionPickerView.comparisonLine(high, detail: .high),
+                       "High detail: \u{2248} 1.2 GB \u{00B7} 9\u{00A0}409 tiles")
+        high.refusal = "Too large for High detail: pick a smaller area or Standard"
+        XCTAssertTrue(RegionPickerView.comparisonLine(high, detail: .high).hasSuffix("too large to download"))
+        let standard = OfflineEstimate(plan: Self.plan([TileRange(z: 12, x0: 0, x1: 0, y0: 0, y1: 0)]), bytes: 44_000,
+                                       isMeasured: false, refusal: nil)
+        XCTAssertEqual(RegionPickerView.comparisonLine(standard, detail: .standard),
+                       "Standard: < 1 MB \u{00B7} 1 tile", "a bound already: no \u{2248}")
     }
 
     func testSearchWiderOfflineNote() {

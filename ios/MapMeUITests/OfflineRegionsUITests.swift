@@ -63,7 +63,14 @@ final class OfflineRegionsUITests: XCTestCase {
         // "≈ 103 MB · 2 100 tiles · measured" (the fake server's sizes), Wi-Fi recommended.
         XCTAssertTrue(estimate.label.contains("measured"), "estimate: \(estimate.label)")
         XCTAssertTrue(estimate.label.contains("MB") || estimate.label.contains("GB"), "estimate: \(estimate.label)")
-        Thread.sleep(forTimeInterval: 1.5)
+        // The other detail level's size follows, to compare ("High detail: ≈ … · … tiles").
+        let other = app.staticTexts["regionOtherEstimateText"]
+        if other.waitForExistence(timeout: 15) {
+            XCTAssertTrue(other.label.hasPrefix("High detail"), "comparison: \(other.label)")
+        } else {
+            XCTFail("no size for High detail to compare")
+        }
+        Thread.sleep(forTimeInterval: 1)
         uiAttachScreenshot(app, "51-region-picker-estimate")
         let download = app.buttons["downloadRegionButton"]
         XCTAssertTrue(download.isEnabled, "Download is off: \(estimate.label)")

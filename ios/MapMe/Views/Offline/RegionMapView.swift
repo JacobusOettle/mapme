@@ -125,7 +125,7 @@ final class RegionMapContainer: UIView {
     /// Shows `geo` with room for the search bar above and the panel below.
     func fit(_ geo: GeoBounds, animated: Bool) {
         let rect = Self.mapRect(geo)
-        let padding = UIEdgeInsets(top: 170, left: 36, bottom: 330, right: 36)
+        let padding = UIEdgeInsets(top: 170, left: 36, bottom: 370, right: 36)
         mapView.setVisibleMapRect(rect, edgePadding: padding, animated: animated)
     }
 

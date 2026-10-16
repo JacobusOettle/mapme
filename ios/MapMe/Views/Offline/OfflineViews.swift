@@ -35,12 +35,21 @@ struct OfflineSettingsSection: View {
                         regionMenu(region, offline: offline)
                     }
             }
+            // The cover and the size refresh hang on this row, which is always there: modifiers on
+            // a Section inside a Form can end up on every one of its rows.
             Button {
                 showPicker = true
             } label: {
                 SettingsLabel("Add Region\u{2026}", symbol: "plus", color: Theme.accent.opacity(0.85))
             }
             .accessibilityIdentifier("addOfflineRegionButton")
+            .fullScreenCover(isPresented: $showPicker) {
+                RegionPickerView()
+                    .environment(model)
+            }
+            .task {
+                offline.refreshPinnedBytes()
+            }
 
             Toggle(isOn: $settings.cacheTerrainAroundMaps) {
                 SettingsLabel("Keep terrain around my maps", symbol: "mountain.2.fill", color: .brown)
@@ -70,13 +79,6 @@ struct OfflineSettingsSection: View {
         } footer: {
             Text(footer(offline))
                 .accessibilityIdentifier("offlineTerrainFooter")
-        }
-        .fullScreenCover(isPresented: $showPicker) {
-            RegionPickerView()
-                .environment(model)
-        }
-        .task {
-            offline.refreshPinnedBytes()
         }
     }
 
