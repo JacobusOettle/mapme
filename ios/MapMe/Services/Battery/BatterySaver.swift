@@ -27,7 +27,8 @@ struct BatteryLimits: Equatable, Sendable {
     var allowsKeepScreenAwake: Bool
     /// Finest terrain zoom drawn (off-map contours, world view, 3D).
     var maxTerrainZoom: Int
-    /// Background terrain prefetching and trailhead caching.
+    /// Background terrain prefetching, and the terrain around maps queued from before (the map
+    /// you locate now gets its terrain at once: `OfflineRegionService.waitsForSaver`).
     var allowsPrefetch: Bool
     /// Multisampling in the 3D view (4× when allowed).
     var allowsMultisampling: Bool
@@ -122,7 +123,8 @@ final class BatterySaver {
     var allowsKeepScreenAwake: Bool { limits.allowsKeepScreenAwake }
     /// Finest terrain zoom drawn (off-map contours, world view, 3D).
     var maxTerrainZoom: Int { limits.maxTerrainZoom }
-    /// Background terrain prefetching (trailhead caches wait for the saver to end).
+    /// Background terrain prefetching (the terrain around maps queued from before waits for the
+    /// saver to end; a map located now does not).
     var allowsPrefetch: Bool { limits.allowsPrefetch }
     /// 4× multisampling in the 3D view.
     var allowsMultisampling: Bool { limits.allowsMultisampling }

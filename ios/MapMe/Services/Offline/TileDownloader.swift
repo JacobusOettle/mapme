@@ -70,7 +70,10 @@ struct TileDownloadSummary: Equatable, Sendable {
 /// for transient failures (timeouts, dropped connections, 5xx, 429), 404 = no terrain there.
 /// Resuming is running again: tiles already pinned are skipped without a request, and a tile in
 /// the terrain cache is moved, not downloaded again. Offline, mobile data (when not allowed), Low
-/// Data Mode and a full disk stop the whole run with a reason instead of failing every tile.
+/// Data Mode and a full disk stop the whole run with a reason instead of failing every tile; so
+/// does free space falling below `policy.minFreeBytes` (looked at before the first request, then
+/// every `spaceCheckRequests` requests or `spaceCheckInterval`), before iOS purges caches and the
+/// app's other writes (notes, tracks) fail.
 /// Cancel the calling task to pause. Thread-safe; `run` is called from a background task.
 final class TileDownloader: @unchecked Sendable {
     struct Policy: Equatable, Sendable {
@@ -83,19 +86,32 @@ final class TileDownloader: @unchecked Sendable {
         var allowsConstrained = false
         /// Shortest pause between two progress reports (seconds).
         var reportInterval: TimeInterval = 0.25
+        /// The run stops (`.storageFull`) once free space is below this (nil: never looked at).
+        var minFreeBytes: Int64? = Int64(OfflinePlanner.freeSpaceReserveBytes)
     }
+
+    /// Free space is looked at again after this many requests…
+    static let spaceCheckRequests = 100
+    /// …or this long.
+    static let spaceCheckInterval: TimeInterval = 5
 
     let pinned: PinnedTerrainStore
     /// The terrain cache (`DEMService.cacheURL` layout) whose tiles are moved instead of downloaded.
     let cacheDirectory: URL?
     let policy: Policy
     private let session: URLSession
+    /// Space left on the device (nil: unknown, the run goes on).
+    private let freeBytes: @Sendable () -> Int64?
 
-    init(pinned: PinnedTerrainStore, cacheDirectory: URL?, session: URLSession? = nil, policy: Policy = Policy()) {
+    /// - Parameter freeBytes: space left on the device (`OfflinePlanner.freeBytes`; a stand-in in
+    ///   tests).
+    init(pinned: PinnedTerrainStore, cacheDirectory: URL?, session: URLSession? = nil, policy: Policy = Policy(),
+         freeBytes: @escaping @Sendable () -> Int64? = { OfflinePlanner.freeBytes() }) {
         self.pinned = pinned
         self.cacheDirectory = cacheDirectory
         self.policy = policy
         self.session = session ?? Self.makeSession(policy: policy)
+        self.freeBytes = freeBytes
     }
 
     /// A session for tile downloads: no URL cache (tiles go to the pinned store), the policy's
@@ -112,7 +128,7 @@ final class TileDownloader: @unchecked Sendable {
 
     /// The same downloader with another policy (and the same session).
     func with(_ policy: Policy) -> TileDownloader {
-        TileDownloader(pinned: pinned, cacheDirectory: cacheDirectory, session: session, policy: policy)
+        TileDownloader(pinned: pinned, cacheDirectory: cacheDirectory, session: session, policy: policy, freeBytes: freeBytes)
     }
 
     // MARK: - Run
@@ -126,6 +142,23 @@ final class TileDownloader: @unchecked Sendable {
         var cancelled = false
         var lastReport = Date.distantPast
         let width = max(1, policy.concurrency)
+        let minFree = policy.minFreeBytes
+        let freeBytes = self.freeBytes
+        // Looked at before the first request.
+        var requestsSinceSpaceCheck = Self.spaceCheckRequests
+        var lastSpaceCheck = Date.distantPast
+
+        /// False once free space is below `policy.minFreeBytes` (looked at now and then, not every tile).
+        func hasSpace() -> Bool {
+            guard let minFree else { return true }
+            guard requestsSinceSpaceCheck >= Self.spaceCheckRequests
+                || Date().timeIntervalSince(lastSpaceCheck) >= Self.spaceCheckInterval
+            else { return true }
+            requestsSinceSpaceCheck = 0
+            lastSpaceCheck = Date()
+            guard let free = freeBytes() else { return true }
+            return free >= minFree
+        }
 
         await withTaskGroup(of: TileFetchOutcome.self) { group in
             var running = 0
@@ -134,12 +167,19 @@ final class TileDownloader: @unchecked Sendable {
             func fill() {
                 while running < width, state.cursor < tiles.count {
                     let t = tiles[state.cursor]
-                    state.cursor += 1
                     if let size = pinned.tileBytes(t) {
+                        state.cursor += 1
                         state.done += 1
                         state.bytes += size
                         continue
                     }
+                    guard hasSpace() else {
+                        // The tile stays unstarted: the next run begins with it.
+                        stop = stop ?? .storageFull
+                        return
+                    }
+                    state.cursor += 1
+                    requestsSinceSpaceCheck += 1
                     running += 1
                     group.addTask { await self.fetch(t) }
                 }

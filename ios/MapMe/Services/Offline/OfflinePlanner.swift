@@ -133,17 +133,22 @@ enum OfflinePlanner {
     }
 
     /// Why an area cannot be downloaded (nil: it can): over 60 000 tiles or 2.5 GB, or not
-    /// enough free space (the estimate × 1.25 + 500 MB).
-    static func refusal(tiles: Int, bytes: Double, freeBytes: Int64?, detail: OfflineDetail) -> String? {
+    /// enough free space: (the estimate + `queuedBytes`) × 1.25 + 500 MB, where `queuedBytes` is
+    /// what the regions already queued, downloading or paused have still to write
+    /// (`OfflineRegionService.queuedBytes`).
+    static func refusal(tiles: Int, bytes: Double, freeBytes: Int64?, detail: OfflineDetail,
+                        queuedBytes: Double = 0) -> String? {
         if tiles > maxTiles || bytes > maxBytes {
             return detail == .high
                 ? "Too large for High detail: pick a smaller area or Standard"
                 : "Too large: pick a smaller area"
         }
         if let freeBytes {
-            let needed = bytes * freeSpaceFactor + freeSpaceReserveBytes
+            let queued = queuedBytes.isFinite ? max(0, queuedBytes) : 0
+            let needed = (bytes + queued) * freeSpaceFactor + freeSpaceReserveBytes
             if Double(freeBytes) < needed {
-                return "Not enough free space: \(OfflineText.size(bytes: needed)) needed, \(OfflineText.size(bytes: Double(freeBytes))) free"
+                let alsoQueued = queued > 0 ? " with the downloads already queued" : ""
+                return "Not enough free space: \(OfflineText.size(bytes: needed)) needed\(alsoQueued), \(OfflineText.size(bytes: Double(freeBytes))) free"
             }
         }
         return nil

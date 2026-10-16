@@ -167,7 +167,7 @@ struct BatterySaverChange: Identifiable {
                            saver: "Locks as usual. The biggest single saving: the display uses the most power."),
         BatterySaverChange(id: "network", symbol: "antenna.radiowaves.left.and.right", title: "Downloads",
                            normal: "Terrain fetched ahead of time; terrain around new maps kept at once",
-                           saver: "Only what you look at; keeping the terrain around new maps waits until the saver is off."),
+                           saver: "Only what you look at. The terrain around a map you locate is still kept at once (a few MB while you have signal); maps located before wait until the saver is off."),
         BatterySaverChange(id: "terrain", symbol: "mountain.2.fill", title: "Terrain detail",
                            normal: "Finest (zoom 13)",
                            saver: "One step coarser (zoom 12) beyond the map's edge, on the world view and in 3D."),

@@ -77,6 +77,10 @@ final class OfflineTests: XCTestCase {
         // 1 GB needs 1.25 GB + 500 MB free.
         XCTAssertNotNil(OfflinePlanner.refusal(tiles: 100, bytes: 1e9, freeBytes: 1_700_000_000, detail: .standard))
         XCTAssertNil(OfflinePlanner.refusal(tiles: 100, bytes: 1e9, freeBytes: 1_800_000_000, detail: .standard))
+        // 500 MB still to come for a region already queued: (1 GB + 500 MB) × 1.25 + 500 MB.
+        XCTAssertEqual(OfflinePlanner.refusal(tiles: 100, bytes: 1e9, freeBytes: 1_800_000_000, detail: .standard,
+                                              queuedBytes: 5e8),
+                       "Not enough free space: 2.4 GB needed with the downloads already queued, 1.8 GB free")
         XCTAssertEqual(OfflinePlanner.maxTiles, 60_000)
         XCTAssertEqual(OfflinePlanner.maxBytes, 2.5e9)
     }
@@ -457,6 +461,44 @@ final class OfflineTests: XCTestCase {
         XCTAssertEqual(TileDownloadStop.offline.pauseReason, .network)
     }
 
+    func testADownloadStopsBeforeTheDiskIsFull() async throws {
+        let root = try makeTemporaryDirectory("engine-space-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = PinnedTerrainStore(rootURL: root)
+        let range = TileRange(z: 13, x0: 0, x1: 49, y0: 0, y1: 4)   // 250 tiles
+        store.setRanges([range], for: .region(UUID()))
+        var policy = TileDownloader.Policy()
+        policy.concurrency = 4
+
+        // Already below the 500 MB floor: nothing is requested, the next run starts at the first tile.
+        OfflineTestTileServer.reset()
+        let full = TileDownloader(pinned: store, cacheDirectory: nil, session: Self.serverSession(), policy: policy,
+                                  freeBytes: { Int64(400_000_000) })
+        let refused = await full.run(range.tiles) { _ in }
+        XCTAssertEqual(refused.stop, .storageFull)
+        XCTAssertEqual(refused.stop?.pauseReason, .storageFull)
+        XCTAssertEqual(refused.progress.cursor, 0)
+        XCTAssertEqual(OfflineTestTileServer.getRequests, 0)
+
+        // Space runs low partway (another download, photos): the run stops at the next look.
+        OfflineTestTileServer.reset()
+        let filling = TileDownloader(pinned: store, cacheDirectory: nil, session: Self.serverSession(), policy: policy,
+                                     freeBytes: {
+                                         OfflineTestTileServer.getRequests < 120 ? Int64(2_000_000_000) : Int64(100_000_000)
+                                     })
+        let stopped = await filling.run(range.tiles) { _ in }
+        XCTAssertEqual(stopped.stop, .storageFull)
+        XCTAssertGreaterThanOrEqual(stopped.progress.done, 100)
+        XCTAssertLessThan(stopped.progress.done, 250)
+
+        // Free space unknown: the download goes on to the end.
+        let unknown = TileDownloader(pinned: store, cacheDirectory: nil, session: Self.serverSession(), policy: policy,
+                                     freeBytes: { nil })
+        let finished = await unknown.run(range.tiles) { _ in }
+        XCTAssertTrue(finished.isComplete)
+        XCTAssertEqual(store.presence(of: [range]).tiles, 250)
+    }
+
     func testMeasuringAsksTheServerForSizes() async throws {
         let root = try makeTemporaryDirectory("measure-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -617,6 +659,68 @@ final class OfflineTests: XCTestCase {
         let names = try FileManager.default.contentsOfDirectory(atPath: root.path)
         XCTAssertTrue(names.contains { $0.hasPrefix("regions.unreadable-") && $0.hasSuffix(".json") }, "\(names)")
         XCTAssertFalse(names.contains("regions.json"))
+    }
+
+    @MainActor
+    func testQueuedRegionsCountAgainstFreeSpace() throws {
+        let root = try makeTemporaryDirectory("service-queued-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plan = Self.plan([TileRange(z: 12, x0: 0, x1: 9, y0: 0, y1: 9)])
+        let service = OfflineRegionService(pinned: PinnedTerrainStore(rootURL: root.appendingPathComponent("Terrain")),
+                                           directory: root, session: Self.serverSession(), cacheDirectory: nil,
+                                           network: { OfflineNetwork(online: false, expensive: false, constrained: false) },
+                                           plan: { _ in .success(plan) })
+        service.load()
+        XCTAssertEqual(service.queuedBytes, 0)
+        let estimate = OfflineEstimate(plan: plan, bytes: 1e9, isMeasured: true, refusal: nil)
+        let id = service.download(name: "Big", bounds: GeoBounds(south: 0, west: 0, north: 1, east: 1), detail: .standard,
+                                  estimate: estimate, allowsCellular: nil)
+        XCTAssertEqual(service.region(id)?.status, .paused, "offline: it waits, and its gigabyte is spoken for")
+        XCTAssertEqual(service.queuedBytes, 1e9, accuracy: 1)
+        service.delete(id)
+        XCTAssertEqual(service.queuedBytes, 0)
+    }
+
+    func testTheMapJustLocatedGetsItsTerrainFirstEvenWithTheSaverOn() {
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        // Queued at launch for a map located before (no request time).
+        var backfilled = TrailheadTerrain(mapID: UUID())
+        backfilled.updatedAt = t0.addingTimeInterval(-3_600)
+        var earlier = TrailheadTerrain(mapID: UUID())
+        earlier.updatedAt = t0.addingTimeInterval(-600)
+        earlier.requestedAt = t0.addingTimeInterval(-600)
+        var justLocated = TrailheadTerrain(mapID: UUID())
+        justLocated.updatedAt = t0
+        justLocated.requestedAt = t0
+        let pending = [backfilled, earlier, justLocated]
+        XCTAssertEqual(OfflineRegionService.nextTrailhead(pending, saverOn: false)?.mapID, justLocated.mapID)
+        XCTAssertEqual(OfflineRegionService.nextTrailhead(pending, saverOn: true)?.mapID, justLocated.mapID)
+        XCTAssertEqual(OfflineRegionService.nextTrailhead([backfilled, earlier], saverOn: false)?.mapID, earlier.mapID)
+        // The battery saver holds back only maps queued without being located here.
+        XCTAssertNil(OfflineRegionService.nextTrailhead([backfilled], saverOn: true))
+        XCTAssertEqual(OfflineRegionService.nextTrailhead([backfilled], saverOn: false)?.mapID, backfilled.mapID)
+        XCTAssertTrue(OfflineRegionService.waitsForSaver(backfilled, saverOn: true))
+        XCTAssertFalse(OfflineRegionService.waitsForSaver(justLocated, saverOn: true))
+        XCTAssertFalse(OfflineRegionService.waitsForSaver(backfilled, saverOn: false))
+        // Done with tiles missing (a weak signal at the trailhead): worth another try, not pending.
+        var holes = justLocated
+        holes.status = .complete
+        holes.tilesFailed = 3
+        XCTAssertTrue(holes.hasMissingTiles)
+        XCTAssertNil(OfflineRegionService.nextTrailhead([holes], saverOn: false))
+        holes.tilesFailed = 0
+        XCTAssertFalse(holes.hasMissingTiles)
+    }
+
+    func testTrailheadsDecodeWithoutARequestTime() throws {
+        // Saved before `requestedAt` existed: treated as queued by the backfill.
+        let old = """
+        {"mapID":"00000000-0000-0000-0000-0000000000BB","status":"complete","tilesTotal":120,"tilesDone":118,
+         "tilesFailed":2,"bytesOnDisk":9000000,"updatedAt":700000000}
+        """
+        let record = try JSONDecoder().decode(TrailheadTerrain.self, from: Data(old.utf8))
+        XCTAssertNil(record.requestedAt)
+        XCTAssertTrue(record.hasMissingTiles)
     }
 
     func testRegionsDecodeWithoutTheNewFields() throws {

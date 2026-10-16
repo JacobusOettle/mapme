@@ -34,10 +34,12 @@ struct OfflineNetwork: Equatable, Sendable {
 /// The terrain kept around one located map (trailhead caching).
 struct TrailheadTerrain: Codable, Hashable, Identifiable, Sendable {
     enum Status: String, Codable, Hashable, Sendable {
-        /// Waiting to download (network, Low Data Mode, the battery saver, another map first).
+        /// Waiting to download (network, Low Data Mode, storage, another map first; a map queued
+        /// by `backfillTrailheads` also waits for the battery saver).
         case pending
         case downloading
-        /// Every tile is on the device (`tilesFailed` may count a few that could not be had).
+        /// Every tile was dealt with; `tilesFailed` counts those that could not be had (tried again
+        /// when the network comes back or Wi-Fi turns up, or with Retry).
         case complete
         /// The core could not plan it (`message` says why).
         case failed
@@ -53,9 +55,15 @@ struct TrailheadTerrain: Codable, Hashable, Identifiable, Sendable {
     var completedAt: Date? = nil
     /// Why it waits or failed ("Waiting for network").
     var message: String? = nil
+    /// When the map was located on this iPhone and its terrain asked for (`cacheTrailhead`); nil
+    /// for maps queued by `backfillTrailheads` (located before this version, or while the setting
+    /// was off). The newest request downloads first.
+    var requestedAt: Date? = nil
 
     var id: UUID { mapID }
     var fraction: Double { tilesTotal > 0 ? min(1, Double(tilesDone) / Double(tilesTotal)) : 0 }
+    /// Done, but some tiles could not be had (a weak signal at the trailhead): worth another try.
+    var hasMissingTiles: Bool { status == .complete && tilesFailed > 0 }
 }
 
 /// Offline terrain (docs/design/explorer.md, Offline regions and Trailhead caching): regions the
@@ -67,7 +75,9 @@ struct TrailheadTerrain: Codable, Hashable, Identifiable, Sendable {
 /// (offline, mobile data not allowed, Low Data Mode, storage full, MapMe's background time over)
 /// pauses with that reason and resumes by itself when it clears; one the user paused stays
 /// paused. Trailheads download one map at a time beside it, at utility priority, over mobile data
-/// too (3–14 MB), but not in Low Data Mode or while the battery saver is on.
+/// too (3–14 MB), but not in Low Data Mode: the map located last goes first (it preempts the one
+/// running), and the battery saver holds back only maps queued without being located here. Every
+/// download stops before free space falls below `OfflinePlanner.freeSpaceReserveBytes`.
 ///
 /// Files (Application Support/OfflineRegions, written atomically off the main thread, an
 /// unreadable file moved aside, never overwritten):
@@ -115,6 +125,9 @@ final class OfflineRegionService {
     @ObservationIgnored private var activeCursor = 0
     @ObservationIgnored private var trailheadTask: Task<Void, Never>?
     @ObservationIgnored private var trailheadRun: UUID?
+    /// Trailheads stopped by the network or storage: not started again until the conditions
+    /// change, MapMe comes to the front, or the map is located again (no retry loop meanwhile).
+    @ObservationIgnored private var heldTrailheads: Set<UUID> = []
     @ObservationIgnored private(set) var activeTrailheadID: UUID?
     @ObservationIgnored private var conditionsLoop: ObservationLoop?
     @ObservationIgnored private var lastConditions: Conditions?
@@ -222,8 +235,20 @@ final class OfflineRegionService {
                 estimate.isMeasured = true
             }
         }
-        estimate.refusal = OfflinePlanner.refusal(tiles: plan.tiles, bytes: estimate.bytes, freeBytes: free, detail: detail)
+        estimate.refusal = OfflinePlanner.refusal(tiles: plan.tiles, bytes: estimate.bytes, freeBytes: free, detail: detail,
+                                                  queuedBytes: queuedBytes)
         return .success(estimate)
+    }
+
+    /// Bytes the regions still downloading, queued or paused have yet to write (from their
+    /// estimates): free space they will take before a new region gets any.
+    var queuedBytes: Double {
+        regions.reduce(0) { total, region in
+            guard region.status != .complete, region.status != .failed, let estimated = region.estimatedBytes else {
+                return total
+            }
+            return total + max(0, estimated - Double(region.bytesOnDisk))
+        }
     }
 
     // MARK: - Regions
@@ -297,11 +322,15 @@ final class OfflineRegionService {
     /// rule), owned by the map. Offline, remembered and done when the network is back.
     func cacheTrailhead(for map: MapDocument) {
         guard map.georef != nil else { return }
-        if activeTrailheadID == map.id { stopActiveTrailhead() }
+        // The map just located goes first: whichever map's terrain is downloading stops (it
+        // resumes afterwards, skipping the tiles it already has).
+        if activeTrailheadID != nil { stopActiveTrailhead() }
+        heldTrailheads.remove(map.id)
         var record = trailheads[map.id] ?? TrailheadTerrain(mapID: map.id)
         record.status = .pending
         record.message = nil
         record.updatedAt = Date()
+        record.requestedAt = Date()
         trailheads[map.id] = record
         saveTrailheads(force: true)
         pumpTrailheads()
@@ -319,6 +348,18 @@ final class OfflineRegionService {
             self?.refreshPinnedBytes()
             self?.pumpTrailheads()
         }
+    }
+
+    /// Retry Missing Tiles: downloads what the terrain around a map lacks (tiles that failed, or
+    /// a plan that failed) again.
+    func retryTrailhead(mapID: UUID) {
+        guard var record = trailheads[mapID], record.status == .failed || record.hasMissingTiles else { return }
+        heldTrailheads.remove(mapID)
+        record.status = .pending
+        record.message = nil
+        trailheads[mapID] = record
+        saveTrailheads(force: true)
+        pumpTrailheads()
     }
 
     /// Settings → "Keep terrain around my maps" turned off: drop all of it (and on: queue every
@@ -364,6 +405,7 @@ final class OfflineRegionService {
             }
         }
         backfillTrailheads()
+        requeueTrailheadsMissingTiles()
         refreshPinnedBytes()
         publishInventory()
         pump()
@@ -549,14 +591,15 @@ final class OfflineRegionService {
     private func pumpTrailheads() {
         guard trailheadTask == nil, let model else { return }
         guard model.settings.cacheTerrainAroundMaps else { return }
-        let pending = trailheads.values.filter { $0.status == .pending }.sorted { $0.updatedAt < $1.updatedAt }
-        guard let next = pending.first else { return }
+        let pending = trailheads.values.filter { $0.status == .pending && !heldTrailheads.contains($0.mapID) }
+        guard !pending.isEmpty else { return }
         if let reason = trailheadBlocker() {
-            for record in pending where record.message != reason {
-                trailheads[record.mapID]?.message = reason
-            }
+            note(reason, on: pending)
             return
         }
+        let saverOn = !model.battery.allowsPrefetch
+        note(Self.trailheadSaverWait, on: pending.filter { Self.waitsForSaver($0, saverOn: saverOn) })
+        guard let next = Self.nextTrailhead(pending, saverOn: saverOn) else { return }
         guard let map = model.library.map(id: next.mapID), let request = OfflinePlanner.trailheadRequest(for: map) else {
             // The map is gone or no longer located.
             trailheads[next.mapID] = nil
@@ -567,13 +610,42 @@ final class OfflineRegionService {
         startTrailhead(map.id, request: request)
     }
 
-    /// Why the terrain around maps waits (nil: download now).
+    /// Why the terrain around every map waits (nil: download now). The battery saver is not one
+    /// of the reasons: the terrain around the map you just located, while there is signal at the
+    /// trailhead, is worth far more than the 3–14 MB cost (`waitsForSaver`).
     private func trailheadBlocker() -> String? {
         let net = network()
         if !net.online { return "Waiting for network" }
         if net.constrained { return "Waits for Low Data Mode to end" }
-        if let battery = model?.battery, !battery.allowsPrefetch { return "Waits for the battery saver to end" }
         return nil
+    }
+
+    private func note(_ message: String, on records: [TrailheadTerrain]) {
+        for record in records where record.message != message {
+            trailheads[record.mapID]?.message = message
+        }
+    }
+
+    static let trailheadSaverWait = "Waits for the battery saver to end"
+
+    /// While the battery saver is on, only maps queued without being located here
+    /// (`backfillTrailheads`) wait: a map you located gets its terrain at once.
+    nonisolated static func waitsForSaver(_ record: TrailheadTerrain, saverOn: Bool) -> Bool {
+        saverOn && record.requestedAt == nil
+    }
+
+    /// The trailhead to download next among `pending`: the most recently located map first, then
+    /// (maps queued by `backfillTrailheads`) the longest waiting.
+    nonisolated static func nextTrailhead(_ pending: [TrailheadTerrain], saverOn: Bool) -> TrailheadTerrain? {
+        pending
+            .filter { $0.status == .pending && !waitsForSaver($0, saverOn: saverOn) }
+            .sorted { a, b in
+                let ra = a.requestedAt ?? .distantPast
+                let rb = b.requestedAt ?? .distantPast
+                if ra != rb { return ra > rb }
+                return a.updatedAt < b.updatedAt
+            }
+            .first
     }
 
     private func startTrailhead(_ mapID: UUID, request: TilePlanRequest) {
@@ -643,6 +715,8 @@ final class OfflineRegionService {
                 if let stop = summary.stop {
                     record.status = .pending
                     record.message = stop.pauseReason.label
+                    // Not started again at once: the same stop would end it straight away.
+                    heldTrailheads.insert(mapID)
                 } else if summary.isComplete {
                     record.status = .complete
                     record.tilesTotal = p.total
@@ -733,12 +807,32 @@ final class OfflineRegionService {
                 }
             }
         }
-        if activeTrailheadID != nil, trailheadBlocker() != nil {
-            stopActiveTrailhead()
+        // Trailheads stopped by the network or storage may go on; those that ended with tiles
+        // missing (a weak signal at the trailhead) try again once the network is back or on Wi-Fi.
+        heldTrailheads.removeAll()
+        let cameOnline = now.network.online && !before.network.online
+        let ontoWiFi = now.network.online && !now.network.expensive && before.network.expensive
+        if cameOnline || ontoWiFi { requeueTrailheadsMissingTiles() }
+        if let id = activeTrailheadID {
+            let saverOn = !now.allowsPrefetch
+            if trailheadBlocker() != nil || trailheads[id].map({ Self.waitsForSaver($0, saverOn: saverOn) }) == true {
+                stopActiveTrailhead()
+            }
         }
         saveRegions(force: true)
         pump()
         pumpTrailheads()
+    }
+
+    /// Trailheads done with tiles missing go back in the queue (the next run fetches only those).
+    private func requeueTrailheadsMissingTiles() {
+        var changed = false
+        for record in trailheads.values where record.hasMissingTiles {
+            trailheads[record.mapID]?.status = .pending
+            trailheads[record.mapID]?.message = nil
+            changed = true
+        }
+        if changed { saveTrailheads(force: true) }
     }
 
     // MARK: - Background
@@ -775,8 +869,11 @@ final class OfflineRegionService {
         if let id = activeRegionID, let region = self.region(id) {
             let remaining = remainingTiles(limit: BackgroundTileTransfer.maxHandoff)
             stopActiveRegion()
-            setPaused(id, .background)
-            if !remaining.isEmpty {
+            // Nothing handed off once free space is below the reserve: the background transfer
+            // would write on without looking.
+            let roomy = (OfflinePlanner.freeBytes() ?? .max) >= Int64(OfflinePlanner.freeSpaceReserveBytes)
+            setPaused(id, roomy ? .background : .storageFull)
+            if roomy, !remaining.isEmpty {
                 let cellular = region.allowsCellular ?? model?.settings.offlineDownloadsOnCellular ?? false
                 BackgroundTileTransfer.shared.enqueue(remaining, allowsExpensive: cellular)
                 backgroundMode = .handedOff(tiles: remaining.count)
@@ -816,6 +913,7 @@ final class OfflineRegionService {
                     $0.message = nil
                 }
             }
+            self.heldTrailheads.removeAll()
             self.pump()
             self.pumpTrailheads()
         }

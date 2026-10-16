@@ -303,21 +303,40 @@ struct TrailheadTerrainList: View {
                         .foregroundStyle(Theme.textSecondary)
                 }
                 ForEach(maps) { map in
+                    let record = model.offline.trailhead(for: map.id)
                     HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(map.name)
-                                .foregroundStyle(Theme.textPrimary)
-                                .lineLimit(1)
-                            Text(TrailheadStatus.text(model.offline.trailhead(for: map.id)))
-                                .font(.caption)
-                                .foregroundStyle(Theme.textSecondary)
-                                .monospacedDigit()
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(map.name)
+                                    .foregroundStyle(Theme.textPrimary)
+                                    .lineLimit(1)
+                                Text(TrailheadStatus.text(record))
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.textSecondary)
+                                    .monospacedDigit()
+                            }
+                            Spacer(minLength: 8)
+                            TrailheadStatusChip(record: record)
                         }
-                        Spacer(minLength: 8)
-                        TrailheadStatusChip(record: model.offline.trailhead(for: map.id))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("trailheadRow")
+                        // Tiles that failed at the trailhead (weak signal) also come by themselves
+                        // once the network is back or on Wi-Fi.
+                        if let record, record.status == .failed || record.hasMissingTiles {
+                            Button {
+                                model.offline.retryTrailhead(mapID: map.id)
+                            } label: {
+                                Label("Retry Missing Tiles", systemImage: "arrow.clockwise")
+                                    .labelStyle(.iconOnly)
+                                    .font(.body.weight(.semibold))
+                                    .frame(width: Theme.minTapTarget, height: Theme.minTapTarget)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.borderless)
+                            .tint(Theme.accent)
+                            .accessibilityIdentifier("trailheadRetryButton")
+                        }
                     }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("trailheadRow")
                 }
             } footer: {
                 Text("Around each map you locate, MapMe keeps the terrain to locate nearby maps (50 km), the terrain beyond the sheet and its 3D view, on this iPhone. It is downloaded right after the map is located, or when you are next online, and deleted with the map.")
