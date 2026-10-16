@@ -64,8 +64,43 @@ struct OfflineRegion: Codable, Hashable, Identifiable, Sendable {
     /// Why it paused or failed, for the list ("Waiting for Wi-Fi", "Storage full").
     var message: String? = nil
     var completedAt: Date? = nil
+    // Added with the download engine (Optional: regions saved before decode without them).
+    /// Why a paused region is paused; decides whether it resumes by itself.
+    var pauseReason: OfflinePauseReason? = nil
+    /// The user agreed to download this region over mobile data.
+    var allowsCellular: Bool? = nil
+    /// `estimatedBytes` was measured from sample tiles (else the planner's table).
+    var estimateMeasured: Bool? = nil
 
     var fraction: Double { tilesTotal > 0 ? min(1, Double(tilesDone) / Double(tilesTotal)) : 0 }
+}
+
+/// Why a region download is paused. Every reason but `.user` clears by itself (the network comes
+/// back, Wi-Fi, Low Data Mode off, space freed, MapMe in front again) and the download resumes.
+enum OfflinePauseReason: String, Codable, Hashable, Sendable {
+    /// Paused by the user.
+    case user
+    /// No network.
+    case network
+    /// On mobile data, which this region may not use.
+    case wifi
+    /// Low Data Mode is on.
+    case lowDataMode
+    /// The device is out of space.
+    case storageFull
+    /// iOS stopped MapMe's background time; resumes when MapMe is in front.
+    case background
+
+    var label: String {
+        switch self {
+        case .user: return "Paused"
+        case .network: return "Waiting for network"
+        case .wifi: return "Waiting for Wi-Fi"
+        case .lowDataMode: return "Paused in Low Data Mode"
+        case .storageFull: return "Paused: storage full"
+        case .background: return "Paused in the background \u{00B7} resumes when you open MapMe"
+        }
+    }
 }
 
 /// Who keeps pinned terrain tiles on the device: a tile stays while any owner's ranges cover it.

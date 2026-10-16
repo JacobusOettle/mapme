@@ -232,6 +232,11 @@ struct SearchWiderSheet: View {
                 if network.isExpensive {
                     Label("You're on mobile data.", systemImage: "antenna.radiowaves.left.and.right")
                 }
+                if !network.isOnline {
+                    // Offline terrain (docs/design/explorer.md, Matching offline): what the search can use.
+                    Label(OfflineTerrainInventory.shared.searchNote, systemImage: "wifi.slash")
+                        .accessibilityIdentifier("offlineSearchNote")
+                }
             }
         }
         .disabled(position == nil)
