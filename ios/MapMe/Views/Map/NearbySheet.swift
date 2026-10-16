@@ -15,6 +15,8 @@ struct NearbySheet: View {
     @State private var renameText = ""
     @State private var showRename = false
     @State private var selectTick = 0
+    /// A global waypoint being renamed (instead of `renameTarget`, a map's own POI).
+    @State private var renameItem: UUID? = nil
 
     init(mapID: UUID, onSelect: @escaping (MapPOI) -> Void) {
         self.mapID = mapID
@@ -24,12 +26,16 @@ struct NearbySheet: View {
     var body: some View {
         let fix = model.location.location
         let here = fix.map { LatLon($0.coordinate) }
-        let all = model.library.map(id: mapID)?.pois ?? []
-        let rows = NearbyRow.rows(for: all.filter { category.includes($0) }, from: here)
+        let map = model.library.map(id: mapID)
+        let all = map?.pois ?? []
+        // Your waypoints and notes on and around this map (they are global, not the map's).
+        let items = GeoItemRow.rows(store: model.geoItems, near: map, from: here)
+        let rows = NearbyEntry.merged(pois: NearbyRow.rows(for: all.filter { category.includes($0) }, from: here),
+                                      items: items.filter { category.includes($0) })
         let units = model.settings.units
 
         VStack(spacing: 0) {
-            header(count: all.count, fix: fix, units: units)
+            header(count: all.count + items.count, fix: fix, units: units)
                 .padding(.horizontal, 20)
                 .padding(.top, 20)
                 .padding(.bottom, 12)
@@ -37,7 +43,7 @@ struct NearbySheet: View {
             filterChips
                 .padding(.bottom, 6)
 
-            if all.isEmpty {
+            if all.isEmpty && items.isEmpty {
                 emptyState(
                     title: "No points of interest",
                     symbol: "mappin.slash",
@@ -62,7 +68,10 @@ struct NearbySheet: View {
         .sensoryFeedback(.selection, trigger: category)
         .alert("Rename waypoint", isPresented: $showRename) {
             TextField("Name", text: $renameText)
-            Button("Cancel", role: .cancel) { renameTarget = nil }
+            Button("Cancel", role: .cancel) {
+                renameTarget = nil
+                renameItem = nil
+            }
             Button("Save") { commitRename() }
         }
     }
@@ -141,51 +150,15 @@ struct NearbySheet: View {
     }
 
     @MainActor
-    private func list(_ rows: [NearbyRow], units: DistanceUnits) -> some View {
+    private func list(_ entries: [NearbyEntry], units: DistanceUnits) -> some View {
         List {
             Section {
-                ForEach(rows) { row in
-                    Button {
-                        select(row.poi)
-                    } label: {
-                        NearbyRowView(row: row, units: units)
-                    }
-                    .buttonStyle(NearbyRowButtonStyle())
-                    .listRowBackground(Color.primary.opacity(0.07))
-                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        if row.poi.source == .user {
-                            Button(role: .destructive) {
-                                delete(row.poi)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                            Button {
-                                beginRename(row.poi)
-                            } label: {
-                                Label("Rename", systemImage: "pencil")
-                            }
-                            .tint(Color.blue)
-                        }
-                    }
-                    .contextMenu {
-                        Button {
-                            select(row.poi)
-                        } label: {
-                            Label("Show on Map", systemImage: "scope")
-                        }
-                        if row.poi.source == .user {
-                            Button {
-                                beginRename(row.poi)
-                            } label: {
-                                Label("Rename", systemImage: "pencil")
-                            }
-                            Button(role: .destructive) {
-                                delete(row.poi)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
+                ForEach(entries) { entry in
+                    switch entry {
+                    case .poi(let row):
+                        poiRow(row, units: units)
+                    case .item(let item):
+                        itemRow(item, units: units)
                     }
                 }
             }
@@ -194,6 +167,90 @@ struct NearbySheet: View {
         .scrollContentBackground(.hidden)
         .contentMargins(.top, 4, for: .scrollContent)
         .environment(\.defaultMinListRowHeight, 10)
+    }
+
+    /// One of your waypoints or notes: selected on the map; waypoints rename and delete here.
+    @MainActor
+    private func itemRow(_ item: GeoItemRow, units: DistanceUnits) -> some View {
+        Button {
+            selectItem(item.ref)
+        } label: {
+            GeoItemRowView(row: item, units: units)
+        }
+        .buttonStyle(NearbyRowButtonStyle())
+        .listRowBackground(Color.primary.opacity(0.07))
+        .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            if item.ref.kind == .waypoint {
+                Button(role: .destructive) {
+                    withAnimation(.snappy) { model.geoItems.deleteWaypoint(item.ref.id) }
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                Button {
+                    renameItem = item.ref.id
+                    renameText = item.name
+                    showRename = true
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                .tint(Color.blue)
+            }
+        }
+        .contextMenu {
+            Button {
+                selectItem(item.ref)
+            } label: {
+                Label("Show on Map", systemImage: "scope")
+            }
+        }
+        .accessibilityIdentifier("nearbyGeoItem")
+    }
+
+    @MainActor
+    private func poiRow(_ row: NearbyRow, units: DistanceUnits) -> some View {
+        Button {
+            select(row.poi)
+        } label: {
+            NearbyRowView(row: row, units: units)
+        }
+        .buttonStyle(NearbyRowButtonStyle())
+        .listRowBackground(Color.primary.opacity(0.07))
+        .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            if row.poi.source == .user {
+                Button(role: .destructive) {
+                    delete(row.poi)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                Button {
+                    beginRename(row.poi)
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                .tint(Color.blue)
+            }
+        }
+        .contextMenu {
+            Button {
+                select(row.poi)
+            } label: {
+                Label("Show on Map", systemImage: "scope")
+            }
+            if row.poi.source == .user {
+                Button {
+                    beginRename(row.poi)
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                Button(role: .destructive) {
+                    delete(row.poi)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            }
+        }
     }
 
     private func emptyState(title: String, symbol: String, text: String) -> some View {
@@ -222,6 +279,14 @@ struct NearbySheet: View {
         dismiss()
     }
 
+    /// A waypoint or note: the map screen selects it once the sheet is gone.
+    @MainActor
+    private func selectItem(_ ref: GeoItemRef) {
+        selectTick += 1
+        model.navigator.screen.selectionRequest = ref
+        dismiss()
+    }
+
     @MainActor
     private func delete(_ poi: MapPOI) {
         guard var doc = model.library.map(id: mapID) else { return }
@@ -240,8 +305,17 @@ struct NearbySheet: View {
 
     @MainActor
     private func commitRename() {
-        defer { renameTarget = nil }
+        defer {
+            renameTarget = nil
+            renameItem = nil
+        }
         let name = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let id = renameItem {
+            guard !name.isEmpty, var waypoint = model.geoItems.waypoint(id: id) else { return }
+            waypoint.name = name
+            model.geoItems.save(waypoint)
+            return
+        }
         guard let target = renameTarget, !name.isEmpty,
               var doc = model.library.map(id: mapID),
               let i = doc.pois.firstIndex(where: { $0.id == target.id })
@@ -291,6 +365,16 @@ enum NearbyFilter: String, CaseIterable, Identifiable {
         case .mine: return poi.source == .user
         }
     }
+
+    /// Your waypoints and notes: always under All and Mine; peaks and water by their symbol.
+    func includes(_ item: GeoItemRow) -> Bool {
+        switch self {
+        case .all, .mine: return true
+        case .peaks: return item.symbol == .peak
+        case .water: return item.symbol == .water
+        case .places: return false
+        }
+    }
 }
 
 /// One POI with its distance and bearing from the user (nil without a fix).
@@ -310,6 +394,131 @@ struct NearbyRow: Identifiable, Hashable {
                       bearing: Geodesy.bearing(here, poi.position))
         }
         return rows.sorted { ($0.distance ?? .infinity) < ($1.distance ?? .infinity) }
+    }
+}
+
+/// One of your waypoints or notes near a map, with its distance and bearing from you.
+struct GeoItemRow: Identifiable, Hashable {
+    let ref: GeoItemRef
+    let name: String
+    let subtitle: String
+    /// A waypoint's symbol (nil for a note).
+    let symbol: WaypointSymbol?
+    let hasPhoto: Bool
+    let position: LatLon
+    let distance: Double?
+    let bearing: Double?
+
+    var id: UUID { ref.id }
+
+    /// Items within this of a map's sheet count as near it.
+    static let marginM = 2000.0
+
+    /// Your waypoints and notes on or around `map` (its corners, grown by 2 km), nearest first.
+    @MainActor
+    static func rows(store: GeoItemStore, near map: MapDocument?, from here: LatLon?) -> [GeoItemRow] {
+        guard let map, let bounds = area(of: map) else { return [] }
+        var out: [GeoItemRow] = []
+        for w in store.waypoints(in: bounds) {
+            out.append(GeoItemRow(ref: GeoItemRef(kind: .waypoint, id: w.id), name: w.name,
+                                  subtitle: [w.symbol.label, RouteItemOrigin.text(w.origin)].joined(separator: " · "),
+                                  symbol: w.symbol, hasPhoto: false, position: w.position,
+                                  distance: here.map { Geodesy.distance($0, w.position) },
+                                  bearing: here.map { Geodesy.bearing($0, w.position) }))
+        }
+        for n in store.notes(in: bounds) {
+            out.append(GeoItemRow(ref: GeoItemRef(kind: .note, id: n.id), name: n.title,
+                                  subtitle: n.photo == nil ? "Note" : "Photo note",
+                                  symbol: nil, hasPhoto: n.photo != nil, position: n.position,
+                                  distance: here.map { Geodesy.distance($0, n.position) },
+                                  bearing: here.map { Geodesy.bearing($0, n.position) }))
+        }
+        guard here != nil else { return out }
+        return out.sorted { ($0.distance ?? .infinity) < ($1.distance ?? .infinity) }
+    }
+
+    /// The box around a located map's corners, grown by `marginM`.
+    static func area(of map: MapDocument) -> GeoBounds? {
+        guard let g = map.georef else { return nil }
+        let w = CGFloat(map.pixelWidth), h = CGFloat(map.pixelHeight)
+        let corners = [CGPoint(x: 0, y: 0), CGPoint(x: w, y: 0), CGPoint(x: w, y: h), CGPoint(x: 0, y: h)]
+            .map { g.latLon(forPixel: $0) }
+            .filter { $0.lat.isFinite && $0.lon.isFinite }
+        return GeoBounds.enclosing(corners)?.expanded(byMeters: marginM)
+    }
+}
+
+/// A Nearby row: one of the map's POIs, or one of your waypoints and notes.
+enum NearbyEntry: Identifiable {
+    case poi(NearbyRow)
+    case item(GeoItemRow)
+
+    var id: UUID {
+        switch self {
+        case .poi(let row): return row.id
+        case .item(let row): return row.id
+        }
+    }
+
+    var distance: Double? {
+        switch self {
+        case .poi(let row): return row.distance
+        case .item(let row): return row.distance
+        }
+    }
+
+    /// Both lists in one, nearest first (your items first without a position).
+    static func merged(pois: [NearbyRow], items: [GeoItemRow]) -> [NearbyEntry] {
+        let all = items.map(NearbyEntry.item) + pois.map(NearbyEntry.poi)
+        guard all.contains(where: { $0.distance != nil }) else { return all }
+        // A stable sort: equal distances keep the order above.
+        return all.enumerated().sorted { a, b in
+            let da = a.element.distance ?? .infinity, db = b.element.distance ?? .infinity
+            return da != db ? da < db : a.offset < b.offset
+        }.map(\.element)
+    }
+}
+
+/// A waypoint or note row in Nearby (as `NearbyRowView` for the map's POIs).
+struct GeoItemRowView: View {
+    let row: GeoItemRow
+    let units: DistanceUnits
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if let symbol = row.symbol {
+                WaypointGlyph(symbol: symbol, size: 38)
+            } else {
+                SymbolBadge(symbol: row.hasPhoto ? "photo.fill" : "note.text", color: Theme.note, size: 38)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.name)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(row.subtitle)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let distance = row.distance, let bearing = row.bearing {
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(distance < 25 ? "Here" : GeoFormat.distance(distance, units: units))
+                        .font(.system(.callout, design: .rounded).weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.primary)
+                    Text(Geodesy.compassPoint(bearing))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+                NearbyBearingArrow(bearing: bearing)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -371,7 +580,7 @@ struct NearbyRowView: View {
 
 /// Arrow pointing at a POI relative to where the phone is facing. Reads the heading
 /// itself so heading updates only redraw the arrows, not the whole list.
-private struct NearbyBearingArrow: View {
+struct NearbyBearingArrow: View {
     let bearing: Double
     @Environment(AppModel.self) private var model
 

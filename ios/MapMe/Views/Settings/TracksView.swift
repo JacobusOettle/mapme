@@ -88,12 +88,15 @@ private struct SettingsTrackSummary: Hashable {
     var minElevation: Double?
     var maxElevation: Double?
     var pointCount: Int
+    /// Moving time ÷ Tobler's time (`PaceModel.walkPace`), nil without moving.
+    var paceFactor: Double?
 
     init(_ track: Track) {
         distance = track.distance
         duration = track.duration
         ascent = track.ascent
         pointCount = track.points.count
+        paceFactor = PaceModel.walkPace(of: track.points).factor
         var lo = Double.infinity
         var hi = -Double.infinity
         for p in track.points {
@@ -167,6 +170,9 @@ struct SavedTrackDetailView: View {
     @State private var exportURL: URL? = nil
     @State private var exportFailed = false
     @State private var showDelete = false
+    /// The elevation profile: from the terrain model when there is terrain, GPS altitude otherwise.
+    @State private var profile: RouteProfile? = nil
+    @State private var savedAsRoute = false
 
     init(track: Track) {
         self.track = track
@@ -179,9 +185,13 @@ struct SavedTrackDetailView: View {
                 routeCard
                 if let details {
                     statsGrid(details.summary, units: units)
-                    if details.profile.count >= 2 {
-                        profileCard(details, units: units)
+                    if let profile, profile.hasElevation {
+                        profileCard(profile, units: units)
+                    } else if profile == nil, details.profile.count >= 2 {
+                        ProgressView()
+                            .frame(maxWidth: .infinity, minHeight: 80)
                     }
+                    saveAsRouteButton
                 } else {
                     ProgressView()
                         .frame(maxWidth: .infinity, minHeight: 120)
@@ -244,6 +254,28 @@ struct SavedTrackDetailView: View {
             let t = track
             details = await Task.detached(priority: .userInitiated) { SettingsTrackDetails(t) }.value
         }
+        if profile == nil {
+            profile = await RoutePlanner.trackProfile(of: track.points, terrain: model.terrain)
+        }
+    }
+
+    /// Keeps the track as a route: follow it again, see it on every map.
+    private var saveAsRouteButton: some View {
+        Button {
+            model.geoItems.save(track.asRoute())
+            withAnimation(.snappy) { savedAsRoute = true }
+        } label: {
+            Label(savedAsRoute ? "Saved to your routes" : "Save as Route",
+                  systemImage: savedAsRoute ? "checkmark.circle.fill" : "point.topleft.down.to.point.bottomright.curvepath")
+                .font(.body.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .foregroundStyle(Theme.route)
+                .background(Theme.route.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(savedAsRoute || track.points.count < 2)
+        .accessibilityIdentifier("saveTrackAsRouteButton")
     }
 
     private var routeCard: some View {
@@ -276,48 +308,23 @@ struct SavedTrackDetailView: View {
             TrackStatTile(title: "Ascent", value: GeoFormat.elevation(s.ascent, units: units), symbol: "arrow.up.right")
             TrackStatTile(title: "Avg speed", value: s.averageSpeed.map { GeoFormat.speed($0, units: units) } ?? "–", symbol: "speedometer")
             TrackStatTile(title: "Highest", value: s.maxElevation.map { GeoFormat.elevation($0, units: units) } ?? "–", symbol: "mountain.2.fill")
-            TrackStatTile(title: "Points", value: "\(s.pointCount)", symbol: "point.3.connected.trianglepath.dotted")
+            TrackStatTile(title: "Pace", value: s.paceFactor.map { String(format: "%.2f× Tobler", $0) } ?? "–", symbol: "figure.hiking")
         }
     }
 
-    private func profileCard(_ d: SettingsTrackDetails, units: DistanceUnits) -> some View {
-        let toX = units == .metric ? 1.0 / 1000 : 1.0 / 1609.344
-        let toY = units == .metric ? 1.0 : 3.28084
-        let lo = (d.summary.minElevation ?? 0) * toY
-        let hi = (d.summary.maxElevation ?? 0) * toY
-        let pad = max(5, (hi - lo) * 0.12)
-        let base = lo - pad
-        let xUnit: String = units == .metric ? "km" : "mi"
-        let yUnit: String = units == .metric ? "m" : "ft"
-        return VStack(alignment: .leading, spacing: 10) {
+    private func profileCard(_ profile: RouteProfile, units: DistanceUnits) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
             Text("Elevation")
                 .font(.headline)
                 .foregroundStyle(Theme.textPrimary)
-            Chart(d.profile) { p in
-                AreaMark(
-                    x: .value("Distance", p.distance * toX),
-                    yStart: .value("Base", base),
-                    yEnd: .value("Elevation", p.elevation * toY)
-                )
-                .foregroundStyle(LinearGradient(colors: [Theme.track.opacity(0.45), Theme.track.opacity(0.02)],
-                                                startPoint: .top, endPoint: .bottom))
-                .interpolationMethod(.catmullRom)
-                LineMark(
-                    x: .value("Distance", p.distance * toX),
-                    y: .value("Elevation", p.elevation * toY)
-                )
-                .foregroundStyle(Theme.track)
-                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                .interpolationMethod(.catmullRom)
-            }
-            .chartYScale(domain: base...(hi + pad))
-            .chartXAxisLabel(xUnit)
-            .chartYAxisLabel(yUnit)
-            .frame(height: 170)
+            ElevationProfileView(profile: profile.profile, source: profile.source, units: units, color: Theme.track,
+                                 height: 170)
         }
         .padding(14)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: Theme.corner, style: .continuous).stroke(Theme.stroke, lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("trackProfile")
     }
 }
 

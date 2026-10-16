@@ -17,12 +17,18 @@ struct TrailStatsPanel: View {
 
     @GestureState(resetTransaction: Transaction(animation: .spring(response: 0.35, dampingFraction: 0.85)))
     private var drag: CGFloat = 0
+    @Environment(AppModel.self) private var model
 
     var body: some View {
         VStack(spacing: 0) {
             header
             if expanded {
-                TrailStatsDetails(map: map, maxHeight: maxDetailsHeight, onShowAll: onShowAll, onSelectPOI: onSelectPOI)
+                TrailStatsDetails(map: map, maxHeight: maxDetailsHeight, onShowAll: onShowAll, onSelectPOI: onSelectPOI,
+                                  onSelectItem: { ref in
+                                      // Your waypoints and notes are selected by the map screen.
+                                      setExpanded(false)
+                                      model.navigator.screen.selectionRequest = ref
+                                  })
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
         }
@@ -214,6 +220,7 @@ private struct TrailStatsDetails: View {
     var maxHeight: CGFloat
     var onShowAll: () -> Void
     var onSelectPOI: (MapPOI) -> Void
+    var onSelectItem: (GeoItemRef) -> Void
 
     var body: some View {
         ViewThatFits(in: .vertical) {
@@ -233,8 +240,9 @@ private struct TrailStatsDetails: View {
                 .frame(height: 0.5)
                 .padding(.top, 12)
             LiveDetailGrid()
+            TrailProfileSection()
             CoordinateRow()
-            NearbyPreview(map: map, onShowAll: onShowAll, onSelectPOI: onSelectPOI)
+            NearbyPreview(map: map, onShowAll: onShowAll, onSelectPOI: onSelectPOI, onSelectItem: onSelectItem)
         }
     }
 }
@@ -338,17 +346,59 @@ private struct CoordinateRow: View {
     }
 }
 
-/// The five nearest points of interest and "Show All".
+/// The elevation profile of the trail you walked this session (live): from the terrain model when
+/// there is terrain, GPS altitude otherwise, and it says which (docs/design/explorer.md, Profile).
+@MainActor
+private struct TrailProfileSection: View {
+    @Environment(AppModel.self) private var model
+    @State private var result: RouteProfile?
+
+    var body: some View {
+        let points = model.tracks.current.points
+        // Worked out again every ten new points (about a minute of walking), not on every fix.
+        let bucket = points.count / 10
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Elevation")
+                .font(.headline)
+                .foregroundStyle(.primary)
+            if let result, points.count >= 2, result.hasElevation {
+                ElevationProfileView(profile: result.profile, source: result.source, units: model.settings.units,
+                                     color: Theme.track, height: 110)
+            } else {
+                Text(points.count >= 2 && result != nil
+                     ? "No elevation for this trail yet: the terrain isn't on your iPhone and GPS gave no altitude."
+                     : "Your trail's elevation profile appears as you walk.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("trailProfile")
+        .task(id: bucket) {
+            guard points.count >= 2 else {
+                result = nil
+                return
+            }
+            result = await RoutePlanner.trackProfile(of: points, terrain: model.terrain)
+        }
+    }
+}
+
+/// The five nearest points of interest (with your waypoints and notes) and "Show All".
 @MainActor
 private struct NearbyPreview: View {
     let map: MapDocument
     var onShowAll: () -> Void
     var onSelectPOI: (MapPOI) -> Void
+    var onSelectItem: (GeoItemRef) -> Void
     @Environment(AppModel.self) private var model
 
     var body: some View {
         let here = model.location.location.map { LatLon($0.coordinate) }
-        let rows = Array(NearbyRow.rows(for: map.pois, from: here).prefix(5))
+        let entries = Array(NearbyEntry.merged(pois: NearbyRow.rows(for: map.pois, from: here),
+                                               items: GeoItemRow.rows(store: model.geoItems, near: map, from: here))
+            .prefix(5))
         let units = model.settings.units
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
@@ -370,21 +420,31 @@ private struct NearbyPreview: View {
                 .buttonStyle(PressScaleButtonStyle(scale: 0.95))
                 .accessibilityIdentifier("nearbyButton")
             }
-            if rows.isEmpty {
+            if entries.isEmpty {
                 Text("Names read off the map, OpenStreetMap places and the waypoints you drop appear here.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 VStack(spacing: 0) {
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                        Button {
-                            onSelectPOI(row.poi)
-                        } label: {
-                            NearbyRowView(row: row, units: units)
+                    ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                        switch entry {
+                        case .poi(let row):
+                            Button {
+                                onSelectPOI(row.poi)
+                            } label: {
+                                NearbyRowView(row: row, units: units)
+                            }
+                            .buttonStyle(NearbyRowButtonStyle())
+                        case .item(let item):
+                            Button {
+                                onSelectItem(item.ref)
+                            } label: {
+                                GeoItemRowView(row: item, units: units)
+                            }
+                            .buttonStyle(NearbyRowButtonStyle())
                         }
-                        .buttonStyle(NearbyRowButtonStyle())
-                        if index < rows.count - 1 {
+                        if index < entries.count - 1 {
                             Rectangle()
                                 .fill(Color.primary.opacity(0.1))
                                 .frame(height: 0.5)
