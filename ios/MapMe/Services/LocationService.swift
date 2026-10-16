@@ -104,7 +104,7 @@ final class LocationService: NSObject {
         if isAuthorized(manager.authorizationStatus) {
             manager.startUpdatingLocation()
         }
-        if CLLocationManager.headingAvailable() {
+        if CLLocationManager.headingAvailable(), powerProfile.headingUpdates {
             manager.startUpdatingHeading()
         }
     }
@@ -141,9 +141,28 @@ final class LocationService: NSObject {
     var backgroundUpdateReasons: Set<String> { backgroundReasons }
 
     /// Applies the battery saver's CoreLocation settings (accuracy, distance filter, heading
-    /// filter). Filled in by the battery saver (docs/design/explorer.md, Battery saver).
+    /// filter, heading updates on or off) to the running manager (docs/design/explorer.md,
+    /// Battery saver). `pausesLocationUpdatesAutomatically` stays false whatever the profile: iOS
+    /// pausing would cut a recorded track.
     func apply(_ profile: LocationPowerProfile) {
+        let previous = powerProfile
         powerProfile = profile
+        guard let manager else { return }
+        Self.configure(manager, with: profile)
+        guard running, profile.headingUpdates != previous.headingUpdates, CLLocationManager.headingAvailable() else { return }
+        if profile.headingUpdates {
+            manager.startUpdatingHeading()
+        } else {
+            manager.stopUpdatingHeading()
+        }
+    }
+
+    /// Sets a manager's accuracy and filters for a power profile (only what differs, so an
+    /// unchanged setting leaves CoreLocation alone).
+    static func configure(_ manager: CLLocationManager, with profile: LocationPowerProfile) {
+        if manager.desiredAccuracy != profile.desiredAccuracy { manager.desiredAccuracy = profile.desiredAccuracy }
+        if manager.distanceFilter != profile.distanceFilter { manager.distanceFilter = profile.distanceFilter }
+        if manager.headingFilter != profile.headingFilter { manager.headingFilter = profile.headingFilter }
     }
 
     private func applyBackgroundUpdates(_ enabled: Bool) {
