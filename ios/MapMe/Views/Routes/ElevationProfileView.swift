@@ -52,7 +52,7 @@ struct ElevationProfileView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "mountain.2")
                         .foregroundStyle(.secondary)
-                    Text(ProfileSource.none.caption)
+                    Text(ProfileSource.distanceOnly.caption)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

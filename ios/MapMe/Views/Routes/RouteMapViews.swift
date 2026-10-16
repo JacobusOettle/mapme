@@ -88,11 +88,18 @@ struct RouteToolsButton: View {
         context.sheet = MapPresentation { AnyView(RoutesListSheet(context: ctx)) }
     }
 
-    /// A GPX import's summary, once, on this screen.
+    /// A GPX import's summary, once, on this screen: after any sheet that is closing has gone (the
+    /// routes list's Import closes it as the file arrives).
     private func presentImportSummary() {
-        guard context.sheet == nil, context.cover == nil, let summary = model.gpx.takeSummaryToPresent() else { return }
-        let id = summary.id
-        context.sheet = MapPresentation { AnyView(GPXImportSummarySheet(summaryID: id)) }
+        guard model.gpx.lastImport != nil else { return }
+        let context = self.context
+        let model = self.model
+        Task { @MainActor in
+            await PresentationGate.settled()
+            guard context.sheet == nil, context.cover == nil, let summary = model.gpx.takeSummaryToPresent() else { return }
+            let id = summary.id
+            context.sheet = MapPresentation { AnyView(GPXImportSummarySheet(summaryID: id)) }
+        }
     }
 
     /// An item picked in Nearby, a list or a summary: selected here.

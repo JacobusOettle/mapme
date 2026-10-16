@@ -81,7 +81,10 @@ struct RouteLine: Sendable {
             let dx = b.x - a.x, dy = b.y - a.y
             let len2 = dx * dx + dy * dy
             var t = 0.0
-            if len2 > 0 { t = min(max(-(a.x * dx + a.y * dy) / len2, 0), 1) }
+            if len2 > 0 {
+                let projection: Double = -(a.x * dx + a.y * dy) / len2
+                t = min(max(projection, 0), 1)
+            }
             let x = a.x + t * dx, y = a.y + t * dy
             return (x * x + y * y, t)
         }
@@ -158,9 +161,10 @@ enum RouteGeometry {
             var worstD2: CGFloat = 0
             for i in (s + 1)..<e {
                 let p = points[i]
-                var d2: CGFloat
+                let d2: CGFloat
                 if len2 > 0 {
-                    let t = min(max(((p.x - a.x) * dx + (p.y - a.y) * dy) / len2, 0), 1)
+                    let projection: CGFloat = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2
+                    let t = min(max(projection, 0), 1)
                     let x = a.x + t * dx - p.x, y = a.y + t * dy - p.y
                     d2 = x * x + y * y
                 } else {
@@ -189,7 +193,10 @@ enum RouteGeometry {
         let dx = b.x - a.x, dy = b.y - a.y
         let len2 = dx * dx + dy * dy
         var t: CGFloat = 0
-        if len2 > 0 { t = min(max(((p.x - a.x) * dx + (p.y - a.y) * dy) / len2, 0), 1) }
+        if len2 > 0 {
+            let projection: CGFloat = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2
+            t = min(max(projection, 0), 1)
+        }
         return (hypot(a.x + t * dx - p.x, a.y + t * dy - p.y), t)
     }
 

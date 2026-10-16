@@ -191,8 +191,14 @@ private struct GPXImportPresenter: ViewModifier {
     }
 
     private func present() {
-        guard shown == nil, let summary = model.gpx.takeSummaryToPresent() else { return }
-        shown = summary
+        guard shown == nil, model.gpx.lastImport != nil else { return }
+        let model = self.model
+        let shown = $shown
+        Task { @MainActor in
+            await PresentationGate.settled()
+            guard shown.wrappedValue == nil, let summary = model.gpx.takeSummaryToPresent() else { return }
+            shown.wrappedValue = summary
+        }
     }
 }
 

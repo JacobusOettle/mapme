@@ -39,13 +39,13 @@ struct SunTimes: Equatable, Sendable {
         let lon = position.lon
 
         var out = SunTimes()
-        let rise = event(midnight: midnight, lat: lat, lon: lon, altitude: sunriseAltitude, sign: -1)
-        let set = event(midnight: midnight, lat: lat, lon: lon, altitude: sunriseAltitude, sign: 1)
-        out.sunrise = rise.date
-        out.sunset = set.date
+        let rising = event(midnight: midnight, lat: lat, lon: lon, altitude: sunriseAltitude, sign: -1)
+        let setting = event(midnight: midnight, lat: lat, lon: lon, altitude: sunriseAltitude, sign: 1)
+        out.sunrise = rising.date
+        out.sunset = setting.date
         // The sun never reaches the altitude (cos HA > 1): polar night; never sinks to it: polar day.
         if out.sunrise == nil || out.sunset == nil {
-            let state = rise.date == nil ? rise.state : set.state
+            let state = rising.date == nil ? rising.state : setting.state
             out.isPolarDay = state == .alwaysAbove
             out.isPolarNight = state == .alwaysBelow
         }
@@ -77,8 +77,11 @@ struct SunTimes: Equatable, Sendable {
             let t = midnight.addingTimeInterval(minutes * 60)
             let sun = solarPosition(at: t)
             let noon = 720 - 4 * lon - sun.equationOfTimeMinutes
-            let phi = lat * .pi / 180
-            let cosHA = (sin(altitude * .pi / 180) - sin(phi) * sin(sun.declination)) / (cos(phi) * cos(sun.declination))
+            let phi: Double = lat * .pi / 180
+            let h0: Double = altitude * .pi / 180
+            let numerator: Double = sin(h0) - sin(phi) * sin(sun.declination)
+            let denominator: Double = cos(phi) * cos(sun.declination)
+            let cosHA = numerator / denominator
             if cosHA > 1 { return (nil, .alwaysBelow) }
             if cosHA < -1 { return (nil, .alwaysAbove) }
             let hourAngle = acos(cosHA) * 180 / .pi
@@ -89,26 +92,38 @@ struct SunTimes: Equatable, Sendable {
 
     /// The sun's declination (radians) and the equation of time (minutes) at `date`.
     private static func solarPosition(at date: Date) -> (declination: Double, equationOfTimeMinutes: Double) {
-        let julianDay = date.timeIntervalSince1970 / 86_400 + 2_440_587.5
-        let t = (julianDay - 2_451_545) / 36_525
-        let deg = Double.pi / 180
-        var l0 = (280.46646 + t * (36_000.76983 + t * 0.0003032)).truncatingRemainder(dividingBy: 360)
+        // Kept in small typed steps: long mixed expressions are slow for the type checker.
+        let julianDay: Double = date.timeIntervalSince1970 / 86_400 + 2_440_587.5
+        let t: Double = (julianDay - 2_451_545) / 36_525
+        let deg: Double = Double.pi / 180
+        // Geometric mean longitude and anomaly of the sun, eccentricity of Earth's orbit.
+        let l0Raw: Double = 280.46646 + t * (36_000.76983 + t * 0.0003032)
+        var l0: Double = l0Raw.truncatingRemainder(dividingBy: 360)
         if l0 < 0 { l0 += 360 }
-        let m = 357.52911 + t * (35_999.05029 - 0.0001537 * t)
-        let e = 0.016708634 - t * (0.000042037 + 0.0000001267 * t)
-        let mr = m * deg
-        let center = sin(mr) * (1.914602 - t * (0.004817 + 0.000014 * t)) + sin(2 * mr) * (0.019993 - 0.000101 * t)
-            + sin(3 * mr) * 0.000289
-        let trueLongitude = l0 + center
-        let omega = 125.04 - 1934.136 * t
-        let apparentLongitude = trueLongitude - 0.00569 - 0.00478 * sin(omega * deg)
-        let meanObliquity = 23 + (26 + (21.448 - t * (46.815 + t * (0.00059 - t * 0.001813))) / 60) / 60
-        let obliquity = meanObliquity + 0.00256 * cos(omega * deg)
-        let declination = asin(sin(obliquity * deg) * sin(apparentLongitude * deg))
-        let y = pow(tan(obliquity * deg / 2), 2)
-        let l0r = l0 * deg
-        let eq = y * sin(2 * l0r) - 2 * e * sin(mr) + 4 * e * y * sin(mr) * cos(2 * l0r)
-            - 0.5 * y * y * sin(4 * l0r) - 1.25 * e * e * sin(2 * mr)
+        let m: Double = 357.52911 + t * (35_999.05029 - 0.0001537 * t)
+        let e: Double = 0.016708634 - t * (0.000042037 + 0.0000001267 * t)
+        let mr: Double = m * deg
+        // Equation of centre, true and apparent longitude.
+        let c1: Double = sin(mr) * (1.914602 - t * (0.004817 + 0.000014 * t))
+        let c2: Double = sin(2 * mr) * (0.019993 - 0.000101 * t)
+        let c3: Double = sin(3 * mr) * 0.000289
+        let trueLongitude: Double = l0 + c1 + c2 + c3
+        let omega: Double = 125.04 - 1934.136 * t
+        let apparentLongitude: Double = trueLongitude - 0.00569 - 0.00478 * sin(omega * deg)
+        // Obliquity of the ecliptic, declination.
+        let arcSeconds: Double = 21.448 - t * (46.815 + t * (0.00059 - t * 0.001813))
+        let meanObliquity: Double = 23 + (26 + arcSeconds / 60) / 60
+        let obliquity: Double = meanObliquity + 0.00256 * cos(omega * deg)
+        let declination: Double = asin(sin(obliquity * deg) * sin(apparentLongitude * deg))
+        // Equation of time (radians, then minutes).
+        let y: Double = pow(tan(obliquity * deg / 2), 2)
+        let l0r: Double = l0 * deg
+        let q1: Double = y * sin(2 * l0r)
+        let q2: Double = 2 * e * sin(mr)
+        let q3: Double = 4 * e * y * sin(mr) * cos(2 * l0r)
+        let q4: Double = 0.5 * y * y * sin(4 * l0r)
+        let q5: Double = 1.25 * e * e * sin(2 * mr)
+        let eq: Double = q1 - q2 + q3 - q4 - q5
         return (declination, 4 * eq / deg)
     }
 }
@@ -214,7 +229,9 @@ enum PaceModel {
     /// Naismith's rule, the hill walkers' other rule of thumb: 5 km/h on the map plus an hour per
     /// 600 m of ascent. Shown next to Tobler's time as a second opinion.
     static func naismithTime(distanceM: Double, ascentM: Double) -> TimeInterval {
-        max(0, distanceM) / (5000.0 / 3600) + max(0, ascentM) / 600 * 3600
+        let walking: TimeInterval = max(0, distanceM) / (5000.0 / 3600)
+        let climbing: TimeInterval = max(0, ascentM) / 600 * 3600
+        return walking + climbing
     }
 
     /// Moving time along a profile at `factor` × Tobler's time (1 = the model, 1.2 = 20 %

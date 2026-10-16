@@ -9,7 +9,7 @@ enum ProfileSource: Equatable, Sendable {
     /// Your phone's GPS altitude (a recorded track).
     case gps
     /// No elevations: the distance alone.
-    case none
+    case distanceOnly
 
     /// "Elevation from the terrain model", for the chart's footnote.
     var caption: String {
@@ -17,7 +17,7 @@ enum ProfileSource: Equatable, Sendable {
         case .terrain: return "Elevation from the terrain model"
         case .file: return "Elevation from the GPX file"
         case .gps: return "Elevation from GPS altitude"
-        case .none: return "Elevation needs terrain (offline)"
+        case .distanceOnly: return "Elevation needs terrain (offline)"
         }
     }
 }
@@ -27,7 +27,7 @@ struct RouteProfile: Equatable, Sendable {
     var profile: ElevationProfile
     var source: ProfileSource
 
-    var hasElevation: Bool { source != .none && profile.samples.contains { $0.elevationM != nil } }
+    var hasElevation: Bool { source != .distanceOnly && profile.samples.contains { $0.elevationM != nil } }
 }
 
 /// Route statistics and elevation profiles from the terrain (`mm_terrain_profile` through
@@ -70,7 +70,7 @@ enum RoutePlanner {
         if elevations.compactMap({ $0 }).count >= 2, let measured = measuredProfile(points, elevations: elevations) {
             return RouteProfile(profile: measured, source: .file)
         }
-        return RouteProfile(profile: fromTerrain, source: .none)
+        return RouteProfile(profile: fromTerrain, source: .distanceOnly)
     }
 
     /// The profile of a recorded walk: the terrain's when there is terrain (GPS altitude wanders),
@@ -85,7 +85,7 @@ enum RoutePlanner {
         if let measured = measuredProfile(line, elevations: points.map(\.altitude), maxSamples: trailSamples) {
             return RouteProfile(profile: measured, source: .gps)
         }
-        return RouteProfile(profile: distanceOnlyProfile(line), source: .none)
+        return RouteProfile(profile: distanceOnlyProfile(line), source: .distanceOnly)
     }
 
     /// The distance alone: no elevations.
