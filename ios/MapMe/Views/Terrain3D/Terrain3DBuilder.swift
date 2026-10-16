@@ -481,7 +481,7 @@ final class Terrain3DSession {
     /// and builds again.
     func retry(app: AppModel) {
         if NetworkPathObserver.isOnlineNow {
-            app.terrain.store?.clearMissing()
+            app.terrain.terrainDidArrive()
         }
         attempt += 1
     }

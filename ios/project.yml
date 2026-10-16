@@ -64,6 +64,8 @@ targets:
         NSLocationAlwaysAndWhenInUseUsageDescription: MapMe keeps recording your track and following your route while the screen is off.
         NSCameraUsageDescription: Take a photo of a paper map to use it in MapMe, or a photo to pin as a note on your map.
         NSPhotoLibraryUsageDescription: Import a map image or screenshot, or add a photo from your library as a note on your map.
+        # The share sheet's "Save Image" for a note's photo.
+        NSPhotoLibraryAddUsageDescription: Save a note's photo to your library when you share it.
         ITSAppUsesNonExemptEncryption: false
         LSSupportsOpeningDocumentsInPlace: false
         UIFileSharingEnabled: true

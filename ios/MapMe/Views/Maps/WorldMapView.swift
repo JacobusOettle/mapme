@@ -8,7 +8,9 @@ import UIKit
 //   • a terrain overlay (contours + hillshade drawn by the core from the DEM, so it works offline
 //     from the terrain on the device where Apple's base map is blank),
 //   • each located map's footprint with its thumbnail drawn in and an accent outline,
-//   • routes, the recorded track, waypoints and notes (clustered), offline regions (dashed), you.
+//   • routes, the recorded track, waypoints and notes (clustered), offline regions (dashed), you,
+//   • the places read off your maps and fetched for them (POIs, clustered), so a hiker who walked
+//     beyond every sheet still sees the huts, peaks and water around.
 
 /// What the world view's map shows; the coordinator rebuilds a group of overlays only when its
 /// key changes.
@@ -21,6 +23,10 @@ struct WorldMapState: Equatable {
     /// The recorded track's length and last point (redrawn on its own while you record).
     var trackKey: Int
     var regionsKey: Int
+    /// The located maps' POIs (their count per map).
+    var poisKey: Int
+    /// Settings → POIs on maps.
+    var showsPOIs: Bool
     var showsTerrain: Bool
     var showsRegions: Bool
     var showsItems: Bool
@@ -92,6 +98,7 @@ final class WorldMapCoordinator: NSObject, MKMapViewDelegate, UIGestureRecognize
     private var routeLines: [WorldRouteLine] = []
     private var trackLine: WorldRouteLine?
     private var itemPins: [WorldPinAnnotation] = []
+    private var poiPins: [WorldPinAnnotation] = []
     private var regionShapes: [WorldRegionPolygon] = []
     private let userPin = WorldPinAnnotation(kind: .user, id: "you", title: "You",
                                              coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0))
@@ -102,6 +109,8 @@ final class WorldMapCoordinator: NSObject, MKMapViewDelegate, UIGestureRecognize
     private var lastFocus: UUID?
     private var didFrameInitially = false
     private var thumbnailTasks: [UUID: Task<Void, Never>] = [:]
+    /// Terrain arriving later (a region finished, the network is back): the overlay loads again.
+    private var arrival: TerrainArrivalObserver?
 
     init(model: AppModel) {
         self.model = model
@@ -123,6 +132,14 @@ final class WorldMapCoordinator: NSObject, MKMapViewDelegate, UIGestureRecognize
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         tap.delegate = self
         view.addGestureRecognizer(tap)
+        if let model {
+            arrival = TerrainArrivalObserver(model.terrain) { [weak self, weak view] in
+                guard let self, let view, let terrain = self.terrain,
+                      let renderer = view.renderer(for: terrain) as? MKTileOverlayRenderer
+                else { return }
+                renderer.reloadData()
+            }
+        }
     }
 
     // MARK: - Updates
@@ -149,6 +166,9 @@ final class WorldMapCoordinator: NSObject, MKMapViewDelegate, UIGestureRecognize
         }
         if old?.itemsKey != new.itemsKey || old?.showsItems != new.showsItems {
             rebuildItems(view, shown: new.showsItems)
+        }
+        if old?.poisKey != new.poisKey || old?.showsItems != new.showsItems || old?.showsPOIs != new.showsPOIs {
+            rebuildPOIs(view, shown: new.showsItems && new.showsPOIs)
         }
         if old?.trackKey != new.trackKey || old?.showsItems != new.showsItems {
             rebuildTrack(view, shown: new.showsItems)
@@ -294,6 +314,26 @@ final class WorldMapCoordinator: NSObject, MKMapViewDelegate, UIGestureRecognize
         view.addAnnotations(itemPins)
     }
 
+    /// The places of your located maps (names read off them, OpenStreetMap), each place once: the
+    /// same name within 150 m on two sheets is one pin (`OtherMapsPOIOverlay.DuplicateIndex`).
+    private func rebuildPOIs(_ view: MKMapView, shown: Bool) {
+        guard let model else { return }
+        view.removeAnnotations(poiPins)
+        poiPins = []
+        guard shown else { return }
+        var seen = OtherMapsPOIOverlay.DuplicateIndex()
+        for map in model.library.maps where map.isGeoreferenced {
+            for poi in map.pois where poi.source != .user && poi.kind != .waypoint {
+                guard poi.position.lat.isFinite, poi.position.lon.isFinite, !seen.contains(poi) else { continue }
+                seen.insert(poi)
+                poiPins.append(WorldPinAnnotation(kind: .poi(poi.kind.symbolName), id: poi.id.uuidString,
+                                                  title: poi.name.isEmpty ? nil : poi.name,
+                                                  coordinate: poi.position.coordinate))
+            }
+        }
+        view.addAnnotations(poiPins)
+    }
+
     /// Your recorded track (pink, as on the map).
     private func rebuildTrack(_ view: MKMapView, shown: Bool) {
         guard let model else { return }
@@ -388,7 +428,15 @@ final class WorldMapCoordinator: NSObject, MKMapViewDelegate, UIGestureRecognize
         if let cluster = annotation as? MKClusterAnnotation {
             let view = mapView.dequeueReusableAnnotationView(
                 withIdentifier: MKMapViewDefaultClusterAnnotationViewReuseIdentifier, for: cluster)
-            (view as? MKMarkerAnnotationView)?.markerTintColor = Theme.uiNote
+            // Clusters form per identifier: all places (yellow, as on the map) or all your items.
+            let places = cluster.memberAnnotations.contains { member in
+                guard let pin = member as? WorldPinAnnotation, case .poi = pin.kind else { return false }
+                return true
+            }
+            if let marker = view as? MKMarkerAnnotationView {
+                marker.markerTintColor = places ? Theme.uiPOI.withAlphaComponent(0.9) : Theme.uiNote
+                marker.glyphTintColor = places ? .black : .white
+            }
             return view
         }
         guard let pin = annotation as? WorldPinAnnotation else { return nil }
@@ -409,6 +457,7 @@ final class WorldMapCoordinator: NSObject, MKMapViewDelegate, UIGestureRecognize
             let view = mapView.dequeueReusableAnnotationView(withIdentifier: "item", for: pin)
             if let marker = view as? MKMarkerAnnotationView {
                 marker.markerTintColor = Theme.uiUserRed
+                marker.glyphTintColor = .white
                 marker.glyphImage = UIImage(systemName: symbol)
                 marker.clusteringIdentifier = "geoItems"
                 marker.displayPriority = .defaultHigh
@@ -419,8 +468,21 @@ final class WorldMapCoordinator: NSObject, MKMapViewDelegate, UIGestureRecognize
             let view = mapView.dequeueReusableAnnotationView(withIdentifier: "item", for: pin)
             if let marker = view as? MKMarkerAnnotationView {
                 marker.markerTintColor = Theme.uiNote
+                marker.glyphTintColor = .white
                 marker.glyphImage = UIImage(systemName: hasPhoto ? "photo.fill" : "note.text")
                 marker.clusteringIdentifier = "geoItems"
+                marker.displayPriority = .defaultLow
+                marker.titleVisibility = .adaptive
+            }
+            return view
+        case .poi(let symbol):
+            let view = mapView.dequeueReusableAnnotationView(withIdentifier: "item", for: pin)
+            if let marker = view as? MKMarkerAnnotationView {
+                marker.markerTintColor = Theme.uiPOI.withAlphaComponent(0.9)
+                marker.glyphTintColor = .black
+                marker.glyphImage = UIImage(systemName: symbol)
+                // Their own clusters: a valley's dozen places never hide your waypoints.
+                marker.clusteringIdentifier = "mapPOIs"
                 marker.displayPriority = .defaultLow
                 marker.titleVisibility = .adaptive
             }
@@ -611,7 +673,7 @@ final class WorldRegionPolygon: MKPolygon {
     }
 }
 
-/// A pin on the world view: you, a map's name, a waypoint or a note.
+/// A pin on the world view: you, a map's name, a waypoint, a note or a place on one of your maps.
 final class WorldPinAnnotation: NSObject, MKAnnotation {
     enum Kind: Equatable {
         case user
@@ -619,6 +681,8 @@ final class WorldPinAnnotation: NSObject, MKAnnotation {
         /// The waypoint's SF Symbol.
         case waypoint(String)
         case note(hasPhoto: Bool)
+        /// A place read off one of your maps or fetched for it (its kind's SF Symbol).
+        case poi(String)
     }
 
     let kind: Kind

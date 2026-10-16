@@ -165,6 +165,8 @@ final class BackgroundTileTransfer: NSObject, URLSessionDownloadDelegate, @unche
     private var pinned: PinnedTerrainStore = .shared
     private var _session: URLSession?
     private var delivered = 0
+    /// `deliverEvents` calls waiting for iOS to say every event is in.
+    private var eventWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     /// Called (main queue) when iOS has delivered every event of the session.
     var onEventsFinished: (() -> Void)?
 
@@ -191,6 +193,26 @@ final class BackgroundTileTransfer: NSObject, URLSessionDownloadDelegate, @unche
     func reconnectIfPending() {
         guard UserDefaults.standard.bool(forKey: Self.pendingKey) else { return }
         _ = session
+    }
+
+    /// iOS woke MapMe for this session's events (`MapMeApp`'s `.backgroundTask(.urlSession)`):
+    /// reconnects the session, so the finished files are moved into the pinned store, and returns
+    /// once iOS says every event is in (or after `timeout`); SwiftUI then tells iOS it may suspend
+    /// MapMe again.
+    func deliverEvents(timeout: TimeInterval = 20) async {
+        let id = UUID()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.withLock { eventWaiters[id] = continuation }
+            _ = session
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) { [weak self] in
+                self?.resumeEventWaiter(id)
+            }
+        }
+    }
+
+    private func resumeEventWaiter(_ id: UUID) {
+        let waiter = lock.withLock { eventWaiters.removeValue(forKey: id) }
+        waiter?.resume()
     }
 
     /// Hands `tiles` to iOS's download daemon. `allowsExpensive`: may use mobile data.
@@ -250,6 +272,12 @@ final class BackgroundTileTransfer: NSObject, URLSessionDownloadDelegate, @unche
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {}
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            let all = Array(eventWaiters.values)
+            eventWaiters = [:]
+            return all
+        }
+        for waiter in waiters { waiter.resume() }
         DispatchQueue.main.async { [weak self] in
             self?.onEventsFinished?()
         }

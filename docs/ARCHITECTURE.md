@@ -2268,26 +2268,59 @@ scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
 
 ## iOS app structure (ios/MapMe)
 
-* `App/` has `MapMeApp` (entry, `onOpenURL` import) and `AppModel` (root
-  `@Observable` state: library, settings, location, track recorder, and the explorer features'
-  services: geo items, terrain, offline regions, route navigator, GPX, map switcher, notes,
-  battery saver), `AppDestination` (the navigation stack: a map or the world view) and
-  `FeatureHooks` (each feature's launch, locate and delete hooks).
+* `App/` has `MapMeApp` (entry, `onOpenURL` import of maps and GPX, the background URLSession
+  wake-up of offline downloads) and `AppModel` (root `@Observable` state: library, settings,
+  location, track recorder, and the explorer features' services: geo items, terrain, offline
+  regions, route navigator, GPX, map switcher, notes, battery saver), `AppDestination` (the
+  navigation stack: a map or the world view) and `FeatureHooks` (each feature's attach, launch,
+  locate and delete hooks, called in a fixed order: battery, offline, routes, maps, notes, 3D).
 * The explorer features (docs/design/explorer.md) plug into the map screen through
   `MapScreenContext` (the map shown, switched in place with a camera handoff; selection; the
   active `MapTool`; presentations; toasts), `CanvasOverlaySet` (features' `CanvasOverlay`s drawn
   at three levels of the overlay view, and `CanvasMapSpaceLayer`s such as the terrain beyond the
-  sheet), `MapSideColumn` and `MapTopBanners`. Geo items (waypoints, routes, notes) are global, in
-  `GeoItemStore` (Application Support/GeoItems); terrain comes through `TerrainProvider` and the
-  core's `TerrainStore`.
+  sheet), `MapSideColumn` and `MapTopBanners` (sized by `MapChromeLayout`: they stop above the
+  bottom panel, the side column continuing in a second column on a short screen). Geo items
+  (waypoints, routes, notes) are global, in `GeoItemStore` (Application Support/GeoItems); terrain
+  comes through `TerrainProvider` and the core's `TerrainStore`. Per feature (files under
+  `Services/<Feature>/` and `Views/<Feature>/`):
+  * **Routes** (`Routes/`): `RoutePlanner` (core profiles; Tobler walking time with a learned pace,
+    `PaceModel`), `RouteEditTool` (a `MapTool`: tap, drag, freehand), `RouteNavigator` (progress,
+    off-route warnings, notifications, background updates `"routeFollow"`), `GPXService` (import,
+    duplicates, export), `SunTimes`/`DaylightForecast` (`Daylight.swift`), `RouteOverlay` and
+    `WaypointOverlay`, cards, sheets, `ElevationProfileView` (Swift Charts, also in the stats panel
+    and a saved track's page); `GeoItemMigration` moves old per-map waypoints into the store.
+  * **Maps** (`Maps/`): `MapSwitcher` (coverage, the best map, auto-switching), `MapsHereButton`,
+    `WalkedOffMapBanner`, `OffMapTerrainLayer` (a CATiledLayer of core-rendered contours beyond the
+    sheet), `MapEdgeOverlay`, `OtherMapsPOIOverlay`, `WorldView`/`WorldMapView` (MKMapView:
+    footprints, a core-rendered terrain overlay, routes, waypoints, notes, your maps' places,
+    offline regions), `TerrainContourRenderer`.
+  * **Notes** (`Notes/`): `NoteService` (photos re-encoded without metadata, thumbnails,
+    elevations), `NotePlacementChoice` (EXIF position or ask), `NoteComposer`, `NoteOverlay`, cards
+    and the list. **Battery** (`Battery/`): `BatterySaver` (the mode, `LocationPowerProfile` through
+    `LocationService.apply`, the limits the canvas, the 3D view and terrain read, drain measured).
+  * **Offline** (`Offline/`): `PinnedTerrainStore` (Application Support/Terrain, owners' range
+    manifests), `OfflinePlanner` (`mm_tile_plan`, sampled estimates), `TileDownloader`,
+    `OfflineRegionService` (regions, queue, trailhead caching, network and Low Data Mode),
+    `OfflineBackground` (iOS 26 continued processing, iOS 17–18 background URLSession),
+    `RegionPickerView`; `DEMService` reads pinned tiles first and `TerrainPullLoop` uses the tiles
+    on the device after a cutoff (`TerrainFetchScope.onDevice`). `TerrainProvider` (Terrain/) holds
+    the one core store; `terrainDidArrive()` tells the views drawn without terrain.
+  * **3D** (`Views/Terrain3D/`): `Terrain3DBuilder` (grid, texture: core contours and the sheet's
+    raster draped through the georeference with its warp), `Terrain3DGeometry.swift` (area, mesh,
+    UVs, ribbons), `Terrain3DSceneView` (SceneKit), `Terrain3DScreen`.
 * `Core/` has `MapMeCore.swift`, a thin Swift wrapper over the C ABI
   (`GeorefSession`, `fitControlPoints`, `detectPage`, `darkProfile` and the
   thread-safe `DarkStyle`), plus `CoreTypes.swift` with Codable
-  request/response types.
+  request/response types. `TerrainStore.swift` wraps `mm_terrain_*` (one `@unchecked Sendable`
+  store, every returned string freed with `mm_string_free`) and `MapMeCore.tilePlanAnswer`
+  `mm_tile_plan`; `TerrainTypes.swift` mirrors their JSON (snake_case keys, nil left to the
+  core's defaults).
 * `Geo/` has `Geo.swift`: `LatLon`, `WebMercator`, `Homography` math,
-  distance/bearing, coordinate formatting (DD, DMS, UTM).
+  distance/bearing, coordinate formatting (DD, DMS, UTM); `GeoBounds.swift`: `GeoBounds`,
+  `MercatorRect`, tile math.
 * `Model/` has `MapDocument` (Codable metadata + georeference + POIs),
-  `MapLibrary` (on-disk store), `Track` (+ GPX export) and `Waypoint`.
+  `MapLibrary` (on-disk store), `Track` (+ GPX export), `GeoItems` (`Waypoint`, `Route`,
+  `MapNote`), `GeoItemStore` and `OfflineRegion`.
 * `Services/` has `LocationService` (CoreLocation location + heading, mock mode
   for tests), `TrackRecorder`, `MapImporter` (PDF/image → base raster → tile
   pyramid → thumbnail), `TileStore`, `OCRService` (Vision, multi-orientation),
@@ -2497,6 +2530,11 @@ library card.
 * Terrain (explorer features; *C ABI*, Terrain, Cost): a 512 px contour + hillshade tile 12–19 ms
   on one core here (budget: < 30 ms in `tests/terrain.rs`, < 15 ms on an A15), a 384² grid for the
   3D view 3 ms, a 1 000-sample profile 0.3 ms, a country's tile plan 0.2 ms, a tile added 1 ms.
+  Every core terrain call runs off the main thread: the terrain beyond a sheet on CATiledLayer's
+  threads, the world view's overlay on MapKit's, route statistics (0.3 s after the last edit),
+  profiles, elevations and the 3D build (~1 s plus downloads, with progress) in detached tasks,
+  tile plans in utility tasks. Overlays reproject once per map and only transform per frame; the
+  battery saver caps the canvas and the 3D view at 30 fps and terrain at zoom 12.
 * Map interaction at 60/120 fps, because tiles are drawn off the main thread
   by CATiledLayer and overlays are cheap CAShapeLayers.
 * Release core: `opt-level=3`, LTO, `codegen-units=1`, `panic=unwind` (needed

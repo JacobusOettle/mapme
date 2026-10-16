@@ -45,6 +45,8 @@ final class OffMapTerrainLayer: CanvasMapSpaceLayer {
     private weak var context: MapScreenContext?
     private var mapContext: CanvasMapContext?
     private var batteryLoop: ObservationLoop?
+    /// Terrain arriving later (a region or a map's trailhead finished, the network is back).
+    private var arrival: TerrainArrivalObserver?
     private var terrainZoomCap = 13
 
     init(model: AppModel, context: MapScreenContext) {
@@ -59,6 +61,10 @@ final class OffMapTerrainLayer: CanvasMapSpaceLayer {
         // The battery saver caps the terrain's detail; redraw when it changes.
         batteryLoop = ObservationLoop { [weak self] in
             self?.batteryChanged()
+        }
+        // Tiles drawn without terrain (or out of fetch rounds) draw again once it is there.
+        arrival = TerrainArrivalObserver(model.terrain) { [weak self] in
+            self?.tiles.reload()
         }
     }
 
@@ -215,6 +221,22 @@ final class OffMapTerrainTiledView: UIView {
         layer.contents = nil
         setNeedsDisplay()
         return true
+    }
+
+    /// Draws every tile again with fresh fetch rounds: terrain the tiles lacked may be on the
+    /// device now (`TerrainProvider.terrainDidArrive`). Nothing when not configured.
+    func reload() {
+        lock.lock()
+        guard config != nil else {
+            lock.unlock()
+            return
+        }
+        generation += 1
+        rounds = [:]
+        counts = (shown: 0, waiting: [], empty: 0)
+        reported = nil
+        lock.unlock()
+        setNeedsDisplay()
     }
 
     override func draw(_ rect: CGRect) {

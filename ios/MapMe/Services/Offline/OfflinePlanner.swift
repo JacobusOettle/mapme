@@ -1,6 +1,5 @@
 import CoreGraphics
 import Foundation
-import MapMeCoreFFI
 
 /// Why the core could not plan an area.
 struct OfflinePlanFailure: Error, Equatable, Sendable {
@@ -30,16 +29,7 @@ enum OfflinePlanner {
     /// The core's plan for `request` (tiles per zoom as disjoint ranges, estimated bytes), or why
     /// it could not make one.
     static func plan(_ request: TilePlanRequest) -> Result<TilePlan, OfflinePlanFailure> {
-        guard let body = try? JSONEncoder().encode(request) else {
-            return .failure(OfflinePlanFailure(message: "Could not encode the request"))
-        }
-        let json = String(decoding: body, as: UTF8.self)
-        let out: String = json.withCString { cstr -> String in
-            guard let res = mm_tile_plan(cstr) else { return "" }
-            defer { mm_string_free(res) }
-            return String(cString: res)
-        }
-        let answer: TerrainAnswer<TilePlan> = TerrainStore.decode(out)
+        let answer = MapMeCore.tilePlanAnswer(request)
         switch answer.status {
         case .ok, .needDEM:
             guard let plan = answer.value else {

@@ -8,6 +8,9 @@ import SwiftUI
 /// the terrain kept around your maps and its switch.
 @MainActor
 struct OfflineSettingsSection: View {
+    /// The id Settings scrolls to (`-openOfflineRegions`).
+    static let scrollID = "offlineTerrainSection"
+
     @Environment(AppModel.self) private var model
     @State private var showPicker = false
 
@@ -43,6 +46,7 @@ struct OfflineSettingsSection: View {
                 SettingsLabel("Add Region\u{2026}", symbol: "plus", color: Theme.accent.opacity(0.85))
             }
             .accessibilityIdentifier("addOfflineRegionButton")
+            .id(Self.scrollID)
             .fullScreenCover(isPresented: $showPicker) {
                 RegionPickerView()
                     .environment(model)

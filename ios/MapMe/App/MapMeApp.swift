@@ -13,6 +13,11 @@ struct MapMeApp: App {
                 .onOpenURL { url in model.handleIncoming(url: url) }
                 .task { await model.onLaunch() }
         }
+        // iOS 17–18: an offline region's tiles handed to a background URLSession finished while
+        // MapMe was suspended; deliver them into the pinned store, then let iOS suspend MapMe.
+        .backgroundTask(.urlSession(BackgroundTileTransfer.identifier)) {
+            await BackgroundTileTransfer.shared.deliverEvents()
+        }
     }
 }
 

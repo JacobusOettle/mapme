@@ -142,16 +142,22 @@ final class TerrainStore: @unchecked Sendable {
 
 extension MapMeCore {
     /// The tiles covering a plan's areas and roughly what they weigh (`mm_tile_plan`, stateless,
-    /// quick). Nil when the core cannot say (invalid request, not implemented).
-    static func tilePlan(_ request: TilePlanRequest) -> TilePlan? {
-        guard let body = try? JSONEncoder().encode(request) else { return nil }
+    /// quick, any thread): the plan, or `.failed` with the core's reason (invalid request). The
+    /// one Swift caller of `mm_tile_plan` (`OfflinePlanner.plan` builds on it).
+    static func tilePlanAnswer(_ request: TilePlanRequest) -> TerrainAnswer<TilePlan> {
+        guard let body = try? JSONEncoder().encode(request) else { return .failed("Could not encode the request") }
         let json = String(decoding: body, as: UTF8.self)
         let out: String = json.withCString { cstr -> String in
             guard let res = mm_tile_plan(cstr) else { return "" }
             defer { mm_string_free(res) }
             return String(cString: res)
         }
-        let answer: TerrainAnswer<TilePlan> = TerrainStore.decode(out)
+        return TerrainStore.decode(out)
+    }
+
+    /// `tilePlanAnswer`'s plan; nil when the core could not make one.
+    static func tilePlan(_ request: TilePlanRequest) -> TilePlan? {
+        let answer = tilePlanAnswer(request)
         return answer.isComplete ? answer.value : nil
     }
 }

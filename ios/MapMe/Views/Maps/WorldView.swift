@@ -79,9 +79,16 @@ struct WorldView: View {
             regions.combine(region.id)
             regions.combine(region.bounds)
         }
+        var pois = Hasher()
+        for map in located {
+            pois.combine(map.id)
+            pois.combine(map.pois.count)
+            pois.combine(map.pois.last?.id)
+        }
         return WorldMapState(mapsKey: maps.finalize(), dark: model.settings.mapAppearance == .dark,
                              itemsKey: model.geoItems.revision, trackKey: track.finalize(),
-                             regionsKey: regions.finalize(), showsTerrain: showsTerrain,
+                             regionsKey: regions.finalize(), poisKey: pois.finalize(),
+                             showsPOIs: model.settings.showPOIs, showsTerrain: showsTerrain,
                              showsRegions: showsRegions, showsItems: showsItems,
                              terrainZoomCap: model.battery.maxTerrainZoom, selectedMapID: selectedMapID)
     }

@@ -24,6 +24,8 @@ struct LibraryView: View {
     /// Picked in the "Search wider" sheet; started once the sheet has closed.
     @State private var pendingWideSearch: (mapID: UUID, choice: WideSearchChoice)?
     @State private var openCount = 0
+    /// `-openOfflineRegions` opened Settings already (once per launch).
+    @State private var openedSettingsAtLaunch = false
 
     struct Entry: Identifiable {
         let map: MapDocument
@@ -123,7 +125,16 @@ struct LibraryView: View {
                 .environment(model)
         }
         .samplePhotoPickerStandIn(model)
+        // A GPX file opened while the library (or the world view) is in front: its summary here;
+        // a map screen in front shows its own.
+        .gpxImportSummaryPresenter(model)
         .sensoryFeedback(.impact(weight: .light), trigger: openCount)
+        .task {
+            // `-openOfflineRegions` (UI tests, screenshots): Settings, at Offline terrain.
+            guard SettingsView.opensAtOfflineTerrain, !openedSettingsAtLaunch else { return }
+            openedSettingsAtLaunch = true
+            showSettings = true
+        }
     }
 
     /// Draws a map's dark thumbnail (maps imported before dark maps get one on first view).

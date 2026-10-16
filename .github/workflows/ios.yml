@@ -110,7 +110,9 @@ jobs:
     name: Build, test, package (macOS)
     needs: gate
     runs-on: macos-15
-    timeout-minutes: 60
+    # The explorer features' UI tests (about 20 more, most on the sample map) roughly double
+    # the 19 min the tests took before them.
+    timeout-minutes: 90
     permissions:
       contents: write   # push screenshots/logs to the ci-screenshots branch
     env:
@@ -263,7 +265,7 @@ jobs:
       - name: Run tests on the simulator
         id: test
         if: ${{ !cancelled() && steps.build_for_testing.outcome == 'success' }}
-        timeout-minutes: 30
+        timeout-minutes: 60
         run: |
           xcrun simctl bootstatus "$SIM_UDID" -b
           xcrun simctl location "$SIM_UDID" set "$SIM_LAT,$SIM_LON" || echo "::warning::could not set the simulated location"
@@ -321,8 +323,9 @@ jobs:
           TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
-          files=(build/screenshots/*.png build/screenshots/*.json build/logs/test.log build/logs/test-summary.json
-                 build/MapMe-unsigned.ipa)
+          # The explorer features' UI tests attach JPEGs (uiAttachScreenshot), the older ones PNGs.
+          files=(build/screenshots/*.png build/screenshots/*.jpg build/screenshots/*.jpeg build/screenshots/*.json
+                 build/logs/test.log build/logs/test-summary.json build/MapMe-unsigned.ipa)
           (( ${#files[@]} )) || { echo "nothing to publish"; exit 0; }
           dir="$(mktemp -d)"
           cp "${files[@]}" "$dir/"

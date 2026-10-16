@@ -14,8 +14,9 @@ final class CanvasOverlaySet {
         overlays = [
             MapEdgeOverlay(model: model, context: context),        // maps: the sheet's edge
             RouteOverlay(model: model, context: context),          // routes: planned and imported
-            WaypointOverlay(model: model, context: context),       // routes: waypoints
+            // Markers: other maps' places (80 %) under your own waypoints, notes on top.
             OtherMapsPOIOverlay(model: model, context: context),   // maps: your other maps' places
+            WaypointOverlay(model: model, context: context),       // routes: waypoints
             NoteOverlay(model: model, context: context),           // notes: notes and photos
         ]
         mapSpaceLayers = [

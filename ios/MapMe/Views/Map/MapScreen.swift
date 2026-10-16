@@ -137,24 +137,31 @@ struct MapScreen: View {
     // MARK: - Chrome
 
     /// Laid out over the whole screen (safe area applied by hand, so the panel can sit low like a
-    /// floating sheet).
+    /// floating sheet). The top bar and the bottom panel are pinned to their edges rather than
+    /// stacked, so a tall bottom panel never pushes the top bar under the status bar; the top
+    /// bar's columns get the height left above the panel (`MapChromeLayout`) and the expanded
+    /// panel floats over them.
     @ViewBuilder
     private func chrome(map: MapDocument, safe: EdgeInsets, size: CGSize, bottomGap: CGFloat) -> some View {
         let fullHeight = size.height + safe.top + safe.bottom
-        VStack(spacing: 0) {
-            topBar(map: map)
-                .padding(.top, safe.top + 4)
+        let layout = MapChromeLayout(screen: CGSize(width: size.width + safe.leading + safe.trailing, height: fullHeight),
+                                     safe: safe, bottomGap: bottomGap, bottomPanelHeight: bottomChromeHeight,
+                                     compassShown: context.controller.isRotated)
+        ZStack {
+            topBar(map: map, layout: layout)
+                .padding(.top, layout.top)
                 .padding(.leading, safe.leading + 12)
                 .padding(.trailing, safe.trailing + 12)
-            Spacer(minLength: 0)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             bottomStack(map: map, maxDetails: max(160, fullHeight * 0.72 - 180 - safe.top))
                 .padding(.leading, safe.leading + 8)
                 .padding(.trailing, safe.trailing + 8)
                 .padding(.bottom, bottomGap)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         }
     }
 
-    private func topBar(map: MapDocument) -> some View {
+    private func topBar(map: MapDocument, layout: MapChromeLayout) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Button {
                 dismiss()
@@ -181,18 +188,18 @@ struct MapScreen: View {
                         showCalibration = true
                     }
                 })
-                MapTopBanners(context: context, map: map)
+                MapTopBanners(context: context, map: map, maxHeight: layout.bannersMaxHeight)
             }
 
             Spacer(minLength: 0)
 
-            VStack(spacing: 10) {
+            VStack(alignment: .trailing, spacing: MapChromeLayout.spacing) {
                 CanvasControlStack(map: map, tracking: $tracking)
                 if context.controller.isRotated {
                     CanvasCompassButton(controller: context.controller)
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
-                MapSideColumn(context: context, map: map)
+                MapSideColumn(context: context, map: map, maxHeight: layout.sideColumnMaxHeight)
             }
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: context.controller.isRotated)
         }

@@ -287,9 +287,12 @@ struct ContourRenderRequest: Encodable, Sendable {
     var maxZoom: Int = 13
     var minZoom: Int? = nil
     var maxTiles: Int? = nil
+    /// Index lines labelled with their elevation where they run straight and uncrowded; nil: the
+    /// core's default (on).
+    var labels: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
-        case space, rect, warp, style, hillshade, background
+        case space, rect, warp, style, hillshade, background, labels
         case pixelToMercator = "pixel_to_mercator"
         case intervalM = "interval_m"
         case scaleMPerPt = "scale_m_per_pt"

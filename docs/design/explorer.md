@@ -73,6 +73,16 @@ pieces meet. When the code and this document disagree, fix one of them in the sa
   Routes, Note, Battery. A feature's button is `EmptyView` until the feature fills it in; a button
   that cannot act (3D on a map that is not located) is shown dimmed at 55 % opacity like the
   tracking button, with a one-line explanation in its menu or a toast.
+* **Room on small screens** (`MapChromeLayout`, `SideColumnLayout`): the top bar and the bottom
+  panel are pinned to their edges, and the right-hand column (layers/tracking, compass, side
+  column) stops above the bottom panel wherever the panel lies under it (portrait; in landscape
+  and on iPad the centred, ≤ 520 pt panel leaves the column free down to the bottom edge). The
+  side column fills top to bottom and continues in a second column to its left when the next
+  button would pass that line; an empty button (the battery badge while the saver is off) takes
+  no room. iPhone SE portrait: all five fit over the stats panel (≈ 374 pt for 260), four with a
+  card open (≈ 214 pt); Pro Max: one column always. The banners scroll when taller than the room
+  under the title (landscape with a card). Unit-tested in `ExplorerIntegrationTests`, checked on
+  the simulator by `ExplorerIntegrationUITests` (screenshots 70, 71).
 * **Banners** (`MapTopBanners`) stack under the title capsule, left of the controls, at most
   360 pt wide: walked-off-the-map (maps), route guidance and daylight (routes), then the screen's
   toast (`MapScreenContext.toast`, 5 s, optional action such as Undo).
@@ -85,9 +95,12 @@ pieces meet. When the code and this document disagree, fix one of them in the sa
 ### Elsewhere
 
 * **Library** toolbar: the globe button (`worldViewButton`) opens the world view; the + menu has
-  "GPX route or waypoints" (the same Files picker, which now accepts `.gpx`).
+  "GPX route or waypoints" (the same Files picker, which now accepts `.gpx`). A GPX file arriving
+  while the library or the world view is in front gets its summary there
+  (`gpxImportSummaryPresenter`); a map screen in front presents it through its context.
 * **Settings** sections, in order: Display, Maps (maps), Routes (routes), Battery (battery),
-  Locating, Offline terrain (offline), Tracks, Storage, About.
+  Locating, Offline terrain (offline), Tracks, Storage, About. Storage lists "Offline terrain"
+  (pinned, never trimmed or cleared there) apart from the terrain cache.
 * **Open in / AirDrop / share sheet**: `.gpx` files open MapMe and go to the GPX import
   (`AppModel.handleIncoming` → `GPXService.importFile`).
 
@@ -164,11 +177,15 @@ Rules:
 
 One `TerrainStore` (C `MMTerrain`, Swift `Core/TerrainStore.swift`) for the whole app, owned by
 `TerrainProvider` (`AppModel.terrain`). It holds decoded Terrarium tiles in memory (64 MiB by
-default, least recently used dropped) and answers queries; it never downloads. A query lacking
-tiles answers `need_dem` with `need_tiles` and a partial result; `TerrainProvider.resolve` loads
-them (`DEMService`: pinned, then cache, then network; missing ones marked missing) and asks
-again, at most 6 rounds. Pinning is the app's (`PinnedTerrainStore`); the core store is only a
-cache. The JSON fields are in docs/ARCHITECTURE.md, "C ABI", Terrain; summary:
+default, least recently used dropped) and answers queries; it never downloads. A query lacking tiles
+answers `need_dem` with `need_tiles` and a partial result; `TerrainProvider.resolve` loads them
+(`DEMService`: pinned, then cache, then network; missing ones marked missing) and asks again, at
+most 6 rounds. Pinning is the app's (`PinnedTerrainStore`); the core store is only a cache. When
+terrain may have arrived later (a region or a map's trailhead finished, the network came back, the
+3D view's Retry), `TerrainProvider.terrainDidArrive()` forgets the missing marks and posts
+`terrainDidArriveNotification`; the terrain beyond the sheet (`OffMapTerrainLayer`) and the world
+view's overlay draw again (`TerrainArrivalObserver`). The JSON fields are in docs/ARCHITECTURE.md,
+"C ABI", Terrain; summary:
 
 | Function | Used for |
 |---|---|
@@ -385,7 +402,10 @@ base map is blank; each located map's footprint (its four corners) with its dark
 in (an affine from three corners is enough at this scale) and an accent outline; routes, tracks,
 waypoints and notes (clustered annotations); offline regions as dashed rectangles (toggle); you.
 Tap a footprint → callout (name, scale, distance) → Open. It is the terrain view when you are far
-from every map (the walked-off banner's "World View" opens it following you).
+from every map (the walked-off banner's "World View" opens it following you), so it also shows
+the **places of your located maps** (names read off them and their OpenStreetMap POIs, each
+place once: the same name within 150 m, `OtherMapsPOIOverlay.DuplicateIndex`), as yellow markers
+clustered apart from your waypoints and notes, following Settings → POIs and the Items layer.
 
 ### 7.4 Notes and photos (notes)
 
@@ -516,10 +536,15 @@ high-resolution (US 3DEP, European DEMs) than where it is SRTM:
 | Scotland | 7 878 / 958 | 30 963 / 3 179 (over the cap) |
 | South Africa | 41 851 / 1 440 | 165 645 / 4 722 (over the cap) |
 
-Because of that spread, the estimate is **measured** when online: `mm_tile_plan` gives the tile
-ranges and a prior (`bytes` for SRTM terrain, `bytes_high` for high-resolution sources); the app
-then HEADs 16 tiles spread over the plan's two finest zooms and scales each zoom by the sampled
-mean (≈ 1 s). Offline the prior's `bytes_high` is shown, marked "estimated".
+The core's priors (`terrain::tile_bytes_typical` / `tile_bytes_high`) are the first row and, for
+high-resolution sources, mountains only: 90, 147, 142, 136, 127, 113 KB (the Swiss Alps, the
+Scottish Highlands, Colorado from zoom 11, and every tile of the Bernese Oberland and Yosemite
+boxes; flat Kansas no longer pulls the mean down). Whole regions against them: docs/ARCHITECTURE.md,
+"C ABI", Terrain, *Tile sizes*. Because of that spread, the estimate is **measured** when online:
+`mm_tile_plan` gives the tile ranges and a prior (`bytes` for SRTM terrain, `bytes_high` for
+high-resolution sources); the app then HEADs 16 tiles spread over the plan's two finest zooms and
+scales each zoom by the sampled mean (≈ 1 s). Offline the prior's `bytes_high` is shown, marked
+"estimated".
 
 **Download engine** (`OfflineRegionService` + a downloader):
 
@@ -534,9 +559,12 @@ mean (≈ 1 s). Offline the prior's `bytes_high` is shown, marked "estimated".
   paused "Waiting for network"; an expensive path asks first unless Settings allows mobile data;
   Low Data Mode pauses "Paused in Low Data Mode"; storage full → paused with the reason;
 * **in the background**: on iOS 26 the download continues as a `BGContinuedProcessingTask`
-  (identifier `com.jacobusoettle.mapme.offline-download`, declared in project.yml) with the
-  system's progress UI; on iOS 17–18 it continues for the ~30 s `beginBackgroundTask` grants
-  (or as long as a recording or followed route keeps MapMe running) and then pauses, resuming by
+  (identifier `com.jacobusoettle.mapme.offline-download`, declared in project.yml, registered at
+  the first download; no background mode needed) with the system's progress UI; on iOS 17–18 it
+  continues for the ~30 s `beginBackgroundTask` grants (or as long as a recording or followed
+  route keeps MapMe running), then hands the next ≤ 1 000 tiles to a background `URLSession`
+  (`BackgroundTileTransfer`; iOS wakes MapMe for its events through `MapMeApp`'s
+  `.backgroundTask(.urlSession)`, which moves them into the pinned store) and pauses, resuming by
   itself when MapMe is back in front. The UI says which.
 * the list: name, detail, size on disk, progress or date, swipe to delete.
 
@@ -614,8 +642,10 @@ arguments (handled in each feature's `appDidLaunch`):
 | `-seedSecondSampleMap` | clones the located sample as "Grootkloof overview" at ¼ resolution (pyramid level 2, `H·diag(4,4,1)`), for switching tests | maps |
 | `-openWorldView` | opens the world view at launch | maps |
 | `-mockLowPowerMode` | the battery saver sees Low Power Mode on | battery |
-| `-openOfflineRegions` | opens Settings → Offline terrain | offline |
+| `-openOfflineRegions` | opens Settings, scrolled to Offline terrain (the library opens it) | offline, lead |
 | `-mockRegionPlace "Name=s,w,n,e"` | replaces MKLocalSearch in the region picker | offline |
+| `-mockOfflineDownloads` | a fake tile server (small PNGs after 60 ms, sizes for the estimate's HEADs) and a pinned store of its own, emptied at launch | offline |
+| `-openSampleOverview` | seeds the overview map and opens it (the auto-switching test) | maps |
 | `-open3D` | opens the 3D view once the sample map shows | 3d |
 
 Screenshots (name prefixes keep CI's gallery ordered): 20 world view, 21 maps here, 22 off-map
@@ -623,20 +653,24 @@ terrain (`uiOffMapLocation`), 23 auto-switch toast; 30 route planning bar, 31 ro
 profile, 32 following with the daylight banner, 33 off route, 34 GPX import summary, 35 track
 profile; 40 note editor, 41 notes on the map, 42 photo note card; 45 battery saver settings and
 badge; 50 offline terrain settings, 51 region picker with estimate, 52 downloading; 60 3D view,
-61 3D with a route.
+61 3D with a route; 70 the map screen with every feature at once, 71 the same with a dropped
+pin's card (`ExplorerIntegrationUITests`: no control overlaps another or the bottom panel). CI
+publishes the JPEGs next to the PNGs on the `ci-screenshots` branch.
 
 Unit tests (`MapMeTests/<Feature>Tests.swift`): GPX parse/export round trips (Gaia- and
 AllTrails-style files inline), sun times against NOAA reference values (Pretoria, Tromsø in
-June/December, Quito), Tobler/pace learning, route progress and off-route dwell on synthetic
-fixes, coverage and switching rules (pure functions over two synthetic georeferences), the
-continuation margin, tile plans and the pinned store's owner arithmetic, battery profile mapping,
-3D UV computation through a warp, EXIF GPS reading from a generated JPEG. Rust:
-`core/tests/terrain.rs` (store bound and eviction under concurrency, elevations and profiles on
-synthetic tiles — a cone's ascent equals its height within the smoothing, grid NaN handling,
-renders identical across tilings, the interval rule, `need_tiles` order, plan counts against
-`tiles_covering`, trailhead caps, antimeridian), timing assertions with
-`common::time_budget_ms`. `core/tests/terrain_contract.rs` already holds the ABI's contract
-(arguments, NULLs, JSON, threads) and must keep passing.
+June/December, Quito), Tobler/pace learning, route progress and off-route dwell on synthetic fixes,
+coverage and switching rules (pure functions over two synthetic georeferences), the continuation
+margin, tile plans and the pinned store's owner arithmetic, battery profile mapping, 3D UV
+computation through a warp, EXIF GPS reading from a generated JPEG. Rust: `core/tests/terrain.rs`
+(store bound and eviction under concurrency, elevations and profiles on synthetic tiles — a cone's
+ascent equals its height within the smoothing, grid NaN handling, renders identical across tilings,
+the interval rule, `need_tiles` order, plan counts against `tiles_covering`, trailhead caps,
+antimeridian), timing assertions with `common::time_budget_ms`. `core/tests/terrain_contract.rs`
+already holds the ABI's contract (arguments, NULLs, JSON, threads) and must keep passing.
+`MapMeTests/ExplorerIntegrationTests.swift` holds what joins the features: the map chrome's room on
+iPhone SE and Pro Max, the side column's columns, the render request's `labels`, a refused tile
+plan's reason, terrain arriving.
 
 ## 11. File ownership
 
@@ -717,5 +751,5 @@ October 2026: a 3×3 (z8–9), 4×4 (z10–12) or 5×5 (z13) block of tiles arou
 
 The jump at zoom 11 in Colorado and Kansas is where the source changes to 3DEP. The largest tile
 seen was 156 KB (z9, Swiss Alps). `wide::tile_bytes`, measured over southern African searches,
-stays as it is for `mm_search_estimate`; `terrain::tile_bytes_typical` / `tile_bytes_high` are
-these two rows.
+stays as it is for `mm_search_estimate`; `terrain::tile_bytes_typical` is the SRTM row of the
+table in §7.7, `tile_bytes_high` the mountains-only high-resolution prior given there.

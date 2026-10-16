@@ -196,6 +196,8 @@ private struct GPXImportPresenter: ViewModifier {
         let shown = $shown
         Task { @MainActor in
             await PresentationGate.settled()
+            // A map screen in front presents it itself (through its context, with its map).
+            if case .map? = model.path.last { return }
             guard shown.wrappedValue == nil, let summary = model.gpx.takeSummaryToPresent() else { return }
             shown.wrappedValue = summary
         }

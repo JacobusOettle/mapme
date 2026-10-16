@@ -9,18 +9,35 @@ struct SettingsView: View {
 
     init() {}
 
+    /// Debug launch argument `-openOfflineRegions` (the library opens Settings): scroll to
+    /// Offline terrain.
+    static var opensAtOfflineTerrain: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.arguments.contains("-openOfflineRegions")
+        #else
+        return false
+        #endif
+    }
+
     var body: some View {
         NavigationStack {
-            Form {
-                SettingsDisplaySection()
-                MapsSettingsSection()           // maps: auto-switching, terrain beyond the sheet
-                RoutesSettingsSection()         // routes: pace, off-route alerts, daylight
-                BatterySettingsSection()        // battery saver
-                SettingsLocatingSection()
-                OfflineSettingsSection()        // offline regions, terrain around your maps
-                TracksSection()
-                SettingsStorageSection()
-                SettingsAboutSection()
+            ScrollViewReader { proxy in
+                Form {
+                    SettingsDisplaySection()
+                    MapsSettingsSection()           // maps: auto-switching, terrain beyond the sheet
+                    RoutesSettingsSection()         // routes: pace, off-route alerts, daylight
+                    BatterySettingsSection()        // battery saver
+                    SettingsLocatingSection()
+                    OfflineSettingsSection()        // offline regions, terrain around your maps
+                    TracksSection()
+                    SettingsStorageSection()
+                    SettingsAboutSection()
+                }
+                .task {
+                    guard Self.opensAtOfflineTerrain else { return }
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    withAnimation { proxy.scrollTo(OfflineSettingsSection.scrollID, anchor: .top) }
+                }
             }
             .scrollContentBackground(.hidden)
             .background(Theme.background.ignoresSafeArea())
@@ -403,6 +420,14 @@ private struct SettingsStorageSection: View {
             } label: {
                 SettingsLabel("Terrain cache", symbol: "mountain.2.fill", color: .brown)
             }
+            // Pinned, never trimmed or cleared here: offline regions and the terrain around maps
+            // (Settings → Offline terrain deletes them).
+            LabeledContent {
+                sizeText(model.offline.pinnedBytes)
+            } label: {
+                SettingsLabel("Offline terrain", symbol: "arrow.down.circle.fill", color: .teal)
+            }
+            .accessibilityIdentifier("offlineTerrainStorageRow")
             Button(role: .destructive) {
                 clearTerrainCache()
             } label: {
@@ -418,7 +443,7 @@ private struct SettingsStorageSection: View {
         } header: {
             Text("Storage")
         } footer: {
-            Text("Terrain tiles are downloaded when a map is located from its contour lines and kept up to 400\u{00A0}MB (the least recently used go first). They are downloaded again when needed.")
+            Text("Terrain tiles are downloaded when a map is located from its contour lines and kept up to 400\u{00A0}MB (the least recently used go first). They are downloaded again when needed. Offline terrain (your regions and the terrain around your maps) is kept apart and never cleared here.")
         }
     }
 
@@ -443,6 +468,7 @@ private struct SettingsStorageSection: View {
         }.value
         mapsBytes = sizes.0
         demBytes = sizes.1
+        model.offline.refreshPinnedBytes()
     }
 
     @MainActor
@@ -536,7 +562,7 @@ private struct SettingsAboutSection: View {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "lock.shield.fill")
                     .foregroundStyle(Theme.good)
-                Text("Your maps, tracks and position stay on this device. The only network requests are anonymous downloads of terrain tiles and OpenStreetMap places for the area of a map, and, when you search wider, Apple Maps lookups of the place names printed on the map.")
+                Text("Your maps, tracks, routes, notes, photos and position stay on this device. The only network requests are anonymous downloads of terrain tiles and OpenStreetMap places for the area of a map; Apple Maps lookups of the place names printed on a map when you search wider, and of the place you search for an offline region; and Apple's base map in the world view.")
                     .font(.footnote)
                     .foregroundStyle(Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)

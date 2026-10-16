@@ -84,10 +84,33 @@ final class TerrainProvider: @unchecked Sendable {
         }
     }
 
+    /// Posted by `terrainDidArrive` (object: the provider) on the calling thread: views drawn
+    /// without some terrain (the terrain beyond a sheet, the world view's overlay) draw again.
+    static let terrainDidArriveNotification = Notification.Name("MapMeTerrainDidArrive")
+
     /// Terrain that was missing may be on the device now (a region or a map's trailhead finished,
-    /// the network is back): forget the missing marks so queries ask for those tiles again.
+    /// the network is back, the 3D view's Retry): forget the missing marks so queries ask for
+    /// those tiles again, and tell the views drawn without them.
     func terrainDidArrive() {
         store?.clearMissing()
         lock.withLock { _generation += 1 }
+        NotificationCenter.default.post(name: Self.terrainDidArriveNotification, object: self)
+    }
+}
+
+/// Runs `action` on the main actor each time `provider` says terrain arrived
+/// (`TerrainProvider.terrainDidArrive`); stops when released.
+final class TerrainArrivalObserver {
+    private let token: NSObjectProtocol
+
+    init(_ provider: TerrainProvider, action: @escaping @MainActor @Sendable () -> Void) {
+        token = NotificationCenter.default.addObserver(forName: TerrainProvider.terrainDidArriveNotification,
+                                                       object: provider, queue: .main) { _ in
+            Task { @MainActor in action() }
+        }
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(token)
     }
 }

@@ -29,6 +29,28 @@ ready for Android.
 * **Dotted trail** of where you walked (GPX export), **nearby points of
   interest** from the map's own labels plus OpenStreetMap, with distance and
   direction.
+* **Routes and waypoints**: plan a route by tapping (or tracing) on the map and
+  see its distance, climb, descent and walking time at your own pace; follow it
+  with an off-route warning (haptic, banner, notification with the screen off);
+  import routes, tracks and waypoints as GPX from Gaia GPS, AllTrails or a
+  friend, drawn on every map they cross; export them again.
+* **Elevation profiles and daylight**: the profile of your recorded track and of
+  every route, and a banner like "2 h 10 min of daylight left · at your pace you
+  reach Bannerman Hut at 17:40", worked out on the phone.
+* **Many maps, one world**: switches to the most detailed map covering you as
+  you walk (with Undo), "Maps here", and a world view of all your maps with your
+  routes, notes and their places. Walk off a sheet and the contours carry on
+  around it, drawn from elevation data, with the POIs; farther out the world
+  view takes over.
+* **Notes and photos** pinned to the map (photos stored without their metadata).
+* **3D**: the map draped exactly over the terrain around it, with its POIs, your
+  track and routes.
+* **Offline**: download the terrain of a region (search a park, province or
+  country, or "around me"; a measured size first) so maps are found, profiled
+  and shown in 3D without signal; the terrain around every map you locate is
+  kept as well.
+* **Battery saver** (with Low Power Mode, or always) that says honestly what it
+  changes.
 * Dark, fast and light: native SwiftUI/UIKit with a tiled map canvas, and a
   Rust core with no runtime or garbage collector.
 
@@ -43,7 +65,9 @@ photo mode; the last row has the paper appearance, the library and the "Search
 wider" sheet offered when a map is not found near you. Every push refreshes
 these on the
 [`ci-screenshots`](https://github.com/JacobusOettle/mapme/tree/ci-screenshots)
-branch (with the IPA of that build).
+branch (with the IPA of that build), together with the explorer features'
+screenshots (numbered 20–71: world view, maps here, terrain beyond the sheet,
+routes, daylight, GPX, notes, battery saver, offline regions, 3D).
 
 | Following | Heading up | Stats card |
 |---|---|---|
@@ -76,7 +100,8 @@ Grootkloof PDF in MapMe.
                 │ C ABI (include/mapme_core.h), JSON in / JSON out
 ┌───────────────▼──────────── mapme-core (Rust) ───────────────────────┐
 │ grid/label georeferencing · contour-vs-DEM matching · control-point   │
-│ fitting · geodesy. Pure Rust, no platform deps, reused by Android.    │
+│ fitting · geodesy · terrain: profiles, contours, 3D grids, tile plans │
+│ Pure Rust, no platform deps, reused by Android.                       │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
