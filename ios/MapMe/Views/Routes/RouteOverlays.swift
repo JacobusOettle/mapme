@@ -183,8 +183,10 @@ final class RouteOverlay: CanvasOverlay {
     static let casingWidth: CGFloat = 1.5
     /// Chevrons along the followed route, points apart.
     static let chevronSpacing: CGFloat = 80
-    /// A route is hit within this of its line (points).
+    /// A route is hit within this of its line (points)…
     static let hitRadius: CGFloat = 22
+    /// …but counts as this much farther than a marker at the same distance.
+    static let lineHitPenalty: CGFloat = 8
 
     private final class Drawn {
         var signature: Int
@@ -361,7 +363,9 @@ final class RouteOverlay: CanvasOverlay {
             }
         }
         guard let best else { return nil }
-        return CanvasHit(item: GeoItemRef(kind: .route, id: best.id), poi: nil, distance: best.d * frame.camera.zoom)
+        // A marker on the line (a waypoint, a note) wins over the line itself.
+        return CanvasHit(item: GeoItemRef(kind: .route, id: best.id), poi: nil,
+                         distance: best.d * frame.camera.zoom + Self.lineHitPenalty)
     }
 
     // MARK: Routes
