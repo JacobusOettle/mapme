@@ -78,6 +78,13 @@ final class MapOverlayView: UIView {
     private let puckRing = CALayer()
     private let puckDisc = CAGradientLayer()
     private let markerContainer = CALayer()
+    /// Features' layers (`CanvasOverlay`), by level: under the trail, above the POI markers,
+    /// above everything.
+    private let featureRoutesContainer = CALayer()
+    private let featureMarkersContainer = CALayer()
+    private let featureTopContainer = CALayer()
+    /// The puck's halo and disc breathe (render-server animations); the battery saver stops them.
+    private var animationsEnabled = true
     private let offscreenArrow = CAShapeLayer()
     private let offscreenLabel = CALayer()
     private let scaleLayer = CALayer()
@@ -167,7 +174,29 @@ final class MapOverlayView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window != nil { startBreathing() }
+        if window != nil, animationsEnabled { startBreathing() }
+    }
+
+    /// Adds a feature's layer at its level (see `CanvasOverlayLevel`).
+    func addFeatureLayer(_ layer: CALayer, level: CanvasOverlayLevel) {
+        switch level {
+        case .routes: featureRoutesContainer.addSublayer(layer)
+        case .markers: featureMarkersContainer.addSublayer(layer)
+        case .top: featureTopContainer.addSublayer(layer)
+        }
+    }
+
+    /// Idle animations on or off (the battery saver turns them off: they keep the render server
+    /// drawing even when nothing else moves).
+    func setAnimationsEnabled(_ enabled: Bool) {
+        guard enabled != animationsEnabled else { return }
+        animationsEnabled = enabled
+        if enabled {
+            if window != nil { startBreathing() }
+        } else {
+            haloLayer.removeAnimation(forKey: "breathe")
+            puckDisc.removeAnimation(forKey: "breathe")
+        }
     }
 
     private func setUpLayers() {
@@ -241,9 +270,10 @@ final class MapOverlayView: UIView {
         scaleLayer.anchorPoint = .zero
         scaleLayer.opacity = 0
 
-        let stack: [CALayer] = [accuracyLayer, beamLayer, trailHalo, trailDots, trailStart, guideCasing, guideLayer,
-                                poiContainer, haloLayer, puckLayer, balloonLayer, balloonLabel, guideLabel,
-                                markerContainer, offscreenArrow, offscreenLabel, scaleLayer]
+        let stack: [CALayer] = [accuracyLayer, beamLayer, featureRoutesContainer, trailHalo, trailDots, trailStart,
+                                guideCasing, guideLayer, poiContainer, featureMarkersContainer, haloLayer, puckLayer,
+                                balloonLayer, balloonLabel, guideLabel, markerContainer, featureTopContainer,
+                                offscreenArrow, offscreenLabel, scaleLayer]
         for l in stack {
             layer.addSublayer(l)
         }

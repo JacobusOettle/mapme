@@ -68,6 +68,18 @@ struct MapCanvasView: UIViewRepresentable {
     var showMapLabels: Bool = true
     /// Receives the map rotation (for the compass) and takes commands (north up).
     var controller: MapCanvasController? = nil
+    /// Features' overlays and map-space layers (`CanvasOverlaySet`), the active tool and the
+    /// terrain continuation beyond the sheet (docs/design/explorer.md, Map screen).
+    var featureOverlays: [any CanvasOverlay] = []
+    var mapSpaceLayers: [any CanvasMapSpaceLayer] = []
+    var tool: (any MapTool)? = nil
+    var continuationMargin: CGFloat = 0
+    /// The camera carried over from the previous map (auto-switching).
+    var cameraHandoff: CanvasCameraHandoff? = nil
+    var maxFrameRate: Float = 120
+    var animationsEnabled: Bool = true
+    /// A tap on a feature's content.
+    var onSelectHit: ((CanvasHit) -> Void)? = nil
 
     func makeUIView(context: Context) -> MapCanvasUIView {
         MapCanvasUIView(frame: .zero)
@@ -77,6 +89,7 @@ struct MapCanvasView: UIViewRepresentable {
         uiView.onTap = onTap
         uiView.onLongPress = onLongPress
         uiView.onSelectPOI = onSelectPOI
+        uiView.onSelectHit = onSelectHit
         uiView.controller = controller
 
         let mode: CanvasTrackingMode
@@ -119,7 +132,14 @@ struct MapCanvasView: UIViewRepresentable {
             markers: markers,
             units: units,
             chromeInsets: chromeInsets,
-            locationColor: locationColor.uiColor
+            locationColor: locationColor.uiColor,
+            featureOverlays: featureOverlays,
+            mapSpaceLayers: mapSpaceLayers,
+            tool: tool,
+            continuationMargin: continuationMargin,
+            cameraHandoff: cameraHandoff,
+            maxFrameRate: maxFrameRate,
+            animationsEnabled: animationsEnabled
         ))
     }
 

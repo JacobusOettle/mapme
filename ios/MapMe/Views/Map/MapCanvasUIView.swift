@@ -31,11 +31,27 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         var units: DistanceUnits
         var chromeInsets: UIEdgeInsets
         var locationColor: UIColor
+        /// Features' screen-space overlays (`CanvasOverlaySet`).
+        var featureOverlays: [any CanvasOverlay] = []
+        /// Features' views in map-pixel space (the terrain beyond the sheet).
+        var mapSpaceLayers: [any CanvasMapSpaceLayer] = []
+        /// The tool taking taps and one-finger drags first (route editing), if any.
+        var tool: (any MapTool)? = nil
+        /// Map pixels the camera may show beyond each edge of the sheet (the terrain continuation).
+        var continuationMargin: CGFloat = 0
+        /// The camera to carry over when `map` is new (auto-switching).
+        var cameraHandoff: CanvasCameraHandoff? = nil
+        /// Highest redraw rate (the battery saver lowers it).
+        var maxFrameRate: Float = 120
+        /// Idle animations (the puck's breathing).
+        var animationsEnabled: Bool = true
     }
 
     var onTap: ((CGPoint) -> Void)?
     var onLongPress: ((CGPoint) -> Void)?
     var onSelectPOI: ((MapPOI) -> Void)?
+    /// A tap on a feature's content (a waypoint, a note, another map's place).
+    var onSelectHit: ((CanvasHit) -> Void)?
     /// The canvas changed the tracking mode itself (a pan stops following, rotating by hand leaves
     /// heading mode, tapping the compass returns to north up).
     var onTrackingChange: ((CanvasTrackingMode) -> Void)?
@@ -46,9 +62,23 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         }
     }
 
-    private let sheetLayer = CALayer()
+    /// The sheet of paper under the tiles (a view so map-space layers can go below it).
+    private let sheetView = UIView()
+    private var sheetLayer: CALayer { sheetView.layer }
     private let tiledView = TiledMapView(frame: .zero)
     private let overlay = MapOverlayView(frame: .zero)
+
+    // Features (docs/design/explorer.md, Map screen).
+    private var featureOverlays: [any CanvasOverlay] = []
+    private var mapSpaceLayers: [any CanvasMapSpaceLayer] = []
+    private var tool: (any MapTool)?
+    /// A one-finger drag the tool took (the map does not pan meanwhile).
+    private var toolDragging = false
+    private var continuationMargin: CGFloat = 0
+    private var pendingHandoff: CanvasCameraHandoff?
+    private var maxFrameRate: Float = 120
+    /// What the features' `mapDidChange` last saw (nil: tell them again).
+    private var featureMapKey: FeatureMapKey?
 
     private var map: MapDocument?
     private weak var tileStore: TileStore?
@@ -109,11 +139,12 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         clipsToBounds = true
         isMultipleTouchEnabled = true
         accessibilityIdentifier = "mapCanvas"
+        sheetView.isUserInteractionEnabled = false
         sheetLayer.backgroundColor = Theme.uiPaper.cgColor
         sheetLayer.shadowColor = UIColor.black.cgColor
         sheetLayer.shadowOpacity = 0.55
         sheetLayer.isHidden = true
-        layer.addSublayer(sheetLayer)
+        addSubview(sheetView)
         addSubview(tiledView)
         overlay.frame = bounds
         overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -156,6 +187,9 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
 
     func apply(_ inputs: Inputs) {
         let mapChanged = map?.id != inputs.map.id
+        if mapChanged, let handoff = inputs.cameraHandoff, handoff.toMapID == inputs.map.id {
+            pendingHandoff = handoff
+        }
         if mapChanged || tileStore !== inputs.tileStore || darkMap != inputs.darkMap {
             tiledView.configure(map: inputs.map, store: inputs.tileStore, dark: inputs.darkMap)
             tileStore = inputs.tileStore
@@ -181,6 +215,19 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
             hasInitialCamera = false
             setNeedsLayout()
         }
+
+        let margin = max(0, inputs.continuationMargin.isFinite ? inputs.continuationMargin : 0)
+        if margin != continuationMargin {
+            continuationMargin = margin
+            setNeedsLayout()
+        }
+        installFeatures(overlays: inputs.featureOverlays, mapSpaceLayers: inputs.mapSpaceLayers)
+        tool = inputs.tool
+        if inputs.maxFrameRate != maxFrameRate {
+            maxFrameRate = inputs.maxFrameRate
+            displayLink?.preferredFrameRateRange = frameRateRange
+        }
+        overlay.setAnimationsEnabled(inputs.animationsEnabled)
 
         overlay.units = inputs.units
         overlay.setStyle(locationColor: inputs.locationColor, darkMap: inputs.darkMap)
@@ -221,7 +268,90 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
             selectedPOIID = inputs.selectedPOIID
             if let id = inputs.selectedPOIID { framePOI(id) }
         }
+        updateFeatureMap(inputs)
         startAnimating()
+    }
+
+    // MARK: - Features
+
+    /// What the features are told about the map (they reproject when it changes).
+    private struct FeatureMapKey: Equatable {
+        var mapID: UUID
+        var georef: Georeference?
+        var size: CGSize
+        var darkMap: Bool
+        var units: DistanceUnits
+        var margin: CGFloat
+    }
+
+    private func installFeatures(overlays: [any CanvasOverlay], mapSpaceLayers layers: [any CanvasMapSpaceLayer]) {
+        let overlayIDs = overlays.map { ObjectIdentifier($0) }
+        if overlayIDs != featureOverlays.map({ ObjectIdentifier($0) }) {
+            for o in featureOverlays { o.layer.removeFromSuperlayer() }
+            featureOverlays = overlays
+            for o in overlays { overlay.addFeatureLayer(o.layer, level: o.level) }
+            featureMapKey = nil
+        }
+        let layerIDs = layers.map { ObjectIdentifier($0) }
+        if layerIDs != mapSpaceLayers.map({ ObjectIdentifier($0) }) {
+            for l in mapSpaceLayers { l.view.removeFromSuperview() }
+            mapSpaceLayers = layers
+            for l in layers {
+                l.view.isUserInteractionEnabled = false
+                if l.isBelowSheet {
+                    insertSubview(l.view, belowSubview: sheetView)
+                } else {
+                    insertSubview(l.view, aboveSubview: tiledView)
+                }
+            }
+            featureMapKey = nil
+        }
+    }
+
+    /// Tells the features about a new map, georeference, appearance, units or continuation.
+    private func updateFeatureMap(_ inputs: Inputs) {
+        guard !featureOverlays.isEmpty || !mapSpaceLayers.isEmpty else { return }
+        let key = FeatureMapKey(mapID: inputs.map.id, georef: inputs.map.georef, size: inputs.map.pixelSize,
+                                darkMap: inputs.darkMap, units: inputs.units, margin: continuationMargin)
+        guard key != featureMapKey else { return }
+        featureMapKey = key
+        let context = CanvasMapContext(map: inputs.map, georef: inputs.map.georef,
+                                       projector: inputs.map.georef.map { Georeference.Projector($0) },
+                                       continuationMargin: continuationMargin, darkMap: inputs.darkMap,
+                                       units: inputs.units,
+                                       requestFrame: { [weak self] in self?.startAnimating() })
+        for o in featureOverlays { o.mapDidChange(context) }
+        for l in mapSpaceLayers { l.mapDidChange(context) }
+    }
+
+    /// The camera as seen on the ground, for map `mapID` next (see `CanvasCameraHandoff`).
+    func makeHandoff(to mapID: UUID) -> CanvasCameraHandoff? {
+        guard let g = map?.georef, bounds.width > 0 else { return nil }
+        let c = camera.center
+        let mpp = g.metersPerPixel(atPixel: c)
+        let center = g.latLon(forPixel: c)
+        guard mpp.isFinite, mpp > 0, camera.zoom > 0, center.lat.isFinite, center.lon.isFinite else { return nil }
+        return CanvasCameraHandoff(toMapID: mapID, metersPerPoint: mpp / Double(camera.zoom),
+                                   northOnScreen: g.northAngle(atPixel: c) + Double(camera.rotation), center: center)
+    }
+
+    /// Applies a handoff to the new map's camera; false when it does not fit (not located).
+    private func applyHandoff(_ handoff: CanvasCameraHandoff, map: MapDocument) -> Bool {
+        guard handoff.toMapID == map.id, let g = map.georef else { return false }
+        var p = g.pixel(for: handoff.center)
+        if !(p.x.isFinite && p.y.isFinite) { p = CGPoint(x: mapSize.width / 2, y: mapSize.height / 2) }
+        let mpp = g.metersPerPixel(atPixel: p)
+        camera.zoom = mpp.isFinite && mpp > 0 && handoff.metersPerPoint > 0
+            ? clampZoom(CGFloat(mpp / handoff.metersPerPoint)) : fitZoom
+        camera.rotation = lockNorthUp ? 0 : CGFloat(MapAngle.normalized(handoff.northOnScreen - g.northAngle(atPixel: p)))
+        camera.center = clampCenter(p)
+        if tracking.follows, followTarget != nil { followEngaged = true }
+        return true
+    }
+
+    private var frameRateRange: CAFrameRateRange {
+        let top = max(15, min(maxFrameRate, 120))
+        return CAFrameRateRange(minimum: min(30, top), maximum: top, preferred: top)
     }
 
     private func setTracking(_ value: CanvasTrackingMode, notify: Bool) {
@@ -265,11 +395,12 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
 
     private var mapSize: CGSize { map?.pixelSize ?? .zero }
 
-    /// The user's map pixel when it is on (or just beside) the map; following is a no-op otherwise
-    /// (the off-screen arrow and the stats panel say where the map is instead).
+    /// The user's map pixel when it is on (or just beside) the map, or in the terrain continuing
+    /// it; following is a no-op otherwise (the off-screen arrow and the stats panel say where the
+    /// map is instead).
     private var followTarget: CGPoint? {
         guard let u = overlay.userMapPixel else { return nil }
-        let margin = max(mapSize.width, mapSize.height) * 0.1
+        let margin = max(max(mapSize.width, mapSize.height) * 0.1, continuationMargin)
         return CGRect(origin: .zero, size: mapSize).insetBy(dx: -margin, dy: -margin).contains(u) ? u : nil
     }
 
@@ -283,23 +414,32 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         return r.width > 40 && r.height > 40 ? r : bounds
     }
 
-    private var fitZoom: CGFloat {
+    private var fitZoom: CGFloat { fitZoom(for: mapSize) }
+
+    private func fitZoom(for size: CGSize) -> CGFloat {
         let r = contentRect
-        guard mapSize.width > 0, mapSize.height > 0 else { return 1 }
-        return min(r.width / mapSize.width, r.height / mapSize.height) * 0.95
+        guard size.width > 0, size.height > 0 else { return 1 }
+        return min(r.width / size.width, r.height / size.height) * 0.95
     }
 
-    private var minZoom: CGFloat { min(fitZoom * 0.9, Self.maxZoom) }
+    /// Zoomed out to the sheet, or to the sheet and its terrain continuation.
+    private var minZoom: CGFloat {
+        let m = continuationMargin
+        let expanded = fitZoom(for: CGSize(width: mapSize.width + 2 * m, height: mapSize.height + 2 * m))
+        return min(min(fitZoom, expanded) * 0.9, Self.maxZoom)
+    }
 
     private func clampZoom(_ z: CGFloat) -> CGFloat {
         guard z.isFinite else { return fitZoom }
         return min(max(z, minZoom), Self.maxZoom)
     }
 
-    /// Keeps the middle of the screen over the map, so the map can never leave the screen entirely.
+    /// Keeps the middle of the screen over the map (or the terrain continuing it), so the map can
+    /// never leave the screen entirely.
     private func clampCenter(_ c: CGPoint) -> CGPoint {
         guard c.x.isFinite, c.y.isFinite else { return CGPoint(x: mapSize.width / 2, y: mapSize.height / 2) }
-        return CGPoint(x: min(max(c.x, 0), mapSize.width), y: min(max(c.y, 0), mapSize.height))
+        let m = continuationMargin
+        return CGPoint(x: min(max(c.x, -m), mapSize.width + m), y: min(max(c.y, -m), mapSize.height + m))
     }
 
     /// Where the puck sits while following: centred, or lower in heading mode so you see ahead.
@@ -325,6 +465,10 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         targetZoom = nil
         zoomAnchor = nil
         let size = bounds.size
+        if let handoff = pendingHandoff {
+            pendingHandoff = nil
+            if applyHandoff(handoff, map: map) { return }
+        }
         if tracking == .followWithHeading, let heading = smoothedHeadingDegrees ?? effectiveHeading {
             camera.rotation = CGFloat(MapAngle.normalized(-(MapAngle.radians(heading) + overlay.userNorthAngle)))
         } else {
@@ -398,12 +542,36 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
             sheetLayer.shadowRadius = 16 / z
             sheetLayer.shadowOffset = CGSize(width: 0, height: 5 / z)
         }
+        for l in mapSpaceLayers {
+            let v = l.view
+            v.center = camera.viewPoint(forMap: CGPoint(x: v.bounds.midX, y: v.bounds.midY), viewSize: size)
+            v.transform = transform
+        }
         CATransaction.commit()
         overlay.render(camera: camera, contentRect: contentRect, heading: smoothedHeadingDegrees, headingAccuracy: headingAccuracy)
+        if !featureOverlays.isEmpty {
+            let frame = currentFrame()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            for o in featureOverlays { o.render(frame) }
+            CATransaction.commit()
+        }
         if let controller {
             let north = (overlay.userMapPixel != nil ? overlay.userNorthAngle : mapNorthAngle) + Double(camera.rotation)
             controller.publish(rotationDegrees: Double(camera.rotation) * 180 / .pi, northDegrees: north * 180 / .pi)
         }
+    }
+
+    /// The camera as the features see it.
+    private func currentFrame() -> CanvasFrame {
+        let size = bounds.size
+        var metersPerPoint = 0.0
+        if let g = map?.georef, camera.zoom > 0 {
+            let mpp = g.metersPerPixel(atPixel: camera.center)
+            if mpp.isFinite, mpp > 0 { metersPerPoint = mpp / Double(camera.zoom) }
+        }
+        return CanvasFrame(camera: camera, viewSize: size, transform: camera.transform(viewSize: size),
+                           contentRect: contentRect, metersPerPoint: metersPerPoint, timestamp: CACurrentMediaTime())
     }
 
     private func startAnimating() {
@@ -412,7 +580,7 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
             return
         }
         let link = CADisplayLink(target: DisplayLinkProxy(self), selector: #selector(DisplayLinkProxy.tick(_:)))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
+        link.preferredFrameRateRange = frameRateRange
         link.add(to: .main, forMode: .common)
         displayLink = link
         lastTimestamp = 0
@@ -437,6 +605,7 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
 
         // The puck glides between fixes; the camera follows the glide.
         if overlay.advance(now: now, dt: dt) { active = true }
+        for o in featureOverlays where o.advance(now) { active = true }
 
         // Heading low-pass on the unit vector.
         if let target = effectiveHeading {
@@ -589,8 +758,27 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
         switch g.state {
         case .began:
             gestureBegan()
+            // A tool may take a one-finger drag (moving a route point, tracing freehand).
+            if let tool, g.numberOfTouches == 1 {
+                let location = g.location(in: self)
+                let moved = g.translation(in: self)
+                let start = CGPoint(x: location.x - moved.x, y: location.y - moved.y)
+                let size = bounds.size
+                if tool.beginDrag(at: camera.mapPoint(forView: start, viewSize: size), viewPoint: start) {
+                    toolDragging = true
+                    g.setTranslation(.zero, in: self)
+                    tool.drag(to: camera.mapPoint(forView: location, viewSize: size), viewPoint: location)
+                    return
+                }
+            }
             if tracking.follows { setTracking(.none, notify: true) }
         case .changed:
+            if toolDragging {
+                let location = g.location(in: self)
+                tool?.drag(to: camera.mapPoint(forView: location, viewSize: bounds.size), viewPoint: location)
+                startAnimating()
+                return
+            }
             let t = g.translation(in: self)
             g.setTranslation(.zero, in: self)
             // While pinching or rotating, their focal point moves the map instead.
@@ -601,12 +789,22 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
             overlay.flashScaleBar()
             applyCamera()
         case .ended:
+            if toolDragging {
+                toolDragging = false
+                tool?.endDrag(cancelled: false)
+                gestureEnded()
+                return
+            }
             let v = g.velocity(in: self)
             let speed = hypot(v.x, v.y)
             let maxSpeed: CGFloat = 6000
             velocity = speed > 60 ? CGPoint(x: v.x * min(1, maxSpeed / speed), y: v.y * min(1, maxSpeed / speed)) : .zero
             gestureEnded()
         case .cancelled, .failed:
+            if toolDragging {
+                toolDragging = false
+                tool?.endDrag(cancelled: true)
+            }
             gestureEnded()
         default:
             break
@@ -693,16 +891,35 @@ final class MapCanvasUIView: UIView, UIGestureRecognizerDelegate {
 
     @objc private func handleTap(_ g: UITapGestureRecognizer) {
         let p = g.location(in: self)
-        if let poi = overlay.poi(at: p) {
+        let pixel = camera.mapPoint(forView: p, viewSize: bounds.size)
+        if let tool, tool.tap(at: pixel, viewPoint: p) { return }
+        if let hit = featureHit(at: p) {
+            onSelectHit?(hit)
+        } else if let poi = overlay.poi(at: p) {
             onSelectPOI?(poi)
         } else {
-            onTap?(camera.mapPoint(forView: p, viewSize: bounds.size))
+            onTap?(pixel)
         }
+    }
+
+    /// The nearest feature content under a view point (the user's own items before the map's POIs).
+    private func featureHit(at point: CGPoint) -> CanvasHit? {
+        guard !featureOverlays.isEmpty else { return nil }
+        let frame = currentFrame()
+        var best: CanvasHit?
+        for o in featureOverlays.sorted(by: { $0.level > $1.level }) {
+            guard let hit = o.hitTest(point, frame: frame) else { continue }
+            if hit.distance < (best?.distance ?? .infinity) { best = hit }
+        }
+        return best
     }
 
     @objc private func handleLongPress(_ g: UILongPressGestureRecognizer) {
         guard g.state == .began else { return }
-        onLongPress?(camera.mapPoint(forView: g.location(in: self), viewSize: bounds.size))
+        let p = g.location(in: self)
+        let pixel = camera.mapPoint(forView: p, viewSize: bounds.size)
+        if let tool, tool.longPress(at: pixel, viewPoint: p) { return }
+        onLongPress?(pixel)
     }
 }
 

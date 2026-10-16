@@ -80,6 +80,24 @@ enum MapAppearance: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// Battery saver (docs/design/explorer.md, Battery saver).
+enum BatterySaverMode: String, Codable, CaseIterable, Identifiable {
+    case off
+    /// On while the iPhone is in Low Power Mode.
+    case auto
+    case on
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .off: return "Off"
+        case .auto: return "With Low Power Mode"
+        case .on: return "Always"
+        }
+    }
+}
+
 /// User preferences, persisted in UserDefaults.
 @Observable
 final class AppSettings {
@@ -111,6 +129,41 @@ final class AppSettings {
     /// fails). 50 km by default, 10…100 km in Settings.
     var searchRadiusKm: Double = AppSettings.defaultSearchRadiusKm {
         didSet { defaults.set(searchRadiusKm, forKey: "searchRadiusKm") }
+    }
+
+    // Explorer features (docs/design/explorer.md).
+
+    /// Switch to the most detailed map covering you as you walk (Settings → Maps).
+    var autoSwitchMaps: Bool = true { didSet { defaults.set(autoSwitchMaps, forKey: "autoSwitchMaps") } }
+    /// Continue a map beyond its sheet's edge with terrain contours.
+    var showOffMapTerrain: Bool = true { didSet { defaults.set(showOffMapTerrain, forKey: "showOffMapTerrain") } }
+    /// Show the names and places of your other maps on this one (beyond the sheet, too).
+    var showOtherMapsPOIs: Bool = true { didSet { defaults.set(showOtherMapsPOIs, forKey: "showOtherMapsPOIs") } }
+    var batterySaver: BatterySaverMode = .auto {
+        didSet { defaults.set(batterySaver.rawValue, forKey: "batterySaver") }
+    }
+    /// Warn (haptic, banner, notification in the background) when you leave the route you follow.
+    var offRouteAlerts: Bool = true { didSet { defaults.set(offRouteAlerts, forKey: "offRouteAlerts") } }
+    /// Your walking pace against Tobler's hiking function (1 = as the model, 1.2 = 20 % slower);
+    /// nil: learned from your recorded tracks.
+    var walkingPaceFactor: Double? = nil {
+        didSet {
+            if let walkingPaceFactor { defaults.set(walkingPaceFactor, forKey: "walkingPaceFactor") } else {
+                defaults.removeObject(forKey: "walkingPaceFactor")
+            }
+        }
+    }
+    /// Keep the terrain around every map you locate on this iPhone (trailhead caching).
+    var cacheTerrainAroundMaps: Bool = true {
+        didSet { defaults.set(cacheTerrainAroundMaps, forKey: "cacheTerrainAroundMaps") }
+    }
+    /// Download offline regions over mobile data without asking.
+    var offlineDownloadsOnCellular: Bool = false {
+        didSet { defaults.set(offlineDownloadsOnCellular, forKey: "offlineDownloadsOnCellular") }
+    }
+    /// Vertical exaggeration of the 3D view (1…3).
+    var terrainExaggeration: Double = 1.5 {
+        didSet { defaults.set(terrainExaggeration, forKey: "terrainExaggeration") }
     }
 
     static let defaultSearchRadiusKm = 50.0
@@ -149,6 +202,17 @@ final class AppSettings {
             if migrated != v { defaults.set(migrated, forKey: "searchRadiusKm") }
         }
         defaults.set(Self.searchRadiusVersion, forKey: "searchRadiusVersion")
+        if let v = defaults.object(forKey: "autoSwitchMaps") as? Bool { autoSwitchMaps = v }
+        if let v = defaults.object(forKey: "showOffMapTerrain") as? Bool { showOffMapTerrain = v }
+        if let v = defaults.object(forKey: "showOtherMapsPOIs") as? Bool { showOtherMapsPOIs = v }
+        if let v = defaults.string(forKey: "batterySaver").flatMap(BatterySaverMode.init(rawValue:)) { batterySaver = v }
+        if let v = defaults.object(forKey: "offRouteAlerts") as? Bool { offRouteAlerts = v }
+        if let v = defaults.object(forKey: "walkingPaceFactor") as? Double, v.isFinite, v > 0 { walkingPaceFactor = v }
+        if let v = defaults.object(forKey: "cacheTerrainAroundMaps") as? Bool { cacheTerrainAroundMaps = v }
+        if let v = defaults.object(forKey: "offlineDownloadsOnCellular") as? Bool { offlineDownloadsOnCellular = v }
+        if let v = defaults.object(forKey: "terrainExaggeration") as? Double, v.isFinite {
+            terrainExaggeration = min(max(v, 1), 3)
+        }
     }
 
     /// A stored search radius brought up to date: the old 20 km default (version < 2) becomes

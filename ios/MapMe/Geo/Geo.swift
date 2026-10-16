@@ -7,7 +7,7 @@ import Foundation
 // - Ground frame: Web Mercator metres, +y = north.
 // - Georeference: 3×3 row-major homography pixel → Mercator.
 
-struct LatLon: Codable, Hashable {
+struct LatLon: Codable, Hashable, Sendable {
     var lat: Double
     var lon: Double
 

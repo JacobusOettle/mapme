@@ -39,6 +39,25 @@ enum Theme {
     static let uiDarkMapSurround = UIColor(red: 0.035, green: 0.035, blue: 0.04, alpha: 1)
     static let uiPOI = UIColor(red: 1.0, green: 0.85, blue: 0.30, alpha: 1)
 
+    // Explorer features (docs/design/explorer.md, Look): routes, notes, the terrain beyond a sheet.
+
+    /// Planned routes: electric violet, apart from the pink trail, the red puck and the map's inks.
+    static let route = Color(red: 0.49, green: 0.36, blue: 1.0)
+    static let uiRoute = UIColor(red: 0.49, green: 0.36, blue: 1.0, alpha: 1)
+    /// Imported routes and tracks (GPX from Gaia, AllTrails, friends).
+    static let importedRoute = Color(red: 0.0, green: 0.78, blue: 0.75)
+    static let uiImportedRoute = UIColor(red: 0.0, green: 0.78, blue: 0.75, alpha: 1)
+    /// Notes and photos on the map.
+    static let note = Color(red: 1.0, green: 0.62, blue: 0.04)
+    static let uiNote = UIColor(red: 1.0, green: 0.62, blue: 0.04, alpha: 1)
+    /// Paper of the terrain drawn beyond a sheet's edge: a shade off the sheet's own, so the
+    /// real map stays recognisable (dark map, then paper appearance).
+    static let uiOffMapNightPaper = UIColor(red: 0.105, green: 0.105, blue: 0.115, alpha: 1)
+    static let uiOffMapPaper = UIColor(red: 0.91, green: 0.90, blue: 0.87, alpha: 1)
+    /// Hairline along a sheet's edge where the terrain beyond it shows.
+    static let uiSheetEdge = UIColor(white: 1, alpha: 0.35)
+    static let uiSheetEdgePaper = UIColor(white: 0, alpha: 0.3)
+
     static let corner: CGFloat = 16
     /// The smallest comfortable hit target, points (Apple's Human Interface Guidelines).
     static let minTapTarget: CGFloat = 44

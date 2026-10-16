@@ -13,7 +13,11 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 SettingsDisplaySection()
+                MapsSettingsSection()           // maps: auto-switching, terrain beyond the sheet
+                RoutesSettingsSection()         // routes: pace, off-route alerts, daylight
+                BatterySettingsSection()        // battery saver
                 SettingsLocatingSection()
+                OfflineSettingsSection()        // offline regions, terrain around your maps
                 TracksSection()
                 SettingsStorageSection()
                 SettingsAboutSection()

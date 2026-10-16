@@ -57,13 +57,27 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UIBackgroundModes:
           - location
+        # iOS 26: an offline region keeps downloading after you leave the app (BGContinuedProcessingTask).
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.jacobusoettle.mapme.offline-download
         NSLocationWhenInUseUsageDescription: MapMe shows your position as a red dot on the maps you import.
-        NSLocationAlwaysAndWhenInUseUsageDescription: MapMe keeps recording your track while the screen is off when you start a recording.
-        NSCameraUsageDescription: Take a photo of a paper map to use it in MapMe.
-        NSPhotoLibraryUsageDescription: Import a map image or screenshot from your photos.
+        NSLocationAlwaysAndWhenInUseUsageDescription: MapMe keeps recording your track and following your route while the screen is off.
+        NSCameraUsageDescription: Take a photo of a paper map to use it in MapMe, or a photo to pin as a note on your map.
+        NSPhotoLibraryUsageDescription: Import a map image or screenshot, or add a photo from your library as a note on your map.
         ITSAppUsesNonExemptEncryption: false
         LSSupportsOpeningDocumentsInPlace: false
         UIFileSharingEnabled: true
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: com.topografix.gpx
+            UTTypeDescription: GPS Exchange Format
+            UTTypeConformsTo:
+              - public.xml
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - gpx
+              public.mime-type:
+                - application/gpx+xml
         CFBundleDocumentTypes:
           - CFBundleTypeName: PDF map
             LSHandlerRank: Alternate
@@ -77,6 +91,10 @@ targets:
               - public.heic
               - public.tiff
               - public.image
+          - CFBundleTypeName: GPX route, track or waypoints
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - com.topografix.gpx
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jacobusoettle.mapme

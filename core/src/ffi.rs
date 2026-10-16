@@ -4,7 +4,8 @@
 //! `panic = "unwind"`) and turns them, like any error, into a failed JSON
 //! response or an error return value. Only shared references to the session
 //! are ever created, so `mm_session_progress` / `mm_session_cancel` may run
-//! on other threads while `mm_session_georeference` works.
+//! on other threads while `mm_session_georeference` works. The terrain store
+//! (`MMTerrain`, `mm_tile_plan`) lives in `ffi/terrain.rs`.
 
 use crate::dark::{DarkProfile, DarkStyle, TileRect};
 use crate::dem::TileId;
@@ -14,6 +15,9 @@ use std::collections::BTreeSet;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Mutex, MutexGuard};
+
+mod terrain;
+pub use terrain::*;
 
 /// Opaque session handle (`MMSession` in C).
 pub struct MMSession {

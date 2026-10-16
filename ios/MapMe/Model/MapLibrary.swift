@@ -9,6 +9,9 @@ final class MapLibrary {
     /// Most recently opened/created first.
     private(set) var maps: [MapDocument] = []
     let rootURL: URL
+    /// Called after a map is deleted (with its id): the features drop what belongs to it (the
+    /// terrain cached around it). Set once by `AppModel`.
+    @ObservationIgnored var didDelete: ((UUID) -> Void)?
 
     static let metaFileName = "meta.json"
 
@@ -80,6 +83,7 @@ final class MapLibrary {
         // A background dark render of this map stops; whatever it wrote meanwhile goes too.
         DarkPrerender.cancel(map.id) { try? FileManager.default.removeItem(at: folder) }
         maps.removeAll { $0.id == map.id }
+        didDelete?(map.id)
     }
 
     func rename(_ map: MapDocument, to name: String) {

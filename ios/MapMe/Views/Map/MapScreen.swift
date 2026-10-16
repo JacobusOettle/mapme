@@ -4,28 +4,36 @@ import UIKit
 
 /// The live map, in the style of Apple Maps and AllTrails: the paper map on Apple dark grey with
 /// the location puck, heading beam and dotted trail; glass controls (back, title, layers,
-/// tracking, compass) and a draggable stats panel with the record button.
+/// tracking, compass, then the features' side column) and a draggable stats panel with the record
+/// button. The explorer features plug in through `MapScreenContext` (the map shown, selection,
+/// tool, presentations), `CanvasOverlaySet` (canvas content), `MapSideColumn` and `MapTopBanners`
+/// (docs/design/explorer.md, Map screen).
 @MainActor
 struct MapScreen: View {
+    /// The map opened (auto-switching may then show another in place: `context.mapID`).
     let mapID: UUID
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
-    @State private var tileStore: TileStore?
+    @State private var context: MapScreenContext
     @State private var tracking: CanvasTrackingMode = .follow
     @State private var didSetUp = false
-    @State private var controller = MapCanvasController()
     @State private var selectedPOIID: UUID?
     @State private var showNearby = false
     @State private var showCalibration = false
     @State private var showGeorefInfo = false
     @State private var panelExpanded = false
     @State private var bottomChromeHeight: CGFloat = 150
-    @State private var waypointDrops = 0
+    @State private var pinDrops = 0
+
+    init(mapID: UUID) {
+        self.mapID = mapID
+        _context = State(initialValue: MapScreenContext(mapID: mapID))
+    }
 
     var body: some View {
         Group {
-            if let map = model.library.map(id: mapID) {
+            if let map = model.library.map(id: context.mapID) {
                 content(map: map)
             } else {
                 missingMap
@@ -35,51 +43,61 @@ struct MapScreen: View {
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
         .onAppear {
-            model.library.touch(mapID)
+            context.attach(model)
+            model.library.touch(context.mapID)
             if !didSetUp {
                 didSetUp = true
                 tracking = model.settings.orientationMode == .headingUp ? .followWithHeading : .follow
+                context.tracking = tracking
             }
-            if tileStore == nil, let map = model.library.map(id: mapID) {
-                tileStore = TileStore(map: map, library: model.library)
-            }
-            UIApplication.shared.isIdleTimerDisabled = model.settings.keepScreenOn
+            updateIdleTimer()
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
         }
-        .onChange(of: model.settings.keepScreenOn) { _, keepOn in
-            UIApplication.shared.isIdleTimerDisabled = keepOn
-        }
-        .sensoryFeedback(.success, trigger: waypointDrops)
+        .onChange(of: model.settings.keepScreenOn) { _, _ in updateIdleTimer() }
+        .onChange(of: model.battery.allowsKeepScreenAwake) { _, _ in updateIdleTimer() }
+        .onChange(of: tracking) { _, mode in context.tracking = mode }
+        .onChange(of: context.mapID) { _, id in mapDidSwitch(to: id) }
+        .sensoryFeedback(.success, trigger: pinDrops)
     }
 
     @ViewBuilder
     private func content(map: MapDocument) -> some View {
+        // Bindings for the features' presentations only; closures below use `context` itself (a
+        // possibly @Sendable closure must not capture the local @Bindable var).
+        @Bindable var presenting = context
         // SwiftUI's safe area, raised to the window's where it falls short (a screen laid out
         // while a cover was still closing), so the controls never slide under the status bar.
         SafeAreaReader { size, safe in
             let bottomGap = max(8, safe.bottom - 16)
             ZStack {
-                if let tileStore {
+                // The tiles of the map shown (switching maps waits for the new map's tiles).
+                if let tileStore = context.tileStore, tileStore.map.id == map.id {
                     LiveMapCanvas(
                         map: map,
                         tileStore: tileStore,
                         tracking: $tracking,
-                        controller: controller,
+                        context: context,
                         selectedPOIID: selectedPOIID,
                         chromeInsets: UIEdgeInsets(top: safe.top + 56, left: safe.leading + 8,
                                                    bottom: bottomGap + bottomChromeHeight + 8, right: safe.trailing + 8),
                         onSelectPOI: { poi in
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                                context.clearSelection()
                                 selectedPOIID = selectedPOIID == poi.id ? nil : poi.id
                             }
                         },
+                        onSelectHit: { hit in select(hit) },
                         onTap: { _ in
-                            guard selectedPOIID != nil else { return }
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { selectedPOIID = nil }
+                            guard selectedPOIID != nil || context.selectedItem != nil || context.selectedForeignPOI != nil
+                                || context.droppedPin != nil else { return }
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                                selectedPOIID = nil
+                                context.clearSelection()
+                            }
                         },
-                        onLongPress: { pixel in dropWaypoint(at: pixel) }
+                        onLongPress: { pixel in dropPin(at: pixel, map: map) }
                     )
                     .ignoresSafeArea()
                 } else {
@@ -91,18 +109,27 @@ struct MapScreen: View {
             }
         }
         .sheet(isPresented: $showNearby) {
-            NearbySheet(mapID: mapID) { poi in
+            NearbySheet(mapID: context.mapID) { poi in
                 showNearby = false
                 tracking = .none
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                     panelExpanded = false
+                    context.clearSelection()
                     selectedPOIID = poi.id
                 }
             }
             .environment(model)
         }
         .sheet(isPresented: $showCalibration) {
-            CalibrationView(mapID: mapID, onDone: { showCalibration = false })
+            CalibrationView(mapID: context.mapID, onDone: { showCalibration = false })
+                .environment(model)
+        }
+        .sheet(item: $presenting.sheet) { presentation in
+            presentation.content()
+                .environment(model)
+        }
+        .fullScreenCover(item: $presenting.cover) { presentation in
+            presentation.content()
                 .environment(model)
         }
     }
@@ -138,31 +165,36 @@ struct MapScreen: View {
             .accessibilityLabel("Back")
             .accessibilityIdentifier("backButton")
 
-            MapTitleCapsule(map: map, showInfo: $showGeorefInfo, onLocateAgain: {
-                // Present the next screen only after the popover has finished dismissing.
-                showGeorefInfo = false
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 450_000_000)
-                    model.relocate(mapID: mapID)
-                }
-            }, onCalibrate: {
-                showGeorefInfo = false
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 450_000_000)
-                    showCalibration = true
-                }
-            })
+            VStack(alignment: .leading, spacing: 8) {
+                MapTitleCapsule(map: map, showInfo: $showGeorefInfo, onLocateAgain: {
+                    // Present the next screen only after the popover has finished dismissing.
+                    showGeorefInfo = false
+                    let id = context.mapID
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 450_000_000)
+                        model.relocate(mapID: id)
+                    }
+                }, onCalibrate: {
+                    showGeorefInfo = false
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 450_000_000)
+                        showCalibration = true
+                    }
+                })
+                MapTopBanners(context: context, map: map)
+            }
 
             Spacer(minLength: 0)
 
             VStack(spacing: 10) {
                 CanvasControlStack(map: map, tracking: $tracking)
-                if controller.isRotated {
-                    CanvasCompassButton(controller: controller)
+                if context.controller.isRotated {
+                    CanvasCompassButton(controller: context.controller)
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
+                MapSideColumn(context: context, map: map)
             }
-            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: controller.isRotated)
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: context.controller.isRotated)
         }
     }
 
@@ -170,25 +202,26 @@ struct MapScreen: View {
         VStack(spacing: 10) {
             if map.georef == nil {
                 NotLocatedBanner(onCalibrate: { showCalibration = true },
-                                 onRetry: { model.relocate(mapID: mapID) })
+                                 onRetry: { model.relocate(mapID: context.mapID) })
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            if let id = selectedPOIID, let poi = map.pois.first(where: { $0.id == id }) {
-                SelectedPOICard(poi: poi) {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { selectedPOIID = nil }
-                }
-                .frame(maxWidth: 520)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+            selectionCard(map: map)
+            if let tool = context.tool {
+                tool.makeBar()
+                    .frame(maxWidth: 520)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else {
+                TrailStatsPanel(map: map, expanded: $panelExpanded, maxDetailsHeight: maxDetails, onShowAll: {
+                    openNearby()
+                }, onSelectPOI: { poi in
+                    tracking = .none
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+                        panelExpanded = false
+                        context.clearSelection()
+                        selectedPOIID = poi.id
+                    }
+                })
             }
-            TrailStatsPanel(map: map, expanded: $panelExpanded, maxDetailsHeight: maxDetails, onShowAll: {
-                openNearby()
-            }, onSelectPOI: { poi in
-                tracking = .none
-                withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
-                    panelExpanded = false
-                    selectedPOIID = poi.id
-                }
-            })
         }
         .frame(maxWidth: .infinity)
         .background {
@@ -197,6 +230,29 @@ struct MapScreen: View {
                     .onAppear { noteBottomChrome(proxy.size.height) }
                     .onChange(of: proxy.size.height) { _, height in noteBottomChrome(height) }
             }
+        }
+    }
+
+    /// The card of what is selected: the dropped pin, a geo item, another map's place, or one of
+    /// this map's POIs.
+    @ViewBuilder
+    private func selectionCard(map: MapDocument) -> some View {
+        if let pin = context.droppedPin {
+            DroppedPinCard(pin: pin, context: context, map: map)
+                .modifier(BottomCardPlacement())
+        } else if let ref = context.selectedItem {
+            SelectedGeoItemCard(ref: ref, context: context, map: map)
+                .modifier(BottomCardPlacement())
+        } else if let poi = context.selectedForeignPOI {
+            SelectedPOICard(poi: poi) {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { context.selectedForeignPOI = nil }
+            }
+            .modifier(BottomCardPlacement())
+        } else if let id = selectedPOIID, let poi = map.pois.first(where: { $0.id == id }) {
+            SelectedPOICard(poi: poi) {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { selectedPOIID = nil }
+            }
+            .modifier(BottomCardPlacement())
         }
     }
 
@@ -237,18 +293,49 @@ struct MapScreen: View {
         }
     }
 
-    /// Long-press drops a user waypoint at that spot on the map.
-    private func dropWaypoint(at pixel: CGPoint) {
-        guard var map = model.library.map(id: mapID), let georef = map.georef,
-              pixel.x >= 0, pixel.y >= 0, pixel.x <= CGFloat(map.pixelWidth), pixel.y <= CGFloat(map.pixelHeight)
-        else { return }
-        let n = map.pois.filter { $0.source == .user && $0.kind == .waypoint }.count + 1
-        let poi = MapPOI(name: "Waypoint \(n)", kind: .waypoint, source: .user,
-                         position: georef.latLon(forPixel: pixel), elevationM: nil)
-        map.pois.append(poi)
-        model.library.save(map)
-        waypointDrops += 1
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { selectedPOIID = poi.id }
+    /// A tap on a feature's content: a geo item's card, or another map's place.
+    private func select(_ hit: CanvasHit) {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            selectedPOIID = nil
+            context.droppedPin = nil
+            context.selectedItem = hit.item
+            context.selectedForeignPOI = hit.item == nil ? hit.poi : nil
+        }
+    }
+
+    /// Long-press drops a pin; its card offers a waypoint, a note, a photo or a route there.
+    private func dropPin(at pixel: CGPoint, map: MapDocument) {
+        guard let georef = map.georef else { return }
+        let m = MapContinuation.marginPixels(for: map, enabled: model.settings.showOffMapTerrain)
+        let area = CGRect(origin: .zero, size: map.pixelSize).insetBy(dx: -m, dy: -m)
+        guard area.contains(pixel) else { return }
+        let position = georef.latLon(forPixel: pixel)
+        guard position.lat.isFinite, position.lon.isFinite else { return }
+        pinDrops += 1
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            selectedPOIID = nil
+            context.clearSelection()
+            context.droppedPin = DroppedPin(position: position)
+        }
+    }
+
+    /// Auto-switching or "Maps here" showed another map: it counts as opened.
+    private func mapDidSwitch(to id: UUID) {
+        selectedPOIID = nil
+        model.library.touch(id)
+    }
+
+    private func updateIdleTimer() {
+        UIApplication.shared.isIdleTimerDisabled = model.settings.keepScreenOn && model.battery.allowsKeepScreenAwake
+    }
+}
+
+/// A card above the stats panel: at most 520 pt wide, sliding in from the bottom.
+private struct BottomCardPlacement: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .frame(maxWidth: 520)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 }
 
@@ -259,10 +346,11 @@ private struct LiveMapCanvas: View {
     let map: MapDocument
     let tileStore: TileStore
     @Binding var tracking: CanvasTrackingMode
-    let controller: MapCanvasController
+    let context: MapScreenContext
     let selectedPOIID: UUID?
     let chromeInsets: UIEdgeInsets
     var onSelectPOI: (MapPOI) -> Void
+    var onSelectHit: (CanvasHit) -> Void
     var onTap: (CGPoint) -> Void
     var onLongPress: (CGPoint) -> Void
     @Environment(AppModel.self) private var model
@@ -270,6 +358,7 @@ private struct LiveMapCanvas: View {
     var body: some View {
         let settings = model.settings
         let location = model.location
+        let battery = model.battery
         MapCanvasView(
             map: map,
             tileStore: tileStore,
@@ -281,7 +370,7 @@ private struct LiveMapCanvas: View {
             pois: map.pois,
             showPOIs: settings.showPOIs,
             selectedPOIID: selectedPOIID,
-            markers: [],
+            markers: pinMarkers,
             follow: .constant(tracking.follows),
             onTap: onTap,
             onLongPress: onLongPress,
@@ -293,7 +382,23 @@ private struct LiveMapCanvas: View {
             allowRotation: settings.allowMapRotation,
             locationColor: settings.locationColor,
             showMapLabels: settings.showMapLabels,
-            controller: controller
+            controller: context.controller,
+            featureOverlays: context.overlays?.overlays ?? [],
+            mapSpaceLayers: context.overlays?.mapSpaceLayers ?? [],
+            tool: context.tool,
+            continuationMargin: MapContinuation.marginPixels(for: map, enabled: settings.showOffMapTerrain),
+            cameraHandoff: context.pendingHandoff,
+            maxFrameRate: battery.maxFrameRate,
+            animationsEnabled: battery.animationsEnabled,
+            onSelectHit: onSelectHit
         )
+    }
+
+    /// The long-press pin, drawn by the canvas.
+    private var pinMarkers: [CanvasMarker] {
+        guard let pin = context.droppedPin, let georef = map.georef else { return [] }
+        let pixel = georef.pixel(for: pin.position)
+        guard pixel.x.isFinite, pixel.y.isFinite else { return [] }
+        return [CanvasMarker(id: "droppedPin", pixel: pixel, label: "", color: Theme.uiUserRed)]
     }
 }

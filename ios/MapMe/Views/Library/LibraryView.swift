@@ -64,7 +64,7 @@ struct LibraryView: View {
         }
         .navigationTitle("MapMe")
         .toolbar { toolbarContent }
-        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.pdf, .image]) { result in
+        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.pdf, .image, .gpx]) { result in
             if case .success(let url) = result {
                 model.handleIncoming(url: url)
             }
@@ -140,7 +140,7 @@ struct LibraryView: View {
         let dark = model.settings.mapAppearance == .dark
         return Button {
             openCount += 1
-            model.path.append(map.id)
+            model.path.append(.map(map.id))
         } label: {
             MapCardView(map: map,
                         thumbnailURL: dark ? library.darkThumbnailURL(for: map) : library.thumbnailURL(for: map),
@@ -204,6 +204,16 @@ struct LibraryView: View {
             .accessibilityIdentifier("settingsButton")
         }
         ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                model.path.append(.world)
+            } label: {
+                Image(systemName: "globe.europe.africa.fill")
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            .accessibilityLabel("World view of your maps")
+            .accessibilityIdentifier("worldViewButton")
+        }
+        ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 if DocumentScannerView.isSupported {
                     Button {
@@ -221,6 +231,11 @@ struct LibraryView: View {
                     showPhotoPicker = true
                 } label: {
                     Label("Photo or screenshot", systemImage: "photo.on.rectangle.angled")
+                }
+                Button {
+                    showFileImporter = true
+                } label: {
+                    Label("GPX route or waypoints", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
                 }
             } label: {
                 Image(systemName: "plus")

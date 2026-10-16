@@ -95,6 +95,12 @@ final class MapCanvasController {
         canvas?.animateToNorthUp()
     }
 
+    /// The camera as seen on the ground, for showing map `mapID` next (auto-switching); nil when
+    /// the map shown is not located.
+    func cameraHandoff(to mapID: UUID) -> CanvasCameraHandoff? {
+        canvas?.makeHandoff(to: mapID)
+    }
+
     func publish(rotationDegrees r: Double, northDegrees n: Double) {
         if abs(MapAngle.normalizedDegrees(r - rotationDegrees)) > 0.25 || (abs(r) < 0.01 && rotationDegrees != 0) {
             rotationDegrees = abs(r) < 0.01 ? 0 : r

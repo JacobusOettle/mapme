@@ -654,6 +654,7 @@ struct CalibrationView: View {
             ? "Calibrated manually with \(pairs.count) points (\u{00B1}\(max(1, Int(rms.rounded()))) m)"
             : "Calibrated manually with \(pairs.count) points (accuracy not checked yet)"
         model.library.save(doc)
+        FeatureHooks.mapDidLocate(doc, model: model)
         onDone()
     }
 

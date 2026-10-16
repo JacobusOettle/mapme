@@ -80,7 +80,7 @@ struct SearchHint: Codable, Hashable, Sendable {
     var center: LatLon { LatLon(lat: lat, lon: lon) }
 }
 
-struct TileID: Codable, Hashable {
+struct TileID: Codable, Hashable, Sendable {
     var z: Int
     var x: Int
     var y: Int

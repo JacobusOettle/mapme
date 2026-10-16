@@ -35,8 +35,13 @@ struct RootView: View {
         let flowActive = model.isImportFlowActive
         NavigationStack(path: $model.path) {
             LibraryView()
-                .navigationDestination(for: UUID.self) { id in
-                    MapScreen(mapID: id)
+                .navigationDestination(for: AppDestination.self) { destination in
+                    switch destination {
+                    case .map(let id):
+                        MapScreen(mapID: id)
+                    case .world:
+                        WorldView()
+                    }
                 }
         }
         .fullScreenCover(isPresented: $showsImportFlow) {

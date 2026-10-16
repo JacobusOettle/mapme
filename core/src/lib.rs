@@ -24,6 +24,7 @@ pub mod refine;
 pub mod scalebar;
 pub mod search;
 pub mod skeleton;
+pub mod terrain;
 pub mod warp;
 pub mod wide;
 

@@ -998,6 +998,21 @@ int32_t    mm_dark_render(const MMDarkStyle *style, uint8_t *rgba, uint32_t widt
                           uint32_t bytes_per_row, double u0, double v0, double du, double dv);
 char      *mm_version(void);
 void       mm_string_free(char *s);
+
+/* Terrain for the explorer features (see *Terrain* below) */
+MMTerrain *mm_terrain_new(uint64_t max_bytes);                /* thread-safe, memory-bounded */
+void       mm_terrain_free(MMTerrain *t);
+int32_t    mm_terrain_add_tile(MMTerrain *t, uint8_t z, uint32_t x, uint32_t y, const uint8_t *png, size_t len);
+int32_t    mm_terrain_mark_missing(MMTerrain *t, uint8_t z, uint32_t x, uint32_t y);
+void       mm_terrain_clear_missing(MMTerrain *t);
+char      *mm_terrain_stats(const MMTerrain *t);
+char      *mm_terrain_elevations(const MMTerrain *t, const char *request_json);
+char      *mm_terrain_profile(const MMTerrain *t, const char *request_json);
+char      *mm_terrain_grid(const MMTerrain *t, const char *request_json, float *heights, size_t heights_len,
+                           uint32_t cols, uint32_t rows);
+char      *mm_terrain_render(const MMTerrain *t, const char *request_json, uint8_t *rgba, uint32_t width,
+                             uint32_t height, uint32_t bytes_per_row);
+char      *mm_tile_plan(const char *request_json);            /* stateless */
 ```
 
 All strings are UTF-8 JSON and owned by the caller after return; free them with
@@ -1457,6 +1472,73 @@ KONG POOL" were among them, "DOTKLOOF" first.
 {"points": [{"x": 878, "y": 541, "lat": -25.8167, "lon": 27.3833}], "model": "auto"}
 → {"status": "ok", "pixel_to_mercator": [...9], "rms_m": 2.0, "residuals_m": [1.2, ...], "model": "affine"}
 ```
+
+### Terrain
+
+Elevations, route profiles, 3D height grids, contour rendering and tile plans for the explorer
+features (routes, the elevation profile, the terrain beyond a sheet's edge, the world view, the
+3D view, offline regions: docs/design/explorer.md). Rust in `core/src/terrain.rs`, C ABI in
+`core/src/ffi/terrain.rs`, Swift in `Core/TerrainStore.swift` and `Core/TerrainTypes.swift`.
+
+`MMTerrain` is one store of decoded Terrarium tiles that the app feeds; every function on it is
+safe on any thread at any time, concurrently (CATiledLayer's drawing threads, the 3D builder,
+route statistics). It never downloads. At most `max_bytes` of elevations are held (0 = 64 MiB;
+clamped to 4 MiB … 1 GiB; a tile counts what it takes, 256 KiB as f32), the least recently used
+dropped past it; missing marks (at most 100 000) are not counted. Pinning tiles on disk is the
+app's (`PinnedTerrainStore`). `mm_terrain_add_tile` returns `MM_OK`, `MM_ERR_DECODE` (then
+marked missing), `MM_ERR_ARGUMENT` (NULL, empty, z > 15, x/y outside 2^z) or `MM_ERR_PANIC`;
+`mm_terrain_free` ignores NULL, freed and foreign pointers. An entry point not in a build answers
+`MM_ERR_NOT_IMPLEMENTED` (−4) or `{"status":"failed","message":"not implemented: …"}`.
+
+Every query answers `"status": "ok" | "need_dem" | "failed"`. `need_dem` lists in `"need_tiles"`
+(`[{"z","x","y"}]`, at most `"max_tiles"`, default 64, nearest the query's centre first) the
+unknown tiles it would use next, and still answers from what is held (null, NaN or background
+where unknown); add them (or mark them missing) and ask again. `ok` means nothing more can be
+had. Zooms: `"max_zoom"` (default 13, ≤ 15) and `"min_zoom"` (default max − 3) bound them; a query
+wants the finest zoom it can use (elevations, profiles: `max_zoom`; a grid: the coarsest whose
+cell is at most half the node spacing; a render: the coarsest whose cell is at most two output
+pixels), falls back to coarser zooms where tiles are marked missing, and reports the `"zoom"` it
+used (the finest that contributed).
+
+* `mm_terrain_elevations`: `{"points":[[lat,lon],…]}` → `{"status","elevations_m":[e|null],"zoom",
+  "need_tiles"}` (bilinear).
+* `mm_terrain_profile`: `{"points":[[lat,lon],…] (≥ 1), "spacing_m" (default half a DEM cell),
+  "smoothing_m" (Gaussian σ along the line, default one cell), "hysteresis_m" (3), "max_samples"
+  (1000)}` → `{"status","distance_m" (geodesic through the points, haversine on 6 371 008.8 m),
+  "ascent_m","descent_m","min_m","max_m" (null without any elevation), "samples":[[d, e|null]]
+  (evenly spaced, first at 0, last at distance_m), "vertex_distance_m", "vertex_elevation_m" (one
+  per input point), "zoom","missing_fraction","need_tiles"}`. Climbs are counted on the smoothed
+  densified profile with the hysteresis (a rise counts once it exceeds it).
+* `mm_terrain_grid`: `{"rect":[min_x,min_y,max_x,max_y]}` (Web Mercator) fills `heights`
+  (`cols × rows`, 2 … 4096 each, ≤ `heights_len`; row 0 along max_y; node (i, j) at
+  (min_x + i·w/(cols − 1), max_y − j·h/(rows − 1)); metres, NaN where unknown) →
+  `{"status","zoom","min_m","max_m","missing_fraction","need_tiles"}`.
+* `mm_terrain_render`: contours (index lines every `"index_every"`, 5, thicker) and optional
+  hillshade into 8-bit sRGB RGBA, premultiplied alpha, every pixel written.
+  `{"space":"map"|"mercator","rect":[…],"pixel_to_mercator":[9],"warp":{…}|null,
+  "style":"dark"|"paper","interval_m":null,"scale_m_per_pt":null,"index_every":5,"hillshade":0,
+  "line_scale":1,"background":[r,g,b,a]|null}`. Space `map`: `rect` is `[x0, y0, x1, y1]` in the
+  map's base-image pixels through its georeference (warp applied exactly); buffer pixel (i, j) is
+  centred at (x0 + (i + ½)(x1 − x0)/width, y0 + (j + ½)(y1 − y0)/height). Space `mercator`:
+  `[min_x, min_y, max_x, max_y]`, row 0 along max_y. The interval, when not given, is the smallest
+  of 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000 m at least 4 × `scale_m_per_pt` (ground metres
+  per point; default from the rect's centre; tiled views pass one value per level so tiles agree);
+  `line_scale` is buffer pixels per point. `background` null = the style's paper, opaque;
+  `[0,0,0,0]` = lines only. A rectangle drawn whole or as any grid of tiles gives the same pixels;
+  below 0 m only the 0 m line (the coast) is drawn. → `{"status","interval_m","index_interval_m",
+  "zoom","missing_fraction","need_tiles"}`.
+* `mm_tile_plan` (stateless): `{"areas":[{"bbox":[s,w,n,e]} | {"circle":[lat,lon,radius_m]} |
+  {"quad":[[lat,lon]×4],"margin_m"}, each with "zooms":[…]}], "trailhead":{"corners":[[lat,lon]×4]}}`
+  → `{"status","tiles","bytes","bytes_high","zooms":[{"z","tiles","bytes","bytes_high",
+  "ranges":[[x0,x1,y0,y1],…]}],"dropped":[{"z","tiles","reason"}]}`: the union of the areas' tiles
+  per zoom as disjoint inclusive rectangles; a bbox with west > east crosses the antimeridian.
+  `bytes` uses `terrain::tile_bytes_typical` (SRTM terrain: 82, 74, 61, 53, 44, 35 KB at zooms
+  8–13), `bytes_high` `tile_bytes_high` (3DEP and European sources: 82, 102, 94, 127, 117, 103 KB),
+  measured on s3 in nine regions (docs/design/explorer.md, appendix). The **trailhead** rule (what
+  the app keeps around every located map): zooms 9 and 10 within 50 km of the corners' centre,
+  11 within 30 km, 12 over the quad grown by the continuation margin (half the sheet's long side,
+  3 … 15 km: `terrain::continuation_margin_m`), 13 over the quad + 3 km; a zoom whose part exceeds
+  400 tiles is dropped and listed in `dropped`.
 
 ## Wide search
 
@@ -2013,6 +2095,8 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
   src/georef.rs       Session + orchestrator (request → response): hint areas, near area
   src/georef/wide_search.rs  the wide search: chunks, zoom-11 re-checks, acceptance
   src/ffi.rs          C ABI
+  src/terrain.rs      terrain store for the explorer features: elevations, profiles, grids,
+                      contour rendering, tile plans (C ABI in src/ffi/terrain.rs)
   include/mapme_core.h
   tests/              integration tests on fixtures/grootkloof (photo.rs: synthetic
                       photos of the sheet, flattened from imperfect corners;
@@ -2028,7 +2112,7 @@ core/                 Rust crate mapme-core (lib + staticlib + C header)
                       their scale bars, names, feet, the 23 m/px raster; styles.rs:
                       the synthetic maps of many styles in fixtures/styles;
                       map_on_page.rs: a Gaia raster unscaled on an A4 page, blank
-                      and text pages)
+                      and text pages; terrain_contract.rs: the terrain ABI's contract)
 fixtures/grootkloof/  the real map (PDF + extracted JPEG), DEM tiles, OCR fixture, truth
 fixtures/castle-gorge/, fixtures/mhlabatini/  two more sheets of the series: PDF, JPEG,
                       DEM tiles, truth, RapidOCR (ocr.json) and Apple Vision OCR
@@ -2041,6 +2125,8 @@ fixtures/styles/      synthetic maps of 12 styles with exact truth (case.json in
                       page_compose.py puts a case's map on a larger page,
                       bench_contours.py runs the benchmark, perturb_real.py
                       makes damaged copies of the real maps (the ±)
+docs/design/          feature designs (explorer.md: routes, profiles, daylight, auto-switching,
+                      world view, off-map terrain, notes, battery saver, 3D, offline regions)
 ios/                  XcodeGen project (project.yml), app, unit tests, UI tests
 scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
 .github/workflows/    core.yml (Linux), ios.yml (macOS build, test, IPA)
@@ -2049,7 +2135,17 @@ scripts/              build-core-ios.sh (XCFramework), package-ipa.sh, ...
 ## iOS app structure (ios/MapMe)
 
 * `App/` has `MapMeApp` (entry, `onOpenURL` import) and `AppModel` (root
-  `@Observable` state: library, settings, location, track recorder).
+  `@Observable` state: library, settings, location, track recorder, and the explorer features'
+  services: geo items, terrain, offline regions, route navigator, GPX, map switcher, notes,
+  battery saver), `AppDestination` (the navigation stack: a map or the world view) and
+  `FeatureHooks` (each feature's launch, locate and delete hooks).
+* The explorer features (docs/design/explorer.md) plug into the map screen through
+  `MapScreenContext` (the map shown, switched in place with a camera handoff; selection; the
+  active `MapTool`; presentations; toasts), `CanvasOverlaySet` (features' `CanvasOverlay`s drawn
+  at three levels of the overlay view, and `CanvasMapSpaceLayer`s such as the terrain beyond the
+  sheet), `MapSideColumn` and `MapTopBanners`. Geo items (waypoints, routes, notes) are global, in
+  `GeoItemStore` (Application Support/GeoItems); terrain comes through `TerrainProvider` and the
+  core's `TerrainStore`.
 * `Core/` has `MapMeCore.swift`, a thin Swift wrapper over the C ABI
   (`GeorefSession`, `fitControlPoints`, `detectPage`, `darkProfile` and the
   thread-safe `DarkStyle`), plus `CoreTypes.swift` with Codable

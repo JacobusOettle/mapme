@@ -33,6 +33,11 @@ final class LocationService: NSObject {
     @ObservationIgnored private var observers: [(CLLocation) -> Void] = []
     @ObservationIgnored private var running = false
     @ObservationIgnored private var backgroundUpdates = false
+    /// Why locations are wanted in the background ("recording", "routeFollow"): updates continue
+    /// while any is set.
+    @ObservationIgnored private var backgroundReasons: Set<String> = []
+    /// The battery saver's settings for CoreLocation (`BatterySaver` applies them).
+    @ObservationIgnored private(set) var powerProfile = LocationPowerProfile.normal
     @ObservationIgnored private var orientationObserver: NSObjectProtocol?
 
     @ObservationIgnored private var mock: Mock?
@@ -116,8 +121,34 @@ final class LocationService: NSObject {
         manager.stopUpdatingHeading()
     }
 
-    /// Keep receiving locations in the background (track recording).
+    /// Keep receiving locations in the background for a track recording.
     func setBackgroundUpdates(_ enabled: Bool) {
+        setBackgroundUpdates(enabled, for: "recording")
+    }
+
+    /// Keep receiving locations in the background while any feature asks for it: a recording
+    /// ("recording"), a followed route ("routeFollow").
+    func setBackgroundUpdates(_ enabled: Bool, for reason: String) {
+        if enabled {
+            backgroundReasons.insert(reason)
+        } else {
+            backgroundReasons.remove(reason)
+        }
+        applyBackgroundUpdates(!backgroundReasons.isEmpty)
+    }
+
+    /// The reasons background updates run for now.
+    var backgroundUpdateReasons: Set<String> { backgroundReasons }
+
+    /// Applies the battery saver's CoreLocation settings (accuracy, distance filter, heading
+    /// filter). Filled in by the battery saver (docs/design/explorer.md, Battery saver).
+    func apply(_ profile: LocationPowerProfile) {
+        powerProfile = profile
+    }
+
+    private func applyBackgroundUpdates(_ enabled: Bool) {
+        // Already on for another reason: nothing to change.
+        if enabled, backgroundUpdates { return }
         backgroundUpdates = enabled
         guard let manager else { return }
         if enabled, manager.authorizationStatus == .authorizedWhenInUse {

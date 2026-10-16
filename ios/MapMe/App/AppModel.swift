@@ -65,8 +65,28 @@ final class AppModel {
     let location: LocationService
     let tracks: TrackRecorder
 
-    /// Navigation stack of map ids (LibraryView → MapScreen).
-    var path: [UUID] = []
+    // Explorer features (docs/design/explorer.md). Each service is filled in by its feature; the
+    // features wire them together in `FeatureHooks.attach`.
+
+    /// Waypoints, routes and notes: global, on every map that covers them.
+    let geoItems: GeoItemStore
+    /// Terrain for profiles, the terrain beyond a sheet, the world view and 3D (core `MMTerrain`).
+    let terrain: TerrainProvider
+    /// Offline regions and the terrain kept around located maps.
+    let offline: OfflineRegionService
+    /// Following a route: progress, off-route warnings, ETA.
+    let navigator: RouteNavigator
+    /// GPX import and export.
+    let gpx: GPXService
+    /// Which maps cover you; switching to the most detailed one as you walk.
+    let mapSwitcher: MapSwitcher
+    /// Notes and photos.
+    let notes: NoteService
+    /// Battery saver: location accuracy, redraw rate, what runs in the background.
+    let battery: BatterySaver
+
+    /// Navigation stack (LibraryView → MapScreen or the world view).
+    var path: [AppDestination] = []
     /// Non-nil while an import/locate job is shown.
     var importJob: ImportJob?
     /// Non-nil while the corner editor is shown for a photo of a paper map.
@@ -92,7 +112,30 @@ final class AppModel {
         self.importer = MapImporter(library: library)
         self.georeferencer = GeoreferenceService()
         self.poiService = POIService()
+        self.geoItems = GeoItemStore()
+        self.terrain = TerrainProvider()
+        self.offline = OfflineRegionService()
+        self.navigator = RouteNavigator()
+        self.gpx = GPXService()
+        self.mapSwitcher = MapSwitcher()
+        self.notes = NoteService()
+        self.battery = BatterySaver()
         tracks.attach(location: location)
+        library.didDelete = { [weak self] id in
+            guard let self else { return }
+            FeatureHooks.mapDidDelete(id, model: self)
+        }
+        FeatureHooks.attach(self)
+    }
+
+    /// Opens a map from the library (or a link): the library, then the map.
+    func openMap(_ id: UUID) {
+        path = [.map(id)]
+    }
+
+    /// Opens the world view of all maps.
+    func openWorld() {
+        path = [.world]
     }
 
     /// Called once when the UI appears.
@@ -103,6 +146,7 @@ final class AppModel {
             location.requestPermission()
             location.start()
         }
+        await FeatureHooks.appDidLaunch(self)
         #if DEBUG
         if importSamplePhotoIfRequested() { return }
         #endif
@@ -112,8 +156,13 @@ final class AppModel {
     // MARK: - Import
 
     /// A PDF or image arrived from the Files picker, "Open in…", AirDrop or a share sheet.
-    /// Photos of paper maps go through the corner editor.
+    /// Photos of paper maps go through the corner editor. GPX files (routes, tracks, waypoints from
+    /// Gaia, AllTrails, friends) go to `gpx`.
     func handleIncoming(url: URL) {
+        if IncomingFile.kind(of: url) == .gpx {
+            gpx.importFile(at: url)
+            return
+        }
         let picker = cornerPicker
         startImport(name: url.deletingPathExtension().lastPathComponent) { importer, progress in
             try await importer.importFile(at: url, mode: .detectPhoto(picker), progress: progress)
@@ -316,7 +365,7 @@ final class AppModel {
         let id = importJob?.mapID
         importJob = nil
         if openMap, let id {
-            path = [id]
+            path = [.map(id)]
         }
     }
 
@@ -391,6 +440,9 @@ final class AppModel {
                                                   hintQueries: queries)
         }
         library.save(updated)
+        if updated.georef != nil {
+            FeatureHooks.mapDidLocate(updated, model: self)
+        }
         if knownText == nil, !outcome.ocr.isEmpty {
             // "Search wider" reads it back instead of running Vision again.
             let cache = OCRCache(pixelWidth: image.width, pixelHeight: image.height, observations: outcome.ocr)
@@ -470,7 +522,7 @@ final class AppModel {
         // A simulated terrain miss wants the import screen, so it always imports afresh.
         if !args.contains("-simulateTerrainMiss"),
            let existing = library.maps.first(where: { $0.name == "Grootkloof sample" }), existing.isGeoreferenced {
-            path = [existing.id]
+            path = [.map(existing.id)]
             return
         }
         guard let url = Bundle.main.url(forResource: "SampleMap", withExtension: "pdf") else { return }
