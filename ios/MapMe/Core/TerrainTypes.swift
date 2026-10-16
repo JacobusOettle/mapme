@@ -4,16 +4,21 @@ import Foundation
 // "C ABI", Terrain; core/src/terrain.rs). Requests encode snake_case keys; nil fields are left
 // out (the core's defaults apply).
 
+/// How a terrain query ended (`TerrainAnswer.Status`). Declared outside the generic answer so
+/// that answers of different value types share it: a status nested in `TerrainAnswer<Value>`
+/// would be a different type for every `Value` and could not be handed from one to another.
+enum TerrainQueryStatus: Equatable, Sendable {
+    /// Complete: nothing more can be had.
+    case ok
+    /// Add (or mark missing) `needTiles` and ask again.
+    case needDEM
+    case failed(String)
+}
+
 /// The answer of a terrain query: its status, the value (also with `.needDEM`: what the store
 /// could answer from the tiles it holds) and the tiles to add before asking again.
 struct TerrainAnswer<Value> {
-    enum Status: Equatable, Sendable {
-        /// Complete: nothing more can be had.
-        case ok
-        /// Add (or mark missing) `needTiles` and ask again.
-        case needDEM
-        case failed(String)
-    }
+    typealias Status = TerrainQueryStatus
 
     var status: Status
     var value: Value?
