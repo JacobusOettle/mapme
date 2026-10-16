@@ -293,6 +293,39 @@ final class MapsSwitchingTests: XCTestCase {
         XCTAssertEqual(step(&p, 135, off), MapSwitchDecision(mapID: finer, reason: .walkedOff))
     }
 
+    func testComingBackToTheScreenKeepsAMapYouPicked() {
+        var p = AutoSwitchPolicy()
+        p.chose(current, at: t0.addingTimeInterval(-600))   // held until t0 + 300 s
+        XCTAssertNil(step(&p, 0, bothCover))
+        // Back from the world view: the same map's screen appears again.
+        p.opened(current, at: t0.addingTimeInterval(60))
+        XCTAssertNotNil(p.heldUntil, "the pick is kept")
+        for t in stride(from: 60.0, through: 290, by: 10) {
+            XCTAssertNil(step(&p, t, bothCover), "picked by hand (\(t) s)")
+        }
+        // The 15 min are over; the finer map has covered you all along.
+        XCTAssertEqual(step(&p, 300, bothCover)?.mapID, finer)
+        // Opening another map is a fresh start.
+        p.opened(finer, at: t0.addingTimeInterval(310))
+        XCTAssertEqual(p.currentID, finer)
+        XCTAssertNil(p.heldUntil)
+    }
+
+    func testNeverSwitchesAwayFromAMapThatIsNotLocated() {
+        // A trail brochure that could not be located, opened while you stand on a located sheet.
+        var p = settledPolicy()
+        let other = [MapCoverage(mapID: finer, metersPerPixel: 2.5, insideMarginM: 400)]
+        for t in stride(from: 0.0, through: 120, by: 5) {
+            let now = t0.addingTimeInterval(t)
+            XCTAssertNil(p.evaluate(currentID: current, currentIsLocated: false, coverages: other, fix: fix(now),
+                                    enabled: true, following: true, idle: true, recency: [:], now: now), "\(t) s")
+        }
+        // A located map that does not cover you is another matter: you walked off it.
+        var q = settledPolicy()
+        XCTAssertNil(step(&q, 0, other))
+        XCTAssertEqual(step(&q, 5, other), MapSwitchDecision(mapID: finer, reason: .walkedOff))
+    }
+
     func testAnotherScreenStartsOver() {
         var p = settledPolicy()
         XCTAssertNil(step(&p, 0, bothCover))

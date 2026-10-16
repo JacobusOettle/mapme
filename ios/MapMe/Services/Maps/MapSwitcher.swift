@@ -30,9 +30,11 @@ struct MapSwitchDecision: Equatable, Sendable {
 /// every located map at each fix and keeps the dwell clocks, the cool-down and the exclusions
 /// itself, so the rules are tested without a screen or a GPS.
 ///
-/// Switch only when all of: the setting is on; the screen follows you; no tool is active and
-/// nothing is presented; the fix is at most 10 s old with accuracy ≤ 50 m; no switch in the last
-/// 60 s; the map was not opened in the last 30 s; and either you have been off the current sheet
+/// Switch only when all of: the setting is on; the map shown is located (one that could not be
+/// located is never switched away from: there is no sheet to walk off); the screen follows you;
+/// no tool is active and nothing is presented; the fix is at most 10 s old with accuracy ≤ 50 m;
+/// no switch in the last 60 s; the map was not opened in the last 30 s (opening the map already
+/// shown again keeps its clocks); and either you have been off the current sheet
 /// by ≥ max(30 m, accuracy) for 5 s and another map covers you (by that much), or the best map —
 /// the finest covering you by ≥ max(100 m, 2 × accuracy), the current one among those within
 /// 10 % — is another map, ≥ 1.5× finer than the current one, and has covered you so for 20 s.
@@ -97,9 +99,11 @@ struct AutoSwitchPolicy: Sendable {
 
     init() {}
 
-    /// A screen shows `id`, opened from the library (or a link): the 30 s grace starts.
+    /// A screen shows `id`, opened from the library (or a link): the 30 s grace starts. The map
+    /// already shown (the screen appearing again, back from the world view) keeps its clocks and
+    /// a pick made in "Maps here".
     mutating func opened(_ id: UUID, at now: Date) {
-        reset(to: id)
+        if id != currentID { reset(to: id) }
         openedAt = now
     }
 
@@ -155,12 +159,20 @@ struct AutoSwitchPolicy: Sendable {
     }
 
     /// Feeds one fix. `coverages`: every located map at your position (outside ones with a
-    /// negative margin); `idle`: no tool active and nothing presented. Returns the map to switch
-    /// to now, if any (then call `switched(to:at:)` once it is shown).
-    mutating func evaluate(currentID: UUID, coverages: [MapCoverage], fix: Fix?, enabled: Bool, following: Bool,
-                           idle: Bool, recency: [UUID: Date], now: Date) -> MapSwitchDecision? {
+    /// negative margin); `currentIsLocated`: the map shown has a georeference (false: never switch,
+    /// unlike a located map that does not cover you); `idle`: no tool active and nothing presented.
+    /// Returns the map to switch to now, if any (then call `switched(to:at:)` once it is shown).
+    mutating func evaluate(currentID: UUID, currentIsLocated: Bool = true, coverages: [MapCoverage], fix: Fix?,
+                           enabled: Bool, following: Bool, idle: Bool, recency: [UUID: Date],
+                           now: Date) -> MapSwitchDecision? {
         // Shown by someone else (a new screen): start over, with the grace of a fresh opening.
         if self.currentID != currentID { opened(currentID, at: now) }
+        // A brochure, a photo that did not match: you cannot walk off a map that has no place.
+        guard currentIsLocated else {
+            offSheetSince = nil
+            coveredSince = [:]
+            return nil
+        }
         let byID = Dictionary(coverages.map { ($0.mapID, $0) }, uniquingKeysWith: { a, _ in a })
         let shown = byID[currentID]
 
@@ -322,10 +334,12 @@ final class MapSwitcher {
                   now: Date) -> MapSwitchDecision? {
         guard let model else { return nil }
         let maps = model.library.maps.filter(\.isGeoreferenced)
+        let currentIsLocated = maps.contains { $0.id == currentID }
         let coverages = fix.map { Self.coverages(maps, at: LatLon($0.coordinate)) } ?? []
         var recency: [UUID: Date] = [:]
         for map in maps { recency[map.id] = map.lastOpenedAt ?? map.createdAt }
-        return policy.evaluate(currentID: currentID, coverages: coverages, fix: fix.map { AutoSwitchPolicy.Fix($0) },
+        return policy.evaluate(currentID: currentID, currentIsLocated: currentIsLocated, coverages: coverages,
+                               fix: fix.map { AutoSwitchPolicy.Fix($0) },
                                enabled: model.settings.autoSwitchMaps, following: tracking.follows, idle: idle,
                                recency: recency, now: now)
     }
