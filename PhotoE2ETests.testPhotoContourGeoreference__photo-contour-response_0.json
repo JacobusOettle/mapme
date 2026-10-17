@@ -1,0 +1,60 @@
+{
+  "confidence" : 1,
+  "corners" : [
+    [
+      -25.807376698226715,
+      27.366689642728453
+    ],
+    [
+      -25.8073719946019,
+      27.43333589163132
+    ],
+    [
+      -25.892237053396077,
+      27.433343284330782
+    ],
+    [
+      -25.892241753646704,
+      27.366697035427915
+    ]
+  ],
+  "message" : "Matched contour lines to terrain (±17 m).",
+  "method" : "contours",
+  "need_tiles" : [
+
+  ],
+  "pixel_to_mercator" : [
+    2.2536532476151914,
+    0.00017667486900888775,
+    3046445.9557260848,
+    0.00017667486900888775,
+    -2.2536532476151914,
+    -2975243.216134251,
+    0,
+    0,
+    1
+  ],
+  "pois" : [
+
+  ],
+  "rms_m" : 16.5,
+  "rotation_deg" : 0,
+  "scale_m_per_px" : 2.0282,
+  "search" : {
+    "coarse_zoom" : 11,
+    "hints_tried" : 0,
+    "radius_m" : 20000,
+    "searched_radius_m" : 20000,
+    "stage" : "done",
+    "tiles_fetched" : 34,
+    "tiles_planned" : 34
+  },
+  "status" : "ok",
+  "timings_ms" : {
+    "fine_dem" : 135.4,
+    "lines" : 6649,
+    "refine" : 6077.2,
+    "total" : 13886.5,
+    "warp" : 1024.6
+  }
+}

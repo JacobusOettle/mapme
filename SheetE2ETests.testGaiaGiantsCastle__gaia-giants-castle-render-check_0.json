@@ -1,0 +1,17 @@
+{
+  "equalNeighboursX" : 0.16281222695450676,
+  "equalNeighboursY" : 0.15989905442157118,
+  "height" : 2480,
+  "meanAbsDiffNearestFixture" : 3.169502928123451,
+  "meanAbsDiffSmoothFixture" : 1.8618289955848941,
+  "nativeEqualNeighboursX" : 0.061757095714321704,
+  "nativeEqualNeighboursY" : 0.06328665789802129,
+  "region" : [
+    81,
+    81,
+    3429,
+    2304
+  ],
+  "upsampling" : "smooth",
+  "width" : 3508
+}

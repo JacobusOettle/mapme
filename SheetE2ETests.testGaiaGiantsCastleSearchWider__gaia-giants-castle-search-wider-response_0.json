@@ -1,0 +1,211 @@
+{
+  "confidence" : 0.994,
+  "corners" : [
+    [
+      -29.243534100997234,
+      29.285089471397395
+    ],
+    [
+      -29.24353321805387,
+      29.561513313134988
+    ],
+    [
+      -29.41670597892523,
+      29.56151404028417
+    ],
+    [
+      -29.416706860370464,
+      29.285090198546573
+    ]
+  ],
+  "hint_queries" : [
+    "Giant's Castle",
+    "Langalibalele Pass",
+    "Ntubeni Pass",
+    "Bannerman's Pass",
+    "Giant's Pass",
+    "Bannerman Hut",
+    "Mount Dumford",
+    "KaMasihlengo Pass",
+    "Grysbok Bush",
+    "Legheku",
+    "Songebethu",
+    "Ntloana-Ts'oana"
+  ],
+  "message" : "Matched contour lines to terrain (±31 m).",
+  "method" : "contours",
+  "need_tiles" : [
+
+  ],
+  "pixel_to_mercator" : [
+    8.771767760931967,
+    3.2639466539200187e-05,
+    3260001.2477914146,
+    3.2110981768627505e-05,
+    -8.916134124628204,
+    -3406679.1350456798,
+    0,
+    0,
+    1
+  ],
+  "pois" : [
+    {
+      "kind" : "place",
+      "name" : "Bannerman's Pass",
+      "x" : 1749.3488394418605,
+      "y" : 141.86046500139042
+    },
+    {
+      "kind" : "place",
+      "name" : "Bannerman Hut",
+      "x" : 1999.3488359634553,
+      "y" : 168.6046511378738
+    },
+    {
+      "elevation_m" : 1925.1,
+      "kind" : "spot_height",
+      "name" : "6316",
+      "x" : 3175.4418608430233,
+      "y" : 199.9999998837209
+    },
+    {
+      "elevation_m" : 3301,
+      "kind" : "peak",
+      "name" : "Songebethu",
+      "x" : 1698.18604622999,
+      "y" : 268.6046515095579
+    },
+    {
+      "elevation_m" : 3301,
+      "kind" : "spot_height",
+      "name" : "10830",
+      "x" : 1698.1860469255812,
+      "y" : 296.51162779255037
+    },
+    {
+      "kind" : "place",
+      "name" : "Langalibalele Pass",
+      "x" : 1950.511627139535,
+      "y" : 512.7906980948436
+    },
+    {
+      "kind" : "place",
+      "name" : "Grysbok Bush",
+      "x" : 2652.1860447440476,
+      "y" : 640.2959370255351
+    },
+    {
+      "kind" : "place",
+      "name" : "Oribi Ridge Rte",
+      "x" : 3047.311271607839,
+      "y" : 910.4203959439164
+    },
+    {
+      "elevation_m" : 3294,
+      "kind" : "peak",
+      "name" : "Mount Dumford",
+      "x" : 1956.3255815099678,
+      "y" : 929.2543432549129
+    },
+    {
+      "kind" : "place",
+      "name" : "Thaba-Putsoa",
+      "x" : 1276.744186976744,
+      "y" : 953.4883719966779
+    },
+    {
+      "elevation_m" : 3294,
+      "kind" : "spot_height",
+      "name" : "10807",
+      "x" : 1955.6744190843024,
+      "y" : 976.7441859011626
+    },
+    {
+      "elevation_m" : 2076,
+      "kind" : "spot_height",
+      "name" : "6811",
+      "x" : 3278.9302330813953,
+      "y" : 1249.767441744186
+    },
+    {
+      "elevation_m" : 3315,
+      "kind" : "peak",
+      "name" : "Giant's Castle",
+      "x" : 2523.1162798236633,
+      "y" : 1502.3916548937773
+    },
+    {
+      "kind" : "place",
+      "name" : "Giant's Pass",
+      "x" : 2300.5116286963953,
+      "y" : 1503.8116568601827
+    },
+    {
+      "elevation_m" : 3296.1,
+      "kind" : "spot_height",
+      "name" : "10814",
+      "x" : 1991.7209301395349,
+      "y" : 1498.8372089534882
+    },
+    {
+      "elevation_m" : 3329.9,
+      "kind" : "peak",
+      "name" : "Legheku",
+      "x" : 682.558140219767,
+      "y" : 1600.9302324526157
+    },
+    {
+      "elevation_m" : 3262,
+      "kind" : "peak",
+      "name" : "Ntloana-Ts'oana",
+      "x" : 388.372092445298,
+      "y" : 1640.124350278765
+    },
+    {
+      "elevation_m" : 3329.9,
+      "kind" : "spot_height",
+      "name" : "10925",
+      "x" : 680.2325574624979,
+      "y" : 1630.000000141802
+    },
+    {
+      "elevation_m" : 3262,
+      "kind" : "spot_height",
+      "name" : "10702",
+      "x" : 389.5348843966192,
+      "y" : 1686.976744462026
+    },
+    {
+      "kind" : "place",
+      "name" : "Ntubeni Pass",
+      "x" : 2117.9534875145346,
+      "y" : 1826.6273242318528
+    },
+    {
+      "kind" : "place",
+      "name" : "KaMasihlengo Pass",
+      "x" : 1733.0697690697673,
+      "y" : 2207.9069767886485
+    }
+  ],
+  "rms_m" : 30.8,
+  "rotation_deg" : 0,
+  "scale_m_per_px" : 7.71,
+  "search" : {
+    "coarse_zoom" : 11,
+    "hints_tried" : 1,
+    "radius_m" : 500000,
+    "searched_radius_m" : 0,
+    "stage" : "done",
+    "tiles_fetched" : 20,
+    "tiles_planned" : 343
+  },
+  "status" : "ok",
+  "timings_ms" : {
+    "fine_dem" : 221.6,
+    "grid" : 0,
+    "pois" : 5.4,
+    "refine" : 2156.7,
+    "total" : 2384.8
+  }
+}

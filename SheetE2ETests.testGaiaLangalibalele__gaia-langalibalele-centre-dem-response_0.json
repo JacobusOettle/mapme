@@ -1,0 +1,185 @@
+{
+  "confidence" : 0.99,
+  "corners" : [
+    [
+      -29.275290920525983,
+      29.41040290035667
+    ],
+    [
+      -29.27539769203836,
+      29.51989472082308
+    ],
+    [
+      -29.343930823838544,
+      29.519806857289947
+    ],
+    [
+      -29.343824123999216,
+      29.410315036823533
+    ]
+  ],
+  "hint_queries" : [
+    "Mount Durnford",
+    "Langalibalele Pass",
+    "Main Cave",
+    "Grysbok Bush",
+    "Kambule",
+    "Katana",
+    "Potterill",
+    "Erskine",
+    "Lango-le-Balele",
+    "Umtshezi"
+  ],
+  "message" : "Matched contour lines to terrain (±26 m).",
+  "method" : "contours",
+  "need_tiles" : [
+
+  ],
+  "pixel_to_mercator" : [
+    3.474507896336728,
+    -0.003943920873997615,
+    3273951.07489272,
+    -0.0038842861233800855,
+    -3.527851395073729,
+    -3410731.277793386,
+    0,
+    0,
+    1
+  ],
+  "pois" : [
+    {
+      "kind" : "place",
+      "name" : "Langalibalele Pass",
+      "x" : 859.3023279758777,
+      "y" : 143.91517877456062
+    },
+    {
+      "kind" : "place",
+      "name" : "Main Cave",
+      "x" : 3367.64889781922,
+      "y" : 259.30232549095615
+    },
+    {
+      "kind" : "place",
+      "name" : "Grysbok Bush",
+      "x" : 2674.2790696471384,
+      "y" : 465.9968429096073
+    },
+    {
+      "elevation_m" : 3148,
+      "kind" : "peak",
+      "name" : "Erskine",
+      "x" : 983.7209308010335,
+      "y" : 591.8604650258399
+    },
+    {
+      "elevation_m" : 3148,
+      "kind" : "spot_height",
+      "name" : "10328",
+      "x" : 984.883721382429,
+      "y" : 623.2558138242894
+    },
+    {
+      "elevation_m" : 3155.9,
+      "kind" : "peak",
+      "name" : "Bond",
+      "x" : 1087.2093017774087,
+      "y" : 886.0465117607973
+    },
+    {
+      "elevation_m" : 3155.9,
+      "kind" : "spot_height",
+      "name" : "10354",
+      "x" : 1087.2093024941946,
+      "y" : 915.1162788139077
+    },
+    {
+      "kind" : "place",
+      "name" : "Lango-le-Balele",
+      "x" : 710.4651173397353,
+      "y" : 980.794318855726
+    },
+    {
+      "elevation_m" : 3141,
+      "kind" : "peak",
+      "name" : "Potterill",
+      "x" : 1104.6511634076742,
+      "y" : 1022.0930231004759
+    },
+    {
+      "elevation_m" : 3141,
+      "kind" : "spot_height",
+      "name" : "10305",
+      "x" : 1109.25845383865,
+      "y" : 1052.3255817127056
+    },
+    {
+      "elevation_m" : 3294,
+      "kind" : "peak",
+      "name" : "Mount Durnford",
+      "x" : 915.1162767674418,
+      "y" : 1145.2325582003677
+    },
+    {
+      "elevation_m" : 3294,
+      "kind" : "spot_height",
+      "name" : "10807",
+      "x" : 919.3798455074069,
+      "y" : 1175.5813951661128
+    },
+    {
+      "elevation_m" : 3154.1,
+      "kind" : "peak",
+      "name" : "Kambule",
+      "x" : 1034.8837209767444,
+      "y" : 1365.116278651163
+    },
+    {
+      "elevation_m" : 3154.1,
+      "kind" : "spot_height",
+      "name" : "10348",
+      "x" : 1038.4961245638854,
+      "y" : 1389.302325255814
+    },
+    {
+      "elevation_m" : 3076,
+      "kind" : "peak",
+      "name" : "Katana",
+      "x" : 1319.7674409944368,
+      "y" : 1678.8372090163261
+    },
+    {
+      "elevation_m" : 3076,
+      "kind" : "spot_height",
+      "name" : "10092",
+      "x" : 1319.7674414772237,
+      "y" : 1710.232558257385
+    },
+    {
+      "kind" : "place",
+      "name" : "Umtshezi",
+      "x" : 1875.3287906168048,
+      "y" : 2246.099139625004
+    }
+  ],
+  "rms_m" : 25.5,
+  "rotation_deg" : 0.06,
+  "scale_m_per_px" : 3.0529,
+  "search" : {
+    "coarse_zoom" : 11,
+    "hints_tried" : 0,
+    "radius_m" : 50000,
+    "searched_radius_m" : 50000,
+    "stage" : "done",
+    "tiles_fetched" : 12,
+    "tiles_planned" : 80
+  },
+  "status" : "ok",
+  "timings_ms" : {
+    "fine_dem" : 483.6,
+    "grid" : 0,
+    "pois" : 2.6,
+    "refine" : 1714,
+    "total" : 2201.1
+  }
+}

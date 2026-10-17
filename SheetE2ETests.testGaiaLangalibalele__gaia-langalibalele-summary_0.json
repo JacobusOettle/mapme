@@ -1,0 +1,227 @@
+{
+  "centreHeights" : [
+    "Erskine (peak): 3148 m",
+    "10328 (spot_height): 3148 m",
+    "Bond (peak): 3156 m",
+    "10354 (spot_height): 3156 m",
+    "Potterill (peak): 3141 m",
+    "10305 (spot_height): 3141 m",
+    "Mount Durnford (peak): 3294 m",
+    "10807 (spot_height): 3294 m",
+    "Kambule (peak): 3154 m",
+    "10348 (spot_height): 3154 m",
+    "Katana (peak): 3076 m",
+    "10092 (spot_height): 3076 m"
+  ],
+  "cleanedHintQueries" : [
+    "Mount Durnford",
+    "Langalibalele Pass",
+    "Main Cave",
+    "Grysbok Bush",
+    "Kambule",
+    "Katana",
+    "Potterill",
+    "Erskine",
+    "Lango-le-Balele",
+    "Umtshezi"
+  ],
+  "dpi" : 300,
+  "expectedNamesFound" : [
+    "Langalibalele Pass"
+  ],
+  "farHeights" : [
+    "Erskine (peak): 3148 m",
+    "10328 (spot_height): 3148 m",
+    "Bond (peak): 3156 m",
+    "10354 (spot_height): 3156 m",
+    "Potterill (peak): 3141 m",
+    "10305 (spot_height): 3141 m",
+    "Mount Durnford (peak): 3294 m",
+    "10807 (spot_height): 3294 m",
+    "Kambule (peak): 3154 m",
+    "10348 (spot_height): 3154 m",
+    "Katana (peak): 3076 m",
+    "10092 (spot_height): 3076 m"
+  ],
+  "furniture" : [
+
+  ],
+  "hintQueries" : [
+    "Mount Durnford",
+    "Langalibalele Pass",
+    "Main Cave",
+    "Grysbok Bush",
+    "Kambule",
+    "Katana",
+    "Potterill",
+    "Erskine",
+    "Lango-le-Balele",
+    "Umtshezi"
+  ],
+  "map" : "gaia-langalibalele",
+  "outcome" : "gaia-langalibalele: render 3508×2480 smooth (equal neighbours 0.24, raster 0.13; MAE 2.00 vs map.jpg, 3.48 vs map_nearest.jpg), Vision 34 boxes in 25.4 s | centre-dem: ok contours 0.99, truth median 8.5 m, max 14.3 m, 17 POIs, 7.6 s — Matched contour lines to terrain (±26 m). | far-magaliesberg: failed - (noTerrainMatch), 0 POIs, 18.4 s — This map's contour lines didn't match the terrain within 50 km of you. Search wider to look for “Mount Durnford” and other places named on the map, or calibrate it manually. | hint queries [\"Mount Durnford\", \"Langalibalele Pass\", \"Main Cave\", \"Grysbok Bush\", \"Kambule\", \"Katana\", \"Potterill\", \"Erskine\"]",
+  "render" : {
+    "equalNeighboursX" : 0.23948007501228769,
+    "equalNeighboursY" : 0.2505762673041498,
+    "height" : 2480,
+    "meanAbsDiffNearestFixture" : 3.4767220273960042,
+    "meanAbsDiffSmoothFixture" : 2.0017824450117327,
+    "nativeEqualNeighboursX" : 0.12951920320235305,
+    "nativeEqualNeighboursY" : 0.14004310717268792,
+    "region" : [
+      81,
+      81,
+      3429,
+      2304
+    ],
+    "upsampling" : "smooth",
+    "width" : 3508
+  },
+  "renderSeconds" : 0.10046505928039551,
+  "renderSize" : [
+    3508,
+    2480
+  ],
+  "runs" : [
+    {
+      "confidence" : 0.99,
+      "confidentlyWrong" : false,
+      "coreMessage" : "Matched contour lines to terrain (±26 m).",
+      "gps" : {
+        "lat" : -29.308291,
+        "lon" : 29.465061
+      },
+      "gpsFromCentreKm" : 0,
+      "hintQueries" : [
+        "Mount Durnford",
+        "Langalibalele Pass",
+        "Main Cave",
+        "Grysbok Bush",
+        "Kambule",
+        "Katana",
+        "Potterill",
+        "Erskine",
+        "Lango-le-Balele",
+        "Umtshezi"
+      ],
+      "hintsSent" : 0,
+      "message" : "Matched contour lines to terrain (±26 m).",
+      "method" : "contours",
+      "nameFragments" : [
+
+      ],
+      "poiCount" : 17,
+      "poisByKind" : {
+        "peak" : 6,
+        "place" : 5,
+        "spot_height" : 6
+      },
+      "rmsM" : 25.5,
+      "run" : "centre-dem",
+      "scaleMPerPx" : 3.0529,
+      "search" : {
+        "coarse_zoom" : 11,
+        "hints_tried" : 0,
+        "radius_m" : 50000,
+        "searched_radius_m" : 50000,
+        "stage" : "done",
+        "tiles_fetched" : 12,
+        "tiles_planned" : 80
+      },
+      "searchRadiusKm" : 50,
+      "seconds" : 7.6030460596084595,
+      "shortHeights" : [
+
+      ],
+      "status" : "ok",
+      "terrain" : "fixture tiles (gaia-langalibalele/dem), no network",
+      "terrainTiles" : {
+        "calls" : 3,
+        "fetched" : 32,
+        "missing" : 0,
+        "requested" : 32,
+        "rounds" : 2
+      },
+      "timingsMs" : {
+        "fine_dem" : 483.6,
+        "grid" : 0,
+        "pois" : 2.6,
+        "refine" : 1714,
+        "total" : 2201.1
+      },
+      "truthError" : {
+        "count" : 25,
+        "max" : 14.26552961755605,
+        "median" : 8.527975225027708,
+        "p90" : 11.96785930592923
+      },
+      "wide" : false
+    },
+    {
+      "confidentlyWrong" : false,
+      "coreMessage" : "No match within 50 km of you (searched 56 terrain tiles; 16 couldn't be downloaded). Search a wider area, pick the contour colour, or calibrate manually.",
+      "failure" : "noTerrainMatch",
+      "gps" : {
+        "lat" : -25.83,
+        "lon" : 27.5
+      },
+      "gpsFromCentreKm" : 432.53435045965955,
+      "hintQueries" : [
+        "Mount Durnford",
+        "Langalibalele Pass",
+        "Main Cave",
+        "Grysbok Bush",
+        "Kambule",
+        "Katana",
+        "Potterill",
+        "Erskine",
+        "Lango-le-Balele",
+        "Umtshezi"
+      ],
+      "hintsSent" : 0,
+      "message" : "This map's contour lines didn't match the terrain within 50 km of you. Search wider to look for “Mount Durnford” and other places named on the map, or calibrate it manually.",
+      "nameFragments" : [
+
+      ],
+      "poiCount" : 0,
+      "poisByKind" : {
+
+      },
+      "run" : "far-magaliesberg",
+      "search" : {
+        "coarse_zoom" : 11,
+        "hints_tried" : 0,
+        "radius_m" : 50000,
+        "searched_radius_m" : 50000,
+        "stage" : "done",
+        "tiles_fetched" : 72,
+        "tiles_planned" : 72
+      },
+      "searchRadiusKm" : 50,
+      "seconds" : 18.41210699081421,
+      "shortHeights" : [
+
+      ],
+      "status" : "failed",
+      "terrain" : "fixture tiles of the Magaliesberg sheets (grootkloof, castle-gorge, mhlabatini) and gaia-langalibalele/dem, no network",
+      "terrainTiles" : {
+        "calls" : 5,
+        "fetched" : 56,
+        "missing" : 16,
+        "requested" : 72,
+        "rounds" : 4
+      },
+      "timingsMs" : {
+        "coarse_dem" : 5.9,
+        "coarse_search" : 12665.5,
+        "grid" : 0,
+        "pois" : 0.6,
+        "total" : 12673.6
+      },
+      "wide" : false
+    }
+  ],
+  "system" : "iOS Version 26.2 (Build 23C54), simulator",
+  "visionBoxes" : 34,
+  "visionSeconds" : 25.372271060943604
+}

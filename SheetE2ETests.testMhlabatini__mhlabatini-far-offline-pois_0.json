@@ -1,0 +1,353 @@
+[
+  {
+    "direction" : "W",
+    "distanceM" : 83493,
+    "elevationM" : 1482,
+    "kind" : "spot_height",
+    "lat" : -25.829016661546007,
+    "lon" : 27.360699542250025,
+    "name" : "1482",
+    "x" : 3309,
+    "y" : 2485
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 83565,
+    "elevationM" : 1512,
+    "kind" : "spot_height",
+    "lat" : -25.839347491293548,
+    "lon" : 27.361230319812687,
+    "name" : "1512",
+    "x" : 3337,
+    "y" : 3089
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 83665,
+    "elevationM" : 1239,
+    "kind" : "spot_height",
+    "lat" : -25.79214235742264,
+    "lon" : 27.355789878578186,
+    "name" : "1239",
+    "x" : 3051,
+    "y" : 331
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 83723,
+    "elevationM" : 1728,
+    "kind" : "spot_height",
+    "lat" : -25.851906490959312,
+    "lon" : 27.361385134593753,
+    "name" : "1728",
+    "x" : 3345,
+    "y" : 3822
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 83786,
+    "elevationM" : 1472,
+    "kind" : "spot_height",
+    "lat" : -25.85839564969587,
+    "lon" : 27.361745741116813,
+    "name" : "1472",
+    "x" : 3364,
+    "y" : 4201
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 83848,
+    "kind" : "place",
+    "lat" : -25.86144048928544,
+    "lon" : 27.361606294479447,
+    "name" : "NALE",
+    "x" : 3357,
+    "y" : 4379
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 84004,
+    "kind" : "place",
+    "lat" : -25.85773888935371,
+    "lon" : 27.35943897161662,
+    "name" : "AM HANG SELF-CATERIN",
+    "x" : 3243,
+    "y" : 4163
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 84110,
+    "kind" : "peak",
+    "lat" : -25.858634435945785,
+    "lon" : 27.358510120199643,
+    "name" : "MOUNT SERENE",
+    "x" : 3194,
+    "y" : 4215
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 84851,
+    "elevationM" : 1636,
+    "kind" : "spot_height",
+    "lat" : -25.84547777863155,
+    "lon" : 27.34911101731124,
+    "name" : "1636",
+    "x" : 2700,
+    "y" : 3447
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 84932,
+    "elevationM" : 1413,
+    "kind" : "spot_height",
+    "lat" : -25.851906386912873,
+    "lon" : 27.349199482544368,
+    "name" : "1413",
+    "x" : 2705,
+    "y" : 3822
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 85007,
+    "elevationM" : 1649,
+    "kind" : "spot_height",
+    "lat" : -25.845537475256435,
+    "lon" : 27.347540815379443,
+    "name" : "1649",
+    "x" : 2617,
+    "y" : 3450
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 85225,
+    "elevationM" : 1626,
+    "kind" : "spot_height",
+    "lat" : -25.844542284214192,
+    "lon" : 27.345218685186083,
+    "name" : "1626",
+    "x" : 2495,
+    "y" : 3392
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 85579,
+    "elevationM" : 1464,
+    "kind" : "spot_height",
+    "lat" : -25.84842457281596,
+    "lon" : 27.342179129885523,
+    "name" : "1464",
+    "x" : 2335,
+    "y" : 3619
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 86626,
+    "kind" : "place",
+    "lat" : -25.804548826652795,
+    "lon" : 27.32698574555291,
+    "name" : "MHLABATINI PARKING",
+    "x" : 1537,
+    "y" : 1056
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 87027,
+    "elevationM" : 1316,
+    "kind" : "spot_height",
+    "lat" : -25.799250557823616,
+    "lon" : 27.322597138951814,
+    "name" : "1316",
+    "x" : 1306,
+    "y" : 747
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 87152,
+    "kind" : "place",
+    "lat" : -25.793993891453244,
+    "lon" : 27.32102693439366,
+    "name" : "BERGHEIN",
+    "x" : 1223,
+    "y" : 440
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 87221,
+    "elevationM" : 1688,
+    "kind" : "spot_height",
+    "lat" : -25.830488192554984,
+    "lon" : 27.323425159327257,
+    "name" : "1688",
+    "x" : 1349,
+    "y" : 2571
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 87421,
+    "kind" : "place",
+    "lat" : -25.81276861773901,
+    "lon" : 27.319677896808173,
+    "name" : "CAMP GULLY",
+    "x" : 1152,
+    "y" : 1536
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 87638,
+    "kind" : "place",
+    "lat" : -25.861022446410598,
+    "lon" : 27.32328275034276,
+    "name" : "OLIFANTSHOEK PRIMARY SCHOOL",
+    "x" : 1342,
+    "y" : 4355
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 87656,
+    "kind" : "place",
+    "lat" : -25.81239654427816,
+    "lon" : 27.317292646721814,
+    "name" : "MHLABATINI KLOOF",
+    "x" : 1027,
+    "y" : 1514
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 87891,
+    "elevationM" : 1248,
+    "kind" : "spot_height",
+    "lat" : -25.789274586794864,
+    "lon" : 27.31337496183947,
+    "name" : "1248",
+    "x" : 821,
+    "y" : 164
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 87986,
+    "kind" : "place",
+    "lat" : -25.856608345477312,
+    "lon" : 27.319102914762034,
+    "name" : "AASVOELKRANS RESORT",
+    "x" : 1122,
+    "y" : 4097
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 88623,
+    "elevationM" : 1306,
+    "kind" : "spot_height",
+    "lat" : -25.860504741648906,
+    "lon" : 27.313264419048924,
+    "name" : "1306",
+    "x" : 815,
+    "y" : 4325
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 88667,
+    "elevationM" : 1718,
+    "kind" : "spot_height",
+    "lat" : -25.81541835156551,
+    "lon" : 27.307425899469344,
+    "name" : "1718",
+    "x" : 508,
+    "y" : 1691
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 88701,
+    "elevationM" : 1324,
+    "kind" : "spot_height",
+    "lat" : -25.844900248469266,
+    "lon" : 27.31027881608702,
+    "name" : "1324",
+    "x" : 658,
+    "y" : 3413
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 88807,
+    "kind" : "place",
+    "lat" : -25.83122457221203,
+    "lon" : 27.307578589641604,
+    "name" : "AASVOËL GULLY",
+    "x" : 516,
+    "y" : 2614
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 88829,
+    "elevationM" : 1213,
+    "kind" : "spot_height",
+    "lat" : -25.817011000675777,
+    "lon" : 27.30594416034348,
+    "name" : "1213",
+    "x" : 430,
+    "y" : 1784
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 88889,
+    "kind" : "place",
+    "lat" : -25.82836208136967,
+    "lon" : 27.306452822877837,
+    "name" : "RETIEP'SKLOOF CATCHMENT AREA",
+    "x" : 457,
+    "y" : 2447
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 88940,
+    "kind" : "place",
+    "lat" : -25.831901354961676,
+    "lon" : 27.306321110453457,
+    "name" : "AASVOËLKRANS",
+    "x" : 450,
+    "y" : 2654
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 89079,
+    "elevationM" : 1259,
+    "kind" : "spot_height",
+    "lat" : -25.792619789778772,
+    "lon" : 27.30167585288108,
+    "name" : "1259",
+    "x" : 206,
+    "y" : 359
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 89130,
+    "elevationM" : 1202,
+    "kind" : "spot_height",
+    "lat" : -25.858156374742347,
+    "lon" : 27.307799213304126,
+    "name" : "1202",
+    "x" : 528,
+    "y" : 4187
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 89170,
+    "elevationM" : 1754,
+    "kind" : "spot_height",
+    "lat" : -25.82097262785414,
+    "lon" : 27.30289222039143,
+    "name" : "1754",
+    "x" : 270,
+    "y" : 2015
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 89598,
+    "elevationM" : 1312,
+    "kind" : "spot_height",
+    "lat" : -25.850592426930255,
+    "lon" : 27.302007614029108,
+    "name" : "1312",
+    "x" : 223,
+    "y" : 3745
+  }
+]

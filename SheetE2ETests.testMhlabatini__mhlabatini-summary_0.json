@@ -1,0 +1,244 @@
+{
+  "dpi" : 300,
+  "labels" : [
+    {
+      "axis" : "lat",
+      "label" : "25°48'S",
+      "linePx" : 790.29,
+      "matches" : [
+        "25°48'00'S",
+        "254800S"
+      ],
+      "nearby" : [
+        "25°48'00'S [123, 709, 30, 160] 1.00",
+        "254800S [124, 711, 33, 182] 0.30"
+      ],
+      "read" : true
+    },
+    {
+      "axis" : "lat",
+      "label" : "25°49'S",
+      "linePx" : 1763.65,
+      "matches" : [
+        "2549001S",
+        "25°49'00\"S"
+      ],
+      "nearby" : [
+        "2549001S [125, 1684, 31, 161] 0.30",
+        "25°49'00\"S [123, 1684, 30, 160] 1.00"
+      ],
+      "read" : true
+    },
+    {
+      "axis" : "lat",
+      "label" : "25°50'S",
+      "linePx" : 2737.26,
+      "matches" : [
+        "25°50'00\"S",
+        "25°50'00119"
+      ],
+      "nearby" : [
+        "25°50'00\"S [126, 2658, 28, 158] 1.00"
+      ],
+      "read" : true
+    },
+    {
+      "axis" : "lat",
+      "label" : "25°51'S",
+      "linePx" : 3710.83,
+      "matches" : [
+        "25°51'00''S"
+      ],
+      "nearby" : [
+        "25°51'00''S [119, 3628, 37, 166] 1.00",
+        "1312 [191, 3730, 65, 30] 1.00",
+        "TATE MOUNHIN [165, 3875, 107, 312] 0.50"
+      ],
+      "read" : true
+    },
+    {
+      "axis" : "lat",
+      "label" : "25°52'S",
+      "linePx" : 4684.69,
+      "matches" : [
+
+      ],
+      "nearby" : [
+        "* [188, 4558, 21, 19] 1.00",
+        "25°50'00119 [123, 4610, 26, 156] 1.00",
+        "P. [172, 4614, 35, 33] 1.00",
+        "05050'00 [128, 4640, 19, 126] 1.00",
+        "W. [169, 4649, 37, 33] 1.00",
+        "• [191, 4663, 14, 16] 1.00",
+        "S [172, 4689, 21, 21] 1.00",
+        "• [186, 4700, 19, 19] 1.00",
+        "27°18'00\"E [39, 4802, 158, 31] 1.00"
+      ],
+      "read" : false
+    },
+    {
+      "axis" : "lon",
+      "label" : "27°18'E",
+      "linePx" : 117.65,
+      "matches" : [
+        "27°18'00\"E"
+      ],
+      "nearby" : [
+        "AGISV1 Sept 2011 [288, 4798, 343, 42] 1.00",
+        "27°18'00\"E [39, 4802, 158, 31] 1.00"
+      ],
+      "read" : true
+    },
+    {
+      "axis" : "lon",
+      "label" : "27°19'E",
+      "linePx" : 993.96,
+      "matches" : [
+        "27°19'00\"E"
+      ],
+      "nearby" : [
+        "GIS V1 Sept 2011- Eras Gous [435, 4798, 342, 44] 1.00",
+        "27°19'00\"E [914, 4803, 167, 30] 1.00"
+      ],
+      "read" : true
+    },
+    {
+      "axis" : "lon",
+      "label" : "27°20'E",
+      "linePx" : 1870.31,
+      "matches" : [
+
+      ],
+      "nearby" : [
+        "27°2008\"E 137p [1787, 4783, 253, 60] 0.50",
+        "137р [1966, 4798, 70, 37] 1.00"
+      ],
+      "read" : false
+    },
+    {
+      "axis" : "lon",
+      "label" : "27°21'E",
+      "linePx" : 2746.59,
+      "matches" : [
+        "27°21'00\"E"
+      ],
+      "nearby" : [
+        "27°21'00\"E [2664, 4805, 165, 28] 1.00"
+      ],
+      "read" : true
+    }
+  ],
+  "labelsMissed" : [
+    "25°52'S",
+    "27°20'E"
+  ],
+  "labelsRead" : [
+    "25°48'S",
+    "25°49'S",
+    "25°50'S",
+    "25°51'S",
+    "27°18'E",
+    "27°19'E",
+    "27°21'E"
+  ],
+  "latitudeLabels" : 5,
+  "latitudeLabelsRead" : 4,
+  "longitudeLabels" : 4,
+  "longitudeLabelsRead" : 3,
+  "outcome" : "mhlabatini: Vision 144 boxes in 45.9 s, latitude labels 4/5 [\"25°48\\'S\", \"25°49\\'S\", \"25°50\\'S\", \"25°51\\'S\"], longitude labels 3/4 [\"27°18\\'E\", \"27°19\\'E\", \"27°21\\'E\"] | far-offline: ok grid, max 0.1 m, 33 POIs, 1.1 s — Located from 4 latitude and 3 longitude grid labels (±1 m). | centre-dem: ok grid, max 0.1 m, 33 POIs, 0.9 s — Located from 4 latitude and 3 longitude grid labels (±1 m).",
+  "renderSeconds" : 0.3648340702056885,
+  "renderSize" : [
+    3508,
+    4963
+  ],
+  "runs" : [
+    {
+      "confidence" : 0.97,
+      "coreMessage" : "Located from 4 latitude and 3 longitude grid labels (±1 m).",
+      "frameMaxErrorM" : 0.09428288294309883,
+      "gps" : {
+        "lat" : -25.75,
+        "lon" : 28.19
+      },
+      "gpsFromCentreKm" : 86.43807306988444,
+      "graticuleError" : {
+        "count" : 20,
+        "max" : 0.14245010129487706,
+        "median" : 0.08618356327348961,
+        "p90" : 0.13306053889477532
+      },
+      "message" : "Located from 4 latitude and 3 longitude grid labels (±1 m).",
+      "method" : "grid",
+      "nameFragments" : [
+
+      ],
+      "poiCount" : 33,
+      "poisByKind" : {
+        "peak" : 1,
+        "place" : 11,
+        "spot_height" : 21
+      },
+      "rmsM" : 1.4,
+      "run" : "far-offline",
+      "searchRadiusKm" : 20,
+      "seconds" : 1.0778989791870117,
+      "shortHeights" : [
+
+      ],
+      "status" : "ok",
+      "terrain" : "none (offline, nothing cached)",
+      "timingsMs" : {
+        "grid" : 0.5,
+        "lines" : 924.1,
+        "pois" : 1.9,
+        "total" : 928.4
+      }
+    },
+    {
+      "confidence" : 0.97,
+      "coreMessage" : "Located from 4 latitude and 3 longitude grid labels (±1 m).",
+      "frameMaxErrorM" : 0.09428288294309883,
+      "gps" : {
+        "lat" : -25.828818945529576,
+        "lon" : 27.33110267174874
+      },
+      "gpsFromCentreKm" : 0,
+      "graticuleError" : {
+        "count" : 20,
+        "max" : 0.14245010129487706,
+        "median" : 0.08618356327348961,
+        "p90" : 0.13306053889477532
+      },
+      "message" : "Located from 4 latitude and 3 longitude grid labels (±1 m).",
+      "method" : "grid",
+      "nameFragments" : [
+
+      ],
+      "poiCount" : 33,
+      "poisByKind" : {
+        "peak" : 1,
+        "place" : 11,
+        "spot_height" : 21
+      },
+      "rmsM" : 1.4,
+      "run" : "centre-dem",
+      "searchRadiusKm" : 20,
+      "seconds" : 0.9086849689483643,
+      "shortHeights" : [
+
+      ],
+      "status" : "ok",
+      "terrain" : "fixture tiles (mhlabatini/dem), no network",
+      "timingsMs" : {
+        "grid" : 0.2,
+        "lines" : 431.8,
+        "pois" : 1.6,
+        "total" : 435.7
+      }
+    }
+  ],
+  "sheet" : "mhlabatini",
+  "system" : "iOS Version 26.2 (Build 23C54), simulator",
+  "visionBoxes" : 144,
+  "visionSeconds" : 45.85221707820892
+}

@@ -1,0 +1,342 @@
+{
+  "confidence" : 0.97,
+  "corners" : [
+    [
+      -25.80739764791013,
+      27.366650050976876
+    ],
+    [
+      -25.807393863657303,
+      27.433343234183
+    ],
+    [
+      -25.892336520389946,
+      27.433351099043307
+    ],
+    [
+      -25.89234030192561,
+      27.366657915837184
+    ]
+  ],
+  "hint_queries" : [
+    "HAMERKOP",
+    "MAGALIESBERG SH",
+    "Vi Sept",
+    "HAMERKOP GATE",
+    "SPARKLING WATERS HOTEL",
+    "GARBUSH HILL COUNTRY COTTAGE",
+    "MILORHO LODGE",
+    "GROOTKLOOF PEDESTRIAN GATE",
+    "NTEIN VALLEY",
+    "YSTERHOUT KLOOF",
+    "ROTSBOOM KLOOF",
+    "HAMERKOP KLOOF"
+  ],
+  "message" : "Located from 4 latitude and 3 longitude grid labels (±2 m).",
+  "method" : "grid",
+  "need_tiles" : [
+
+  ],
+  "pixel_to_mercator" : [
+    2.2552403383622655,
+    0.00018795883307303187,
+    3046441.5483924598,
+    0.00014214196909278145,
+    -2.255715074960817,
+    -2975245.806609478,
+    0,
+    0,
+    1
+  ],
+  "pois" : [
+    {
+      "kind" : "place",
+      "name" : "GARBUSH HILL COUNTRY COTTAGE",
+      "x" : 2715.255814728682,
+      "y" : 431.4767446494169
+    },
+    {
+      "elevation_m" : 1496,
+      "kind" : "spot_height",
+      "name" : "1496",
+      "x" : 1394.186045976744,
+      "y" : 606.9767442790699
+    },
+    {
+      "elevation_m" : 1388,
+      "kind" : "spot_height",
+      "name" : "1388",
+      "x" : 2881.5348843313955,
+      "y" : 866.2790696802326
+    },
+    {
+      "kind" : "place",
+      "name" : "KUMBI",
+      "x" : 3143.1627896548916,
+      "y" : 872.0930234017983
+    },
+    {
+      "elevation_m" : 1502,
+      "kind" : "spot_height",
+      "name" : "1502",
+      "x" : 487.6035151810222,
+      "y" : 910.465116375969
+    },
+    {
+      "kind" : "place",
+      "name" : "PARAMOUNT CONFERENCE & ADVENTU",
+      "x" : 1281.3953442325583,
+      "y" : 917.5000004289324
+    },
+    {
+      "kind" : "place",
+      "name" : "NTEIN VALLEY",
+      "x" : 2428.046510023256,
+      "y" : 930.0930232823016
+    },
+    {
+      "kind" : "place",
+      "name" : "RIE",
+      "x" : 2283.8604648139535,
+      "y" : 931.3953486279069
+    },
+    {
+      "elevation_m" : 1392,
+      "kind" : "spot_height",
+      "name" : "1392",
+      "x" : 2840.3007806940627,
+      "y" : 988.3720932558139
+    },
+    {
+      "kind" : "place",
+      "name" : "HAMERKOP GATE",
+      "x" : 2759.37143946116,
+      "y" : 1040.0295405334368
+    },
+    {
+      "kind" : "place",
+      "name" : "SPARKLING WATERS HOTEL",
+      "x" : 2047.8139581395349,
+      "y" : 1198.999999687997
+    },
+    {
+      "elevation_m" : 1946,
+      "kind" : "spot_height",
+      "name" : "1946",
+      "x" : 1054.7334544311748,
+      "y" : 1208.8533099432175
+    },
+    {
+      "kind" : "place",
+      "name" : "BARTLETT FARM PARKING",
+      "x" : 1420.9302355813952,
+      "y" : 1398.99999953102
+    },
+    {
+      "kind" : "place",
+      "name" : "BARTLETT/FARM GATE",
+      "x" : 1768.0930258372089,
+      "y" : 1440.0000004170815
+    },
+    {
+      "kind" : "place",
+      "name" : "MILORHO LODGE",
+      "x" : 1487.209300255814,
+      "y" : 1459.209301967178
+    },
+    {
+      "kind" : "place",
+      "name" : "GROOTKLOOF PEDESTRIAN GATE",
+      "x" : 1939.0232588372091,
+      "y" : 1491.8720929648935
+    },
+    {
+      "elevation_m" : 1479,
+      "kind" : "spot_height",
+      "name" : "1479",
+      "x" : 1901.8139538139535,
+      "y" : 1705.0465113488372
+    },
+    {
+      "elevation_m" : 1494,
+      "kind" : "spot_height",
+      "name" : "1494",
+      "x" : 749.9999998890063,
+      "y" : 1812.02325577167
+    },
+    {
+      "kind" : "place",
+      "name" : "YSTERHOUT KLOOF",
+      "x" : 1837.5054984905769,
+      "y" : 2019.3379634308333
+    },
+    {
+      "elevation_m" : 1518,
+      "kind" : "spot_height",
+      "name" : "1518",
+      "x" : 1580.8837213289037,
+      "y" : 1999.2325580232557
+    },
+    {
+      "kind" : "place",
+      "name" : "WOODPECKER GULK",
+      "x" : 2118.4980007042454,
+      "y" : 2115.104577020418
+    },
+    {
+      "elevation_m" : 1526,
+      "kind" : "spot_height",
+      "name" : "1526",
+      "x" : 1757.6279075348834,
+      "y" : 2182.9534882558137
+    },
+    {
+      "elevation_m" : 1614,
+      "kind" : "spot_height",
+      "name" : "1614",
+      "x" : 465.116278987688,
+      "y" : 2189.93023249658
+    },
+    {
+      "elevation_m" : 1536,
+      "kind" : "spot_height",
+      "name" : "1536",
+      "x" : 3011.7674413255813,
+      "y" : 2205.04651172093
+    },
+    {
+      "elevation_m" : 1504,
+      "kind" : "spot_height",
+      "name" : "1504",
+      "x" : 2261.1162788081397,
+      "y" : 2237.837209040698
+    },
+    {
+      "kind" : "place",
+      "name" : "GUL",
+      "x" : 1815.2558138139534,
+      "y" : 2261.0930231860466
+    },
+    {
+      "kind" : "place",
+      "name" : "CANDELABRA",
+      "x" : 1920.4186054239585,
+      "y" : 2370.162789586563
+    },
+    {
+      "kind" : "place",
+      "name" : "ROTSBOOM KLOOF",
+      "x" : 2680.118945920823,
+      "y" : 2427.22054343666
+    },
+    {
+      "kind" : "place",
+      "name" : "EASY GULE",
+      "x" : 1619.2558149810613,
+      "y" : 2379.4651160876238
+    },
+    {
+      "kind" : "place",
+      "name" : "GULLY",
+      "x" : 1905.9534890310078,
+      "y" : 2453.883720736434
+    },
+    {
+      "kind" : "place",
+      "name" : "WOODY",
+      "x" : 1817.5813958604651,
+      "y" : 2452.7209304883722
+    },
+    {
+      "elevation_m" : 1719,
+      "kind" : "spot_height",
+      "name" : "1719",
+      "x" : 223.2558138372093,
+      "y" : 2635.511627859408
+    },
+    {
+      "kind" : "place",
+      "name" : "CAVE KLOOF",
+      "x" : 2995.2039125021856,
+      "y" : 2790.4272883684293
+    },
+    {
+      "kind" : "place",
+      "name" : "HAMERKOP KLOOF",
+      "x" : 2711.8056311789173,
+      "y" : 2907.599978249721
+    },
+    {
+      "elevation_m" : 1716,
+      "kind" : "spot_height",
+      "name" : "1716",
+      "x" : 990.6976743410855,
+      "y" : 2877.3720929534884
+    },
+    {
+      "elevation_m" : 1718,
+      "kind" : "spot_height",
+      "name" : "1718",
+      "x" : 1055.8139533776302,
+      "y" : 2952.9534883277965
+    },
+    {
+      "elevation_m" : 1749,
+      "kind" : "spot_height",
+      "name" : "1749",
+      "x" : 2370.418604534884,
+      "y" : 3197.139534722719
+    },
+    {
+      "kind" : "place",
+      "name" : "ATRIG BEACON",
+      "x" : 1989.6744203264075,
+      "y" : 3234.7441858201505
+    },
+    {
+      "elevation_m" : 1416,
+      "kind" : "spot_height",
+      "name" : "1416",
+      "x" : 451.16279062015496,
+      "y" : 3259.9302324935397
+    },
+    {
+      "elevation_m" : 1754,
+      "kind" : "spot_height",
+      "name" : "1754",
+      "x" : 2143.674418546512,
+      "y" : 3263.4186043895347
+    },
+    {
+      "kind" : "place",
+      "name" : "cLUB n",
+      "x" : 328.9296914378904,
+      "y" : 3622.7209306976747
+    },
+    {
+      "elevation_m" : 1514,
+      "kind" : "spot_height",
+      "name" : "1514",
+      "x" : 2406.4651166777408,
+      "y" : 3984.7441859302326
+    },
+    {
+      "kind" : "place",
+      "name" : "FKWAMI LODOES",
+      "x" : 2760.604652052115,
+      "y" : 4211.488371827324
+    }
+  ],
+  "rms_m" : 1.5,
+  "rotation_deg" : 0,
+  "scale_m_per_px" : 2.0298,
+  "status" : "ok",
+  "timings_ms" : {
+    "grid" : 8,
+    "lines" : 6103.8,
+    "normalize" : 504.2,
+    "pois" : 2.6,
+    "total" : 7047.7,
+    "warp" : 425.9
+  }
+}

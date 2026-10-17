@@ -1,0 +1,396 @@
+{
+  "confidence" : 0.97,
+  "corners" : [
+    [
+      -25.772936534074855,
+      27.559236127795884
+    ],
+    [
+      -25.772936697616167,
+      27.625955118358153
+    ],
+    [
+      -25.857908638438317,
+      27.62595510213103
+    ],
+    [
+      -25.857908475014295,
+      27.559236111568765
+    ]
+  ],
+  "hint_queries" : [
+    "CASTLE GORGE",
+    "MAGALIESBERG",
+    "SHOOP MOUNTAIN LODGE",
+    "GRASSY POOL",
+    "MAGALIESBERG MOUNTAIN LODGE",
+    "CASTLE GORGE WATERFALL",
+    "MARETLWANE BUSH SCHOOL",
+    "PINACLE GULLY",
+    "PIHRANA POOL",
+    "NEEDLE GULLY",
+    "BRAMBLE GULLY",
+    "UPPER CASTLE GULLY"
+  ],
+  "message" : "Located from 4 latitude and 4 longitude grid labels (±1 m).",
+  "method" : "grid",
+  "need_tiles" : [
+
+  ],
+  "pixel_to_mercator" : [
+    2.117196139005883,
+    -3.639723706238258e-07,
+    3067880.1323978263,
+    -5.7629343587713936e-06,
+    -2.1172042595846774,
+    -2970985.231718912,
+    0,
+    0,
+    1
+  ],
+  "pois" : [
+    {
+      "elevation_m" : 1246,
+      "kind" : "spot_height",
+      "name" : "1246",
+      "x" : 397.8547797597426,
+      "y" : 139.53488359173127
+    },
+    {
+      "kind" : "place",
+      "name" : "BUSSHBREAK ACCOMMODATION",
+      "x" : 402.325585488372,
+      "y" : 295.500000263987
+    },
+    {
+      "kind" : "place",
+      "name" : "FEATHERS B&B",
+      "x" : 2983.713234263072,
+      "y" : 295.34883731266154
+    },
+    {
+      "kind" : "place",
+      "name" : "KUDU KONAÍ",
+      "x" : 475.5879557536065,
+      "y" : 434.9186809851427
+    },
+    {
+      "kind" : "place",
+      "name" : "STAFF HOUSES",
+      "x" : 812.7906975818344,
+      "y" : 625.581394960187
+    },
+    {
+      "kind" : "place",
+      "name" : "MARETLWANE BUSH SCHOOL",
+      "x" : 1106.9975678967517,
+      "y" : 688.191262931518
+    },
+    {
+      "kind" : "water",
+      "name" : "MARETEWA RIVER",
+      "x" : 1070.8244058884095,
+      "y" : 915.2378899568586
+    },
+    {
+      "kind" : "place",
+      "name" : "AGTERSKOT",
+      "x" : 3051.3375199577886,
+      "y" : 939.9748573039458
+    },
+    {
+      "kind" : "place",
+      "name" : "TENTED CAMP",
+      "x" : 753.4883704681542,
+      "y" : 1094.186045389771
+    },
+    {
+      "kind" : "place",
+      "name" : "MIDDLE RIDGE KLOOF",
+      "x" : 3132.4240132239815,
+      "y" : 1384.4594949557152
+    },
+    {
+      "elevation_m" : 1529,
+      "kind" : "spot_height",
+      "name" : "1529",
+      "x" : 2553.348837134762,
+      "y" : 1304.6511627215373
+    },
+    {
+      "kind" : "place",
+      "name" : "ZIMBABWE",
+      "x" : 2076.392357269692,
+      "y" : 1543.3899453106878
+    },
+    {
+      "elevation_m" : 1492,
+      "kind" : "spot_height",
+      "name" : "1492",
+      "x" : 2048.1860471860464,
+      "y" : 1664.0232556976746
+    },
+    {
+      "kind" : "place",
+      "name" : "ZIMBABWE VLAKTE",
+      "x" : 2512.6511633023256,
+      "y" : 1745.5000004517426
+    },
+    {
+      "elevation_m" : 1501,
+      "kind" : "spot_height",
+      "name" : "1501",
+      "x" : 456.5426073792502,
+      "y" : 1767.511628036462
+    },
+    {
+      "kind" : "place",
+      "name" : "BRAMBLE GULLY",
+      "x" : 2170.820327601037,
+      "y" : 1876.4806689448544
+    },
+    {
+      "kind" : "place",
+      "name" : "CASTLE GORGE WATERFALL (LOWER)",
+      "x" : 1108.139530674419,
+      "y" : 2106.99999939624
+    },
+    {
+      "kind" : "place",
+      "name" : "CASTLE GORGE WATERFALL (UPPER)",
+      "x" : 648.8372125193798,
+      "y" : 2115.372092821272
+    },
+    {
+      "elevation_m" : 1546,
+      "kind" : "spot_height",
+      "name" : "1546",
+      "x" : 405.97426508285844,
+      "y" : 2155.883720843023
+    },
+    {
+      "elevation_m" : 1598,
+      "kind" : "spot_height",
+      "name" : "1598",
+      "x" : 2344.0465116511627,
+      "y" : 2182.627906767442
+    },
+    {
+      "elevation_m" : 1558,
+      "kind" : "spot_height",
+      "name" : "1558",
+      "x" : 1784.232558895349,
+      "y" : 2196.5813953197676
+    },
+    {
+      "kind" : "water",
+      "name" : "GRASSY POOL",
+      "x" : 805.8139550600335,
+      "y" : 2214.0232558062544
+    },
+    {
+      "kind" : "place",
+      "name" : "STILE",
+      "x" : 2286.679120979865,
+      "y" : 2253.0768161550577
+    },
+    {
+      "kind" : "water",
+      "name" : "PIHRANA POOL",
+      "x" : 954.6511641362126,
+      "y" : 2262.9534882835596
+    },
+    {
+      "kind" : "place",
+      "name" : "RAND WATER BOX 2",
+      "x" : 1673.7674417441863,
+      "y" : 2272.267441904506
+    },
+    {
+      "elevation_m" : 1556,
+      "kind" : "spot_height",
+      "name" : "1556",
+      "x" : 2048.186046488372,
+      "y" : 2276.81395372093
+    },
+    {
+      "kind" : "place",
+      "name" : "TURN RIGHT AT SIGN",
+      "x" : 2766.1395327131786,
+      "y" : 2307.000000094101
+    },
+    {
+      "kind" : "place",
+      "name" : "VEHICLE GATE",
+      "x" : 2239.9107775804778,
+      "y" : 2318.5205865980715
+    },
+    {
+      "kind" : "place",
+      "name" : "KEEP RIGHT",
+      "x" : 1650.5116288226743,
+      "y" : 2322.139534741818
+    },
+    {
+      "kind" : "place",
+      "name" : "RAND WATER BOX 1",
+      "x" : 1878.4186054651161,
+      "y" : 2338.499999614793
+    },
+    {
+      "kind" : "water",
+      "name" : "LONG POOL",
+      "x" : 827.9069783333334,
+      "y" : 2353.558139302326
+    },
+    {
+      "kind" : "place",
+      "name" : "KRAAL",
+      "x" : 2176.0930237936045,
+      "y" : 2352.395348735465
+    },
+    {
+      "elevation_m" : 1497,
+      "kind" : "spot_height",
+      "name" : "1497",
+      "x" : 573.2558144883722,
+      "y" : 2372.1627910697675
+    },
+    {
+      "kind" : "place",
+      "name" : "UPPER CASTLE GULLY",
+      "x" : 493.95085164089534,
+      "y" : 2630.0763018651314
+    },
+    {
+      "elevation_m" : 1503,
+      "kind" : "spot_height",
+      "name" : "1503",
+      "x" : 800.0000005581394,
+      "y" : 2519.8372091860465
+    },
+    {
+      "kind" : "place",
+      "name" : "SIGN POST",
+      "x" : 2860.3255825387596,
+      "y" : 2531.465116143411
+    },
+    {
+      "kind" : "place",
+      "name" : "NO ENTRY SIGN",
+      "x" : 2920.7906979302325,
+      "y" : 2652.4999996369716
+    },
+    {
+      "kind" : "place",
+      "name" : "PRIVATE PROPERTY",
+      "x" : 2525.441862906977,
+      "y" : 2707.0348837810016
+    },
+    {
+      "elevation_m" : 1568,
+      "kind" : "spot_height",
+      "name" : "1568",
+      "x" : 863.9534888178293,
+      "y" : 2718.7441859302326
+    },
+    {
+      "kind" : "place",
+      "name" : "KEEP LEFT",
+      "x" : 2873.1162780062728,
+      "y" : 2728.0465117916237
+    },
+    {
+      "kind" : "place",
+      "name" : "CASCADE KLOOF",
+      "x" : 867.3625177485071,
+      "y" : 2939.1638119745485
+    },
+    {
+      "kind" : "place",
+      "name" : "CROSSING",
+      "x" : 2888.232559244186,
+      "y" : 2898.9767440891474
+    },
+    {
+      "kind" : "place",
+      "name" : "JOINS DIRT ROAD",
+      "x" : 2935.906974922481,
+      "y" : 2934.9999996283527
+    },
+    {
+      "kind" : "place",
+      "name" : "MAGALIESBERG MOUNTAIN LODGE",
+      "x" : 2490.5581355116283,
+      "y" : 3068.98837205253
+    },
+    {
+      "elevation_m" : 1716,
+      "kind" : "spot_height",
+      "name" : "1716",
+      "x" : 1553.9999994950779,
+      "y" : 3068.7441861782245
+    },
+    {
+      "kind" : "place",
+      "name" : "GAUTENG",
+      "x" : 1148.5047683704167,
+      "y" : 3441.5697824686677
+    },
+    {
+      "kind" : "place",
+      "name" : "NORTH WEST",
+      "x" : 927.3656008289763,
+      "y" : 3611.4271265133043
+    },
+    {
+      "kind" : "place",
+      "name" : "PINACLE GULLY",
+      "x" : 1045.3488352325583,
+      "y" : 3697.93023275312
+    },
+    {
+      "kind" : "place",
+      "name" : "LIGHTNING RAVINE",
+      "x" : 573.2558116046512,
+      "y" : 3700.255814148469
+    },
+    {
+      "kind" : "place",
+      "name" : "NEEDLE GULLY",
+      "x" : 919.7674434689923,
+      "y" : 3733.9999999308766
+    },
+    {
+      "elevation_m" : 1769,
+      "kind" : "spot_height",
+      "name" : "1769",
+      "x" : 543.0232553986712,
+      "y" : 3766.418604734219
+    },
+    {
+      "elevation_m" : 1189,
+      "kind" : "place",
+      "name" : "SHOOP MOUNTAIN LODGE",
+      "x" : 744.2832762626642,
+      "y" : 3994.8981205696537
+    },
+    {
+      "elevation_m" : 1331,
+      "kind" : "spot_height",
+      "name" : "1331",
+      "x" : 1760.9767446511628,
+      "y" : 4766.4883719961235
+    }
+  ],
+  "rms_m" : 1.4,
+  "rotation_deg" : 0,
+  "scale_m_per_px" : 1.9059,
+  "status" : "ok",
+  "timings_ms" : {
+    "grid" : 0.3,
+    "lines" : 246.7,
+    "pois" : 2.5,
+    "total" : 252.5
+  }
+}

@@ -1,0 +1,237 @@
+{
+  "centreHeights" : [
+    "6316 (spot_height): 1925 m",
+    "Songebethu (peak): 3301 m",
+    "10830 (spot_height): 3301 m",
+    "Mount Dumford (peak): 3294 m",
+    "10807 (spot_height): 3294 m",
+    "6811 (spot_height): 2076 m",
+    "Giant's Castle (peak): 3315 m",
+    "10814 (spot_height): 3296 m",
+    "Legheku (peak): 3330 m",
+    "Ntloana-Ts'oana (peak): 3262 m",
+    "10925 (spot_height): 3330 m",
+    "10702 (spot_height): 3262 m"
+  ],
+  "cleanedHintQueries" : [
+    "Giant's Castle",
+    "Langalibalele Pass",
+    "Ntubeni Pass",
+    "Bannerman's Pass",
+    "Giant's Pass",
+    "Bannerman Hut",
+    "Mount Dumford",
+    "KaMasihlengo Pass",
+    "Grysbok Bush",
+    "Legheku",
+    "Songebethu",
+    "Ntloana-Ts'oana"
+  ],
+  "dpi" : 300,
+  "expectedNamesFound" : [
+    "Giant's Castle",
+    "Langalibalele Pass"
+  ],
+  "farHeights" : [
+    "6316 (spot_height): 1925 m",
+    "Songebethu (peak): 3301 m",
+    "10830 (spot_height): 3301 m",
+    "Mount Dumford (peak): 3294 m",
+    "10807 (spot_height): 3294 m",
+    "6811 (spot_height): 2076 m",
+    "Giant's Castle (peak): 3315 m",
+    "10814 (spot_height): 3296 m",
+    "10876 (spot_height): 3315 m",
+    "Legheku (peak): 3330 m",
+    "Ntloana-Ts'oana (peak): 3262 m",
+    "10925 (spot_height): 3330 m",
+    "10702 (spot_height): 3262 m"
+  ],
+  "furniture" : [
+
+  ],
+  "hintQueries" : [
+    "Giant's Castle",
+    "Langalibalele Pass",
+    "Ntubeni Pass",
+    "Bannerman's Pass",
+    "Giant's Pass",
+    "Bannerman Hut",
+    "Mount Dumford",
+    "KaMasihlengo Pass",
+    "Grysbok Bush",
+    "Legheku",
+    "Songebethu",
+    "Ntloana-Ts'oana"
+  ],
+  "map" : "gaia-giants-castle",
+  "outcome" : "gaia-giants-castle: render 3508×2480 smooth (equal neighbours 0.16, raster 0.06; MAE 1.86 vs map.jpg, 3.17 vs map_nearest.jpg), Vision 46 boxes in 24.4 s | centre-dem: ok contours 0.99, truth median 14.3 m, max 17.9 m, 21 POIs, 4.4 s — Matched contour lines to terrain (±31 m). | far-magaliesberg: failed - (noTerrainMatch), 0 POIs, 39.4 s — This map's contour lines didn't match the terrain within 50 km of you. Search wider to look for “Giant's Castle” and other places named on the map, or calibrate it manually. | hint queries [\"Giant\\'s Castle\", \"Langalibalele Pass\", \"Ntubeni Pass\", \"Bannerman\\'s Pass\", \"Giant\\'s Pass\", \"Bannerman Hut\", \"Mount Dumford\", \"KaMasihlengo Pass\"]",
+  "render" : {
+    "equalNeighboursX" : 0.16281222695450676,
+    "equalNeighboursY" : 0.15989905442157118,
+    "height" : 2480,
+    "meanAbsDiffNearestFixture" : 3.169502928123451,
+    "meanAbsDiffSmoothFixture" : 1.8618289955848941,
+    "nativeEqualNeighboursX" : 0.061757095714321704,
+    "nativeEqualNeighboursY" : 0.06328665789802129,
+    "region" : [
+      81,
+      81,
+      3429,
+      2304
+    ],
+    "upsampling" : "smooth",
+    "width" : 3508
+  },
+  "renderSeconds" : 0.10580098628997803,
+  "renderSize" : [
+    3508,
+    2480
+  ],
+  "runs" : [
+    {
+      "confidence" : 0.994,
+      "confidentlyWrong" : false,
+      "coreMessage" : "Matched contour lines to terrain (±31 m).",
+      "gps" : {
+        "lat" : -29.326791,
+        "lon" : 29.423245
+      },
+      "gpsFromCentreKm" : 0,
+      "hintQueries" : [
+        "Giant's Castle",
+        "Langalibalele Pass",
+        "Ntubeni Pass",
+        "Bannerman's Pass",
+        "Giant's Pass",
+        "Bannerman Hut",
+        "Mount Dumford",
+        "KaMasihlengo Pass",
+        "Grysbok Bush",
+        "Legheku",
+        "Songebethu",
+        "Ntloana-Ts'oana"
+      ],
+      "hintsSent" : 0,
+      "message" : "Matched contour lines to terrain (±31 m).",
+      "method" : "contours",
+      "nameFragments" : [
+
+      ],
+      "poiCount" : 21,
+      "poisByKind" : {
+        "peak" : 5,
+        "place" : 9,
+        "spot_height" : 7
+      },
+      "rmsM" : 30.8,
+      "run" : "centre-dem",
+      "scaleMPerPx" : 7.71,
+      "search" : {
+        "coarse_zoom" : 11,
+        "hints_tried" : 0,
+        "radius_m" : 50000,
+        "searched_radius_m" : 50000,
+        "stage" : "done",
+        "tiles_fetched" : 25,
+        "tiles_planned" : 80
+      },
+      "searchRadiusKm" : 50,
+      "seconds" : 4.448673963546753,
+      "shortHeights" : [
+
+      ],
+      "status" : "ok",
+      "terrain" : "fixture tiles (gaia-giants-castle/dem), no network",
+      "terrainTiles" : {
+        "calls" : 3,
+        "fetched" : 50,
+        "missing" : 0,
+        "requested" : 50,
+        "rounds" : 2
+      },
+      "timingsMs" : {
+        "fine_dem" : 183.7,
+        "grid" : 0.1,
+        "pois" : 3.3,
+        "refine" : 2002.5,
+        "total" : 2190.5
+      },
+      "truthError" : {
+        "count" : 25,
+        "max" : 17.88247342247936,
+        "median" : 14.256601219202466,
+        "p90" : 16.923335879274344
+      },
+      "wide" : false
+    },
+    {
+      "confidentlyWrong" : false,
+      "coreMessage" : "No match within 50 km of you (searched 56 terrain tiles; 16 couldn't be downloaded). Search a wider area, pick the contour colour, or calibrate manually.",
+      "failure" : "noTerrainMatch",
+      "gps" : {
+        "lat" : -25.83,
+        "lon" : 27.5
+      },
+      "gpsFromCentreKm" : 432.5463881001401,
+      "hintQueries" : [
+        "Giant's Castle",
+        "Langalibalele Pass",
+        "Ntubeni Pass",
+        "Bannerman's Pass",
+        "Giant's Pass",
+        "Bannerman Hut",
+        "Mount Dumford",
+        "KaMasihlengo Pass",
+        "Grysbok Bush",
+        "Legheku",
+        "Songebethu",
+        "Ntloana-Ts'oana"
+      ],
+      "hintsSent" : 0,
+      "message" : "This map's contour lines didn't match the terrain within 50 km of you. Search wider to look for “Giant's Castle” and other places named on the map, or calibrate it manually.",
+      "nameFragments" : [
+
+      ],
+      "poiCount" : 0,
+      "poisByKind" : {
+
+      },
+      "run" : "far-magaliesberg",
+      "search" : {
+        "coarse_zoom" : 11,
+        "hints_tried" : 0,
+        "radius_m" : 50000,
+        "searched_radius_m" : 50000,
+        "stage" : "done",
+        "tiles_fetched" : 72,
+        "tiles_planned" : 72
+      },
+      "searchRadiusKm" : 50,
+      "seconds" : 39.398496985435486,
+      "shortHeights" : [
+
+      ],
+      "status" : "failed",
+      "terrain" : "fixture tiles of the Magaliesberg sheets (grootkloof, castle-gorge, mhlabatini) and gaia-giants-castle/dem, no network",
+      "terrainTiles" : {
+        "calls" : 6,
+        "fetched" : 94,
+        "missing" : 16,
+        "requested" : 110,
+        "rounds" : 5
+      },
+      "timingsMs" : {
+        "coarse_dem" : 4.1,
+        "coarse_search" : 12318.9,
+        "grid" : 0,
+        "pois" : 0.9,
+        "total" : 12338.2
+      },
+      "wide" : false
+    }
+  ],
+  "system" : "iOS Version 26.2 (Build 23C54), simulator",
+  "visionBoxes" : 46,
+  "visionSeconds" : 24.44199001789093
+}

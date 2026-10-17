@@ -1,0 +1,126 @@
+{
+  "estimateTiles" : 421,
+  "hintQueries" : [
+    "Mount Durnford",
+    "Langalibalele Pass",
+    "Main Cave",
+    "Grysbok Bush",
+    "Kambule",
+    "Katana",
+    "Potterill",
+    "Erskine",
+    "Lango-le-Balele",
+    "Umtshezi"
+  ],
+  "lookedUp" : [
+    "Mount Durnford",
+    "Langalibalele Pass",
+    "Main Cave",
+    "Grysbok Bush",
+    "Mount Durnford",
+    "Main Cave",
+    "Langalibalele Pass",
+    "Grysbok Bush",
+    "Kambule",
+    "Katana",
+    "Potterill",
+    "Erskine"
+  ],
+  "map" : "gaia-langalibalele",
+  "namedInSheet" : [
+    {
+      "distanceKm" : 431.2547120572262,
+      "lat" : -29.30698455047261,
+      "lon" : 29.438853961537607,
+      "name" : "Mount Durnford"
+    }
+  ],
+  "outcome" : "gaia-langalibalele Search wider: top name “Mount Durnford” printed at (915, 1145) = -29.30698, 29.43885, 2.5 km from the map centre; sheet suggests 500 km | search-wider: ok contours 0.99, truth median 8.5 m, max 14.3 m, 17 POIs, 5.3 s — Matched contour lines to terrain (±26 m).",
+  "place" : {
+    "lat" : -29.30698455047261,
+    "lon" : 29.438853961537607
+  },
+  "placeFromGPSKm" : 431.2547120572262,
+  "placeFromMapCentreKm" : 2.54525054019077,
+  "printedAtPx" : [
+    915.1162767674418,
+    1145.2325582003677
+  ],
+  "run" : {
+    "confidence" : 0.99,
+    "confidentlyWrong" : false,
+    "coreMessage" : "Matched contour lines to terrain (±26 m).",
+    "gps" : {
+      "lat" : -25.83,
+      "lon" : 27.5
+    },
+    "gpsFromCentreKm" : 432.53435045965955,
+    "hintQueries" : [
+      "Mount Durnford",
+      "Langalibalele Pass",
+      "Main Cave",
+      "Grysbok Bush",
+      "Kambule",
+      "Katana",
+      "Potterill",
+      "Erskine",
+      "Lango-le-Balele",
+      "Umtshezi"
+    ],
+    "hintsSent" : 1,
+    "message" : "Matched contour lines to terrain (±26 m).",
+    "method" : "contours",
+    "nameFragments" : [
+
+    ],
+    "poiCount" : 17,
+    "poisByKind" : {
+      "peak" : 6,
+      "place" : 5,
+      "spot_height" : 6
+    },
+    "rmsM" : 25.5,
+    "run" : "search-wider",
+    "scaleMPerPx" : 3.0529,
+    "search" : {
+      "coarse_zoom" : 11,
+      "hints_tried" : 1,
+      "radius_m" : 500000,
+      "searched_radius_m" : 0,
+      "stage" : "done",
+      "tiles_fetched" : 9,
+      "tiles_planned" : 343
+    },
+    "searchRadiusKm" : 500,
+    "seconds" : 5.307345032691956,
+    "shortHeights" : [
+
+    ],
+    "status" : "ok",
+    "terrain" : "fixture tiles of the Magaliesberg sheets and gaia-langalibalele/dem, no network",
+    "terrainTiles" : {
+      "calls" : 3,
+      "fetched" : 29,
+      "missing" : 0,
+      "requested" : 29,
+      "rounds" : 2
+    },
+    "timingsMs" : {
+      "fine_dem" : 179.5,
+      "grid" : 0,
+      "pois" : 3.6,
+      "refine" : 1739.1,
+      "total" : 1923.1
+    },
+    "truthError" : {
+      "count" : 25,
+      "max" : 14.265520694715088,
+      "median" : 8.527967086922168,
+      "p90" : 11.96785289337378
+    },
+    "wide" : true
+  },
+  "suggestedRadiusKm" : 500,
+  "tileCap" : 2500,
+  "topName" : "Mount Durnford"
+}

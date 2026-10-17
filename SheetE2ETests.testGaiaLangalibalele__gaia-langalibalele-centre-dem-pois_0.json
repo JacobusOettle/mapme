@@ -1,0 +1,184 @@
+[
+  {
+    "direction" : "SW",
+    "distanceM" : 1988,
+    "elevationM" : 3076,
+    "kind" : "peak",
+    "lat" : -29.321729689451093,
+    "lon" : 29.451536049289714,
+    "name" : "Katana",
+    "x" : 1320,
+    "y" : 1679
+  },
+  {
+    "direction" : "WNW",
+    "distanceM" : 1994,
+    "elevationM" : 3141,
+    "kind" : "spot_height",
+    "lat" : -29.304410633481933,
+    "lon" : 29.44498783189631,
+    "name" : "10305",
+    "x" : 1109,
+    "y" : 1052
+  },
+  {
+    "direction" : "WNW",
+    "distanceM" : 2029,
+    "elevationM" : 3141,
+    "kind" : "peak",
+    "lat" : -29.303574990366734,
+    "lon" : 29.444845100088507,
+    "name" : "Potterill",
+    "x" : 1105,
+    "y" : 1022
+  },
+  {
+    "direction" : "SW",
+    "distanceM" : 2062,
+    "elevationM" : 3076,
+    "kind" : "spot_height",
+    "lat" : -29.322597172619425,
+    "lon" : 29.45153493700385,
+    "name" : "10092",
+    "x" : 1320,
+    "y" : 1710
+  },
+  {
+    "direction" : "WNW",
+    "distanceM" : 2186,
+    "elevationM" : 3155.9,
+    "kind" : "spot_height",
+    "lat" : -29.300618009799223,
+    "lon" : 29.44430449416921,
+    "name" : "10354",
+    "x" : 1087,
+    "y" : 915
+  },
+  {
+    "direction" : "WNW",
+    "distanceM" : 2222,
+    "elevationM" : 3155.9,
+    "kind" : "peak",
+    "lat" : -29.29981461190765,
+    "lon" : 29.44430552405508,
+    "name" : "Bond",
+    "x" : 1087,
+    "y" : 886
+  },
+  {
+    "direction" : "WSW",
+    "distanceM" : 2236,
+    "elevationM" : 3154.1,
+    "kind" : "peak",
+    "lat" : -29.313052210847804,
+    "lon" : 29.44265536328254,
+    "name" : "Kambule",
+    "x" : 1035,
+    "y" : 1365
+  },
+  {
+    "direction" : "WSW",
+    "distanceM" : 2244,
+    "elevationM" : 3154.1,
+    "kind" : "spot_height",
+    "lat" : -29.313720661572788,
+    "lon" : 29.4427672568678,
+    "name" : "10348",
+    "x" : 1038,
+    "y" : 1389
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 2522,
+    "elevationM" : 3294,
+    "kind" : "spot_height",
+    "lat" : -29.307811066376615,
+    "lon" : 29.43905696722505,
+    "name" : "10807",
+    "x" : 919,
+    "y" : 1176
+  },
+  {
+    "direction" : "W",
+    "distanceM" : 2538,
+    "elevationM" : 3294,
+    "kind" : "peak",
+    "lat" : -29.30697224819799,
+    "lon" : 29.43892496779047,
+    "name" : "Mount Durnford",
+    "x" : 915,
+    "y" : 1145
+  },
+  {
+    "direction" : "NW",
+    "distanceM" : 2907,
+    "elevationM" : 3148,
+    "kind" : "spot_height",
+    "lat" : -29.292548494075604,
+    "lon" : 29.44112104477985,
+    "name" : "10328",
+    "x" : 985,
+    "y" : 623
+  },
+  {
+    "direction" : "NW",
+    "distanceM" : 2969,
+    "elevationM" : 3148,
+    "kind" : "peak",
+    "lat" : -29.291680720114474,
+    "lon" : 29.441085864019875,
+    "name" : "Erskine",
+    "x" : 984,
+    "y" : 592
+  },
+  {
+    "direction" : "WNW",
+    "distanceM" : 3220,
+    "kind" : "place",
+    "lat" : -29.30242165938499,
+    "lon" : 29.43254321439797,
+    "name" : "Lango-le-Balele",
+    "x" : 710,
+    "y" : 981
+  },
+  {
+    "direction" : "S",
+    "distanceM" : 3260,
+    "kind" : "place",
+    "lat" : -29.337419434094905,
+    "lon" : 29.468856152411405,
+    "name" : "Umtshezi",
+    "x" : 1875,
+    "y" : 2246
+  },
+  {
+    "direction" : "NE",
+    "distanceM" : 3572,
+    "kind" : "place",
+    "lat" : -29.28825333961338,
+    "lon" : 29.49385608383442,
+    "name" : "Grysbok Bush",
+    "x" : 2674,
+    "y" : 466
+  },
+  {
+    "direction" : "NW",
+    "distanceM" : 4205,
+    "kind" : "place",
+    "lat" : -29.27929533457874,
+    "lon" : 29.43721837635771,
+    "name" : "Langalibalele Pass",
+    "x" : 859,
+    "y" : 144
+  },
+  {
+    "direction" : "ENE",
+    "distanceM" : 5667,
+    "kind" : "place",
+    "lat" : -29.282561219780373,
+    "lon" : 29.515504890460413,
+    "name" : "Main Cave",
+    "x" : 3368,
+    "y" : 259
+  }
+]

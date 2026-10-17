@@ -1,0 +1,130 @@
+{
+  "estimateTiles" : 421,
+  "hintQueries" : [
+    "Giant's Castle",
+    "Langalibalele Pass",
+    "Ntubeni Pass",
+    "Bannerman's Pass",
+    "Giant's Pass",
+    "Bannerman Hut",
+    "Mount Dumford",
+    "KaMasihlengo Pass",
+    "Grysbok Bush",
+    "Legheku",
+    "Songebethu",
+    "Ntloana-Ts'oana"
+  ],
+  "lookedUp" : [
+    "Giant's Castle",
+    "Ntubeni Pass",
+    "Langalibalele Pass",
+    "Bannerman's Pass",
+    "Giant's Castle",
+    "Ntubeni Pass",
+    "Bannerman's Pass",
+    "Giant's Pass",
+    "Langalibalele Pass",
+    "Bannerman Hut",
+    "Mount Dumford",
+    "KaMasihlengo Pass"
+  ],
+  "map" : "gaia-giants-castle",
+  "namedInSheet" : [
+    {
+      "distanceKm" : 437.2131584676357,
+      "lat" : -29.34720009328717,
+      "lon" : 29.48378651642431,
+      "name" : "Giant's Castle"
+    }
+  ],
+  "outcome" : "gaia-giants-castle Search wider: top name “Giant's Castle” printed at (2523, 1484) = -29.34720, 29.48379, 6.3 km from the map centre; sheet suggests 500 km | search-wider: ok contours 0.99, truth median 14.3 m, max 17.9 m, 21 POIs, 4.9 s — Matched contour lines to terrain (±31 m).",
+  "place" : {
+    "lat" : -29.34720009328717,
+    "lon" : 29.48378651642431
+  },
+  "placeFromGPSKm" : 437.2131584676357,
+  "placeFromMapCentreKm" : 6.292079086021293,
+  "printedAtPx" : [
+    2523.1162798236633,
+    1484.8837211878536
+  ],
+  "run" : {
+    "confidence" : 0.994,
+    "confidentlyWrong" : false,
+    "coreMessage" : "Matched contour lines to terrain (±31 m).",
+    "gps" : {
+      "lat" : -25.83,
+      "lon" : 27.5
+    },
+    "gpsFromCentreKm" : 432.5463881001401,
+    "hintQueries" : [
+      "Giant's Castle",
+      "Langalibalele Pass",
+      "Ntubeni Pass",
+      "Bannerman's Pass",
+      "Giant's Pass",
+      "Bannerman Hut",
+      "Mount Dumford",
+      "KaMasihlengo Pass",
+      "Grysbok Bush",
+      "Legheku",
+      "Songebethu",
+      "Ntloana-Ts'oana"
+    ],
+    "hintsSent" : 1,
+    "message" : "Matched contour lines to terrain (±31 m).",
+    "method" : "contours",
+    "nameFragments" : [
+
+    ],
+    "poiCount" : 21,
+    "poisByKind" : {
+      "peak" : 5,
+      "place" : 9,
+      "spot_height" : 7
+    },
+    "rmsM" : 30.8,
+    "run" : "search-wider",
+    "scaleMPerPx" : 7.71,
+    "search" : {
+      "coarse_zoom" : 11,
+      "hints_tried" : 1,
+      "radius_m" : 500000,
+      "searched_radius_m" : 0,
+      "stage" : "done",
+      "tiles_fetched" : 20,
+      "tiles_planned" : 343
+    },
+    "searchRadiusKm" : 500,
+    "seconds" : 4.886318922042847,
+    "shortHeights" : [
+
+    ],
+    "status" : "ok",
+    "terrain" : "fixture tiles of the Magaliesberg sheets and gaia-giants-castle/dem, no network",
+    "terrainTiles" : {
+      "calls" : 3,
+      "fetched" : 45,
+      "missing" : 0,
+      "requested" : 45,
+      "rounds" : 2
+    },
+    "timingsMs" : {
+      "fine_dem" : 221.6,
+      "grid" : 0,
+      "pois" : 5.4,
+      "refine" : 2156.7,
+      "total" : 2384.8
+    },
+    "truthError" : {
+      "count" : 25,
+      "max" : 17.88249200009724,
+      "median" : 14.256601604358783,
+      "p90" : 16.923343035023606
+    },
+    "wide" : true
+  },
+  "suggestedRadiusKm" : 500,
+  "tileCap" : 2500,
+  "topName" : "Giant's Castle"
+}

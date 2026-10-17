@@ -1,0 +1,224 @@
+[
+  {
+    "direction" : "SSE",
+    "distanceM" : 425246,
+    "kind" : "place",
+    "lat" : -29.253447379940948,
+    "lon" : 29.422934931103864,
+    "name" : "Bannerman's Pass",
+    "x" : 1749,
+    "y" : 142
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 425948,
+    "elevationM" : 3301,
+    "kind" : "peak",
+    "lat" : -29.262303919604115,
+    "lon" : 29.41890343581051,
+    "name" : "Songebethu",
+    "x" : 1698,
+    "y" : 269
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 426141,
+    "elevationM" : 3301,
+    "kind" : "spot_height",
+    "lat" : -29.26425387748132,
+    "lon" : 29.41890344404779,
+    "name" : "10830",
+    "x" : 1698,
+    "y" : 297
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 426300,
+    "kind" : "place",
+    "lat" : -29.255316189268324,
+    "lon" : 29.442634471292294,
+    "name" : "Bannerman Hut",
+    "x" : 1999,
+    "y" : 169
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 428512,
+    "kind" : "place",
+    "lat" : -29.27936472686718,
+    "lon" : 29.438786291456093,
+    "name" : "Langalibalele Pass",
+    "x" : 1951,
+    "y" : 513
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 429276,
+    "kind" : "place",
+    "lat" : -29.310148497048317,
+    "lon" : 29.385694806005233,
+    "name" : "Thaba-Putsoa",
+    "x" : 1277,
+    "y" : 953
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 430695,
+    "elevationM" : 1925.1,
+    "kind" : "spot_height",
+    "lat" : -29.257509743214598,
+    "lon" : 29.53530841213326,
+    "name" : "6316",
+    "x" : 3175,
+    "y" : 200
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 431163,
+    "elevationM" : 3262,
+    "kind" : "peak",
+    "lat" : -29.35809309559929,
+    "lon" : 29.315692947107387,
+    "name" : "Ntloana-Ts'oana",
+    "x" : 388,
+    "y" : 1640
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 431418,
+    "elevationM" : 3294,
+    "kind" : "peak",
+    "lat" : -29.308455772595238,
+    "lon" : 29.43924454230056,
+    "name" : "Mount Dumford",
+    "x" : 1956,
+    "y" : 929
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 431497,
+    "elevationM" : 3262,
+    "kind" : "spot_height",
+    "lat" : -29.361363743123942,
+    "lon" : 29.315784586676667,
+    "name" : "10702",
+    "x" : 390,
+    "y" : 1687
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 431745,
+    "elevationM" : 3294,
+    "kind" : "spot_height",
+    "lat" : -29.311772532901838,
+    "lon" : 29.43919324584305,
+    "name" : "10807",
+    "x" : 1956,
+    "y" : 977
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 431840,
+    "elevationM" : 3329.9,
+    "kind" : "peak",
+    "lat" : -29.35535689815544,
+    "lon" : 29.338874246194543,
+    "name" : "Legheku",
+    "x" : 683,
+    "y" : 1601
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 431847,
+    "kind" : "place",
+    "lat" : -29.288271996420878,
+    "lon" : 29.49407696115694,
+    "name" : "Grysbok Bush",
+    "x" : 2652,
+    "y" : 640
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 432037,
+    "elevationM" : 3329.9,
+    "kind" : "spot_height",
+    "lat" : -29.357386252998865,
+    "lon" : 29.338691003144405,
+    "name" : "10925",
+    "x" : 680,
+    "y" : 1630
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 435107,
+    "kind" : "place",
+    "lat" : -29.307140077864712,
+    "lon" : 29.525212169542773,
+    "name" : "Oribi Ridge Rte",
+    "x" : 3047,
+    "y" : 910
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 435492,
+    "elevationM" : 3296.1,
+    "kind" : "spot_height",
+    "lat" : -29.348229156569307,
+    "lon" : 29.442033796605124,
+    "name" : "10814",
+    "x" : 1992,
+    "y" : 1499
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 436585,
+    "kind" : "place",
+    "lat" : -29.34857637123457,
+    "lon" : 29.46636592782076,
+    "name" : "Giant's Pass",
+    "x" : 2301,
+    "y" : 1504
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 437345,
+    "elevationM" : 3315,
+    "kind" : "peak",
+    "lat" : -29.348477177597314,
+    "lon" : 29.483906757750265,
+    "name" : "Giant's Castle",
+    "x" : 2523,
+    "y" : 1502
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 438199,
+    "kind" : "place",
+    "lat" : -29.371111341304186,
+    "lon" : 29.451980782242277,
+    "name" : "Ntubeni Pass",
+    "x" : 2118,
+    "y" : 1827
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 438263,
+    "elevationM" : 2076,
+    "kind" : "spot_height",
+    "lat" : -29.330838452554495,
+    "lon" : 29.543463410189872,
+    "name" : "6811",
+    "x" : 3279,
+    "y" : 1250
+  },
+  {
+    "direction" : "SSE",
+    "distanceM" : 439555,
+    "kind" : "place",
+    "lat" : -29.397721157378072,
+    "lon" : 29.421652776568354,
+    "name" : "KaMasihlengo Pass",
+    "x" : 1733,
+    "y" : 2208
+  }
+]

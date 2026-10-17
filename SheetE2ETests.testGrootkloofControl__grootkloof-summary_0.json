@@ -1,0 +1,224 @@
+{
+  "dpi" : 300,
+  "labels" : [
+    {
+      "axis" : "lat",
+      "label" : "25°49'S",
+      "linePx" : 541,
+      "matches" : [
+        "25°49'00\"S"
+      ],
+      "nearby" : [
+        "25°49'00\"S [126, 460, 33, 167] 1.00",
+        "1254900S [125, 460, 30, 177] 0.30"
+      ],
+      "read" : true
+    },
+    {
+      "axis" : "lat",
+      "label" : "25°50'S",
+      "linePx" : 1515,
+      "matches" : [
+        "2550'00/S",
+        "25°50'00\"S"
+      ],
+      "nearby" : [
+        "2550'00/S [125, 1435, 30, 160] 0.30",
+        "25°50'00\"S [126, 1435, 30, 160] 1.00"
+      ],
+      "read" : true
+    },
+    {
+      "axis" : "lat",
+      "label" : "25°51'S",
+      "linePx" : 2488,
+      "matches" : [
+        "2551'004S",
+        "25°51'00'S"
+      ],
+      "nearby" : [
+        "2551'004S [123, 2409, 30, 160] 0.30",
+        "25°51'00'S [121, 2409, 33, 158] 1.00"
+      ],
+      "read" : true
+    },
+    {
+      "axis" : "lat",
+      "label" : "25°52'S",
+      "linePx" : 3462,
+      "matches" : [
+        "25°52'00\"S"
+      ],
+      "nearby" : [
+        "25°52'00\"S [123, 3382, 30, 160] 1.00"
+      ],
+      "read" : true
+    },
+    {
+      "axis" : "lat",
+      "label" : "25°53'S",
+      "linePx" : 4436,
+      "matches" : [
+
+      ],
+      "nearby" : [
+        "25°530A [125, 4395, 24, 121] 0.30",
+        "• [188, 4444, 19, 23] 1.00",
+        "* [186, 4558, 21, 19] 1.00",
+        "P. [172, 4614, 37, 33] 1.00"
+      ],
+      "read" : false
+    },
+    {
+      "axis" : "lon",
+      "label" : "27°23'E",
+      "linePx" : 878,
+      "matches" : [
+        "27°23'00\"E"
+      ],
+      "nearby" : [
+        "GIS VL SepL 20*7- Eras Gous [433, 4800, 344, 35] 1.00",
+        "27°23'00\"E [800, 4802, 158, 31] 1.00"
+      ],
+      "read" : true
+    },
+    {
+      "axis" : "lon",
+      "label" : "27°24'E",
+      "linePx" : 1754,
+      "matches" : [
+        "27°24'00\"E"
+      ],
+      "nearby" : [
+        "27°24'00\"E [1675, 4805, 160, 28] 1.00"
+      ],
+      "read" : true
+    },
+    {
+      "axis" : "lon",
+      "label" : "27°25'E",
+      "linePx" : 2630,
+      "matches" : [
+        "27°25'00\"E"
+      ],
+      "nearby" : [
+        "27°25'00\"E [2550, 4803, 160, 30] 1.00"
+      ],
+      "read" : true
+    }
+  ],
+  "labelsMissed" : [
+    "25°53'S"
+  ],
+  "labelsRead" : [
+    "25°49'S",
+    "25°50'S",
+    "25°51'S",
+    "25°52'S",
+    "27°23'E",
+    "27°24'E",
+    "27°25'E"
+  ],
+  "latitudeLabels" : 5,
+  "latitudeLabelsRead" : 4,
+  "longitudeLabels" : 3,
+  "longitudeLabelsRead" : 3,
+  "outcome" : "grootkloof: Vision 176 boxes in 46.5 s, latitude labels 4/5 [\"25°49\\'S\", \"25°50\\'S\", \"25°51\\'S\", \"25°52\\'S\"], longitude labels 3/3 [\"27°23\\'E\", \"27°24\\'E\", \"27°25\\'E\"] | far-offline: ok grid, max 1.0 m, 54 POIs, 0.9 s — Located from 4 latitude and 3 longitude grid labels (±1 m). | centre-dem: ok grid, max 1.0 m, 54 POIs, 0.9 s — Located from 4 latitude and 3 longitude grid labels (±1 m).",
+  "renderSeconds" : 0.496196985244751,
+  "renderSize" : [
+    3508,
+    4963
+  ],
+  "runs" : [
+    {
+      "confidence" : 0.97,
+      "coreMessage" : "Located from 4 latitude and 3 longitude grid labels (±1 m).",
+      "frameMaxErrorM" : 1.2988912615667279,
+      "gps" : {
+        "lat" : -25.75,
+        "lon" : 28.19
+      },
+      "gpsFromCentreKm" : 79.86349285424387,
+      "graticuleError" : {
+        "count" : 15,
+        "max" : 0.9698927119305217,
+        "median" : 0.7020213792244044,
+        "p90" : 0.9121972812331438
+      },
+      "message" : "Located from 4 latitude and 3 longitude grid labels (±1 m).",
+      "method" : "grid",
+      "nameFragments" : [
+        "HAMERKOP ⊂ DOTKLOOFHAMERKOP",
+        "GROOTKLOOF ⊂ GROOTKLOOFPEDESTRIANGÁTE"
+      ],
+      "poiCount" : 54,
+      "poisByKind" : {
+        "peak" : 1,
+        "place" : 18,
+        "spot_height" : 35
+      },
+      "rmsM" : 1.4,
+      "run" : "far-offline",
+      "searchRadiusKm" : 20,
+      "seconds" : 0.9206610918045044,
+      "shortHeights" : [
+
+      ],
+      "status" : "ok",
+      "terrain" : "none (offline, nothing cached)",
+      "timingsMs" : {
+        "grid" : 1.6,
+        "lines" : 819.7,
+        "pois" : 1.6,
+        "total" : 825.8
+      }
+    },
+    {
+      "confidence" : 0.97,
+      "coreMessage" : "Located from 4 latitude and 3 longitude grid labels (±1 m).",
+      "frameMaxErrorM" : 1.2988912615667279,
+      "gps" : {
+        "lat" : -25.84974730771201,
+        "lon" : 27.399980974124805
+      },
+      "gpsFromCentreKm" : 0,
+      "graticuleError" : {
+        "count" : 15,
+        "max" : 0.9698927119305217,
+        "median" : 0.7020213792244044,
+        "p90" : 0.9121972812331438
+      },
+      "message" : "Located from 4 latitude and 3 longitude grid labels (±1 m).",
+      "method" : "grid",
+      "nameFragments" : [
+        "HAMERKOP ⊂ DOTKLOOFHAMERKOP",
+        "GROOTKLOOF ⊂ GROOTKLOOFPEDESTRIANGÁTE"
+      ],
+      "poiCount" : 54,
+      "poisByKind" : {
+        "peak" : 1,
+        "place" : 18,
+        "spot_height" : 35
+      },
+      "rmsM" : 1.4,
+      "run" : "centre-dem",
+      "searchRadiusKm" : 20,
+      "seconds" : 0.8664339780807495,
+      "shortHeights" : [
+
+      ],
+      "status" : "ok",
+      "terrain" : "fixture tiles (grootkloof/dem), no network",
+      "timingsMs" : {
+        "grid" : 0.2,
+        "lines" : 724.2,
+        "pois" : 1.5,
+        "total" : 728.4
+      }
+    }
+  ],
+  "sheet" : "grootkloof",
+  "system" : "iOS Version 26.2 (Build 23C54), simulator",
+  "visionBoxes" : 176,
+  "visionSeconds" : 46.53963601589203
+}

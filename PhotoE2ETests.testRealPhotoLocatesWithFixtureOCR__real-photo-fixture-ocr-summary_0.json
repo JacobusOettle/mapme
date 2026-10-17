@@ -1,0 +1,89 @@
+{
+  "confidence" : 0.909,
+  "corners" : [
+    [
+      227.6314585192665,
+      225.23903983596685
+    ],
+    [
+      1635.9694788755448,
+      228.2874798029595
+    ],
+    [
+      1748.9286379308553,
+      2354.21225264832
+    ],
+    [
+      48.58367986282063,
+      2449.3789043611605
+    ]
+  ],
+  "error" : {
+    "count" : 670,
+    "max" : 146.45488479263676,
+    "median" : 11.796491581333875,
+    "p90" : 43.52867191100958
+  },
+  "flatModelError" : {
+    "count" : 670,
+    "max" : 295.50408069796504,
+    "median" : 31.652040673530113,
+    "p90" : 90.91690503439628
+  },
+  "flattenedSize" : [
+    1703,
+    2430
+  ],
+  "homographyFloor" : {
+    "max" : 181.3,
+    "median" : 37.2,
+    "p90" : 65.9,
+    "rms" : 48.1
+  },
+  "message" : "Located from 5 latitude and 3 longitude grid labels (±9 m).",
+  "method" : "grid",
+  "ocrCount" : 31,
+  "ocrTexts" : [
+    "25°49'00\"S",
+    "25°50'00\"S",
+    "25°51'00\"S",
+    "25°52'00\"S",
+    "25°53'00\"S",
+    "27°23'00\"E",
+    "27°24'00\"E",
+    "27°25'00\"E",
+    "GIS V1 Sept 2017- Eras Gous",
+    "GROOTKLOOF & HAMERKOP",
+    "MCSA MAGALIESBERG SHEET 3 OF 10",
+    "1:25 000",
+    "0",
+    "250",
+    "500",
+    "750",
+    "1000",
+    "1250 m",
+    "Magnetic Declination 18° West",
+    "Annual Change: 4.8' per year West",
+    "Trig Beacon",
+    "Parking",
+    "Gate",
+    "Waterfall",
+    "5m Intervals",
+    "100m Intervals",
+    "KWAMI LODGE",
+    "SUGARBUSH HILL COUNTRY COTTAGE",
+    "1428",
+    "1412",
+    "1523"
+  ],
+  "rmsM" : 8.8,
+  "seconds" : 5.774033069610596,
+  "status" : "ok",
+  "variant" : "fixture-ocr",
+  "warp" : true,
+  "warpLattice" : [
+    14,
+    20
+  ],
+  "warpMaxOffsetM" : 334.20357643209024
+}

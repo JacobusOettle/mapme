@@ -1,0 +1,282 @@
+{
+  "confidence" : 0.97,
+  "corners" : [
+    [
+      -25.786466715603986,
+      27.297761402652824
+    ],
+    [
+      -25.786467285604243,
+      27.364481275533418
+    ],
+    [
+      -25.87143022482047,
+      27.364481317092512
+    ],
+    [
+      -25.871429655229196,
+      27.297761444211922
+    ]
+  ],
+  "hint_queries" : [
+    "MAGALIESBERG",
+    "MHLABATINI",
+    "FERN KLOOF",
+    "OLIFANTSHOEK PRIMARY SCHOOL",
+    "AASVOËL GULLY",
+    "AASVOELKRANS RESORT",
+    "MOUNT SERENE",
+    "MHLABATINI KLOOF",
+    "RETIEP'SKLOOF CATCHMENT AREA",
+    "MHLABATINI PARKING",
+    "AM HANG SELF-CATERIN",
+    "AASVOËLKRANS"
+  ],
+  "message" : "Located from 4 latitude and 3 longitude grid labels (±1 m).",
+  "method" : "grid",
+  "need_tiles" : [
+
+  ],
+  "pixel_to_mercator" : [
+    2.117224137645184,
+    9.321655302578678e-07,
+    3038772.8991395896,
+    -2.008818973327611e-05,
+    -2.117221819721522,
+    -2972657.8782957285,
+    0,
+    0,
+    1
+  ],
+  "pois" : [
+    {
+      "elevation_m" : 1248,
+      "kind" : "spot_height",
+      "name" : "1248",
+      "x" : 820.9302333148971,
+      "y" : 163.95348829349052
+    },
+    {
+      "elevation_m" : 1239,
+      "kind" : "spot_height",
+      "name" : "1239",
+      "x" : 3051.023256229236,
+      "y" : 331.3953487209303
+    },
+    {
+      "elevation_m" : 1259,
+      "kind" : "spot_height",
+      "name" : "1259",
+      "x" : 205.81395397286826,
+      "y" : 359.3023254844961
+    },
+    {
+      "kind" : "place",
+      "name" : "BERGHEIN",
+      "x" : 1223.2558143728606,
+      "y" : 439.53488395210115
+    },
+    {
+      "elevation_m" : 1316,
+      "kind" : "spot_height",
+      "name" : "1316",
+      "x" : 1305.8139538698383,
+      "y" : 746.511627620966
+    },
+    {
+      "kind" : "place",
+      "name" : "MHLABATINI PARKING",
+      "x" : 1536.558141511628,
+      "y" : 1055.9302325139179
+    },
+    {
+      "kind" : "place",
+      "name" : "MHLABATINI KLOOF",
+      "x" : 1026.91382273167,
+      "y" : 1514.270007336924
+    },
+    {
+      "kind" : "place",
+      "name" : "CAMP GULLY",
+      "x" : 1152.3255824273256,
+      "y" : 1535.9999998470075
+    },
+    {
+      "elevation_m" : 1718,
+      "kind" : "spot_height",
+      "name" : "1718",
+      "x" : 508.1395347727273,
+      "y" : 1690.767441807611
+    },
+    {
+      "elevation_m" : 1213,
+      "kind" : "spot_height",
+      "name" : "1213",
+      "x" : 430.23255801033594,
+      "y" : 1783.79069751938
+    },
+    {
+      "elevation_m" : 1754,
+      "kind" : "spot_height",
+      "name" : "1754",
+      "x" : 269.7674418936877,
+      "y" : 2015.1860463289036
+    },
+    {
+      "kind" : "place",
+      "name" : "RETIEP'SKLOOF CATCHMENT AREA",
+      "x" : 456.97674406781323,
+      "y" : 2446.813953587539
+    },
+    {
+      "elevation_m" : 1482,
+      "kind" : "spot_height",
+      "name" : "1482",
+      "x" : 3309.162790282392,
+      "y" : 2485.0232559302326
+    },
+    {
+      "elevation_m" : 1688,
+      "kind" : "spot_height",
+      "name" : "1688",
+      "x" : 1349.3488372093025,
+      "y" : 2570.9999997868217
+    },
+    {
+      "kind" : "place",
+      "name" : "AASVOËL GULLY",
+      "x" : 516.167277937001,
+      "y" : 2614.023255946844
+    },
+    {
+      "kind" : "place",
+      "name" : "AASVOËLKRANS",
+      "x" : 450.05147221213235,
+      "y" : 2653.558138448319
+    },
+    {
+      "elevation_m" : 1512,
+      "kind" : "spot_height",
+      "name" : "1512",
+      "x" : 3337.069767346723,
+      "y" : 3088.51162807611
+    },
+    {
+      "elevation_m" : 1626,
+      "kind" : "spot_height",
+      "name" : "1626",
+      "x" : 2495.2093026889534,
+      "y" : 3391.9999998982557
+    },
+    {
+      "elevation_m" : 1324,
+      "kind" : "spot_height",
+      "name" : "1324",
+      "x" : 658.1395343798449,
+      "y" : 3412.9302326937986
+    },
+    {
+      "elevation_m" : 1636,
+      "kind" : "spot_height",
+      "name" : "1636",
+      "x" : 2699.8604643313956,
+      "y" : 3446.6511629069764
+    },
+    {
+      "elevation_m" : 1649,
+      "kind" : "spot_height",
+      "name" : "1649",
+      "x" : 2617.3023262325582,
+      "y" : 3450.139534767442
+    },
+    {
+      "elevation_m" : 1464,
+      "kind" : "spot_height",
+      "name" : "1464",
+      "x" : 2335.3953492635665,
+      "y" : 3618.8139533333338
+    },
+    {
+      "elevation_m" : 1312,
+      "kind" : "spot_height",
+      "name" : "1312",
+      "x" : 223.25581330232558,
+      "y" : 3745.4883722093023
+    },
+    {
+      "elevation_m" : 1413,
+      "kind" : "spot_height",
+      "name" : "1413",
+      "x" : 2704.511627344961,
+      "y" : 3822.2325582751937
+    },
+    {
+      "elevation_m" : 1728,
+      "kind" : "spot_height",
+      "name" : "1728",
+      "x" : 3345.2093017209304,
+      "y" : 3822.2325582558146
+    },
+    {
+      "kind" : "place",
+      "name" : "AASVOELKRANS RESORT",
+      "x" : 1122.0930271220932,
+      "y" : 4096.965116488576
+    },
+    {
+      "kind" : "place",
+      "name" : "AM HANG SELF-CATERIN",
+      "x" : 3242.8837210631227,
+      "y" : 4162.999999800664
+    },
+    {
+      "elevation_m" : 1202,
+      "kind" : "spot_height",
+      "name" : "1202",
+      "x" : 527.766544480124,
+      "y" : 4187.418604578488
+    },
+    {
+      "elevation_m" : 1472,
+      "kind" : "spot_height",
+      "name" : "1472",
+      "x" : 3364.1691182038235,
+      "y" : 4201.372092906977
+    },
+    {
+      "kind" : "peak",
+      "name" : "MOUNT SERENE",
+      "x" : 3194.046513089701,
+      "y" : 4215.325581279069
+    },
+    {
+      "elevation_m" : 1306,
+      "kind" : "spot_height",
+      "name" : "1306",
+      "x" : 815.1162784418605,
+      "y" : 4324.627907046512
+    },
+    {
+      "kind" : "place",
+      "name" : "OLIFANTSHOEK PRIMARY SCHOOL",
+      "x" : 1341.8604668372095,
+      "y" : 4354.872092964893
+    },
+    {
+      "kind" : "place",
+      "name" : "NALE",
+      "x" : 3356.8372093014405,
+      "y" : 4379.279069999998
+    }
+  ],
+  "rms_m" : 1.4,
+  "rotation_deg" : 0,
+  "scale_m_per_px" : 1.9057,
+  "status" : "ok",
+  "timings_ms" : {
+    "grid" : 0.5,
+    "lines" : 924.1,
+    "pois" : 1.9,
+    "total" : 928.4
+  }
+}
