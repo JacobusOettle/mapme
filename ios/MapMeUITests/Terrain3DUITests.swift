@@ -48,7 +48,15 @@ final class Terrain3DUITests: XCTestCase {
             height.tap()
             let three = app.buttons["3× Height"]
             if three.waitForExistence(timeout: 5) {
+                func heightIsThree() -> Bool {
+                    let chosen = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "3× Height"),
+                                                           object: height)
+                    return XCTWaiter().wait(for: [chosen], timeout: 3) == .completed
+                }
                 three.tap()
+                // A tap while the menu is still opening can miss it: tap again while it is open.
+                if !heightIsThree(), three.exists { three.tap() }
+                XCTAssertTrue(heightIsThree(), "Choosing 3× should set the height")
                 Thread.sleep(forTimeInterval: 1.5)
                 uiAttachScreenshot(app, "60c-3d-height-3x")
             } else {
