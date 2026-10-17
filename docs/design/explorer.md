@@ -522,6 +522,10 @@ too thin):
 * the bottom panel: name (from the search, editable), Standard / High detail with one-line
   summaries, the estimate ("≈ 342 MB · 2 475 tiles · measured", "Wi-Fi recommended" from 25 MB),
   free space, Download. Offline, search is disabled and the presets and the rectangle still work.
+* Settings presents the picker itself, not the form's "Add Region…" row (a cover hung on a form
+  row is not dismissed while it hides the row); its X closes it in every state (keyboard up,
+  results showing, measuring, offline), and the results scroll when they don't fit above the
+  panel, so the top bar stays on screen.
 
 **Detail levels and caps.** Standard = zooms 8–12: locating maps offline (the coarse search on
 8–11 and a refinement on zoom 12, ~38 m cells: typically ±10–20 m instead of ±5–10 m; the ±

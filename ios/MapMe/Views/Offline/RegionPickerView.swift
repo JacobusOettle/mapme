@@ -70,10 +70,11 @@ enum RegionPlaceSearch {
 /// (all located maps + 30 km); adjust the rectangle's corners on the map; pick Standard or High
 /// detail; see what each takes (tiles from the core's plan, bytes measured from sample tiles when
 /// online: the level on screen first, then the other to compare) and download. Offline, the
-/// search is off and the presets and the rectangle still work.
+/// search is off and the presets and the rectangle still work. The X closes it in every state.
 struct RegionPickerView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
+    /// Closes the picker: its presenter's own state, set false (the X, and after Download).
+    private let onClose: () -> Void
 
     @State private var bounds: GeoBounds?
     @State private var name = ""
@@ -106,7 +107,9 @@ struct RegionPickerView: View {
         case failed(String)
     }
 
-    init() {}
+    init(onClose: @escaping () -> Void) {
+        self.onClose = onClose
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -122,11 +125,16 @@ struct RegionPickerView: View {
                     presets
                 }
                 Spacer(minLength: 0)
+                // Its natural height: the answers above give way, never its lines.
                 panel
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)
             .padding(.bottom, 8)
+            // Never taller than the screen: when it doesn't fit (the keyboard up on a small
+            // iPhone) the bottom runs off, and the top bar with the X stays on screen.
+            .frame(minHeight: 0, maxHeight: .infinity, alignment: .top)
         }
         .background(Theme.background.ignoresSafeArea())
         .tint(Theme.accent)
@@ -150,13 +158,15 @@ struct RegionPickerView: View {
     private var topBar: some View {
         HStack(spacing: 10) {
             Button {
-                dismiss()
+                close()
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Theme.textPrimary)
                     .frame(width: Theme.minTapTarget, height: Theme.minTapTarget)
                     .floatingChrome(Circle(), interactive: true)
+                    // The whole circle takes the tap, not only the glyph.
+                    .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Cancel")
@@ -226,7 +236,21 @@ struct RegionPickerView: View {
         .accessibilityIdentifier(id)
     }
 
+    /// The search's answers; they scroll when they don't all fit above the panel.
     private var resultsList: some View {
+        ViewThatFits(in: .vertical) {
+            resultRows
+            ScrollView {
+                resultRows
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        }
+        .floatingChrome(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        // The room left between the top bar and the panel goes to the answers first.
+        .layoutPriority(1)
+    }
+
+    private var resultRows: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let searchMessage, results.isEmpty {
                 Text(searchMessage)
@@ -267,7 +291,6 @@ struct RegionPickerView: View {
                 }
             }
         }
-        .floatingChrome(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     // MARK: - Panel
@@ -525,6 +548,13 @@ struct RegionPickerView: View {
         guard let bounds, case .ready(let e) = estimate, e.refusal == nil else { return }
         model.offline.download(name: name, bounds: bounds, detail: detail, estimate: e, allowsCellular: allowsCellular)
         downloadTick += 1
-        dismiss()
+        close()
+    }
+
+    /// Back to Settings, the keyboard down first.
+    private func close() {
+        searchFocused = false
+        nameFocused = false
+        onClose()
     }
 }

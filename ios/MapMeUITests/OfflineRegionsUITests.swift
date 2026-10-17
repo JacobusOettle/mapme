@@ -5,7 +5,8 @@ import XCTest
 /// 60 ms, sizes for the estimate's HEAD requests) into a store of its own that is emptied at
 /// launch, and `-mockRegionPlace` answers the place search instead of Apple Maps. Settings →
 /// Offline terrain → Add Region…: search Tasmania, see the measured estimate, download, watch the
-/// progress in the list, delete it with a swipe.
+/// progress in the list, delete it with a swipe; and close the picker with its X without
+/// downloading.
 final class OfflineRegionsUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = true
@@ -112,6 +113,87 @@ final class OfflineRegionsUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.3)
         }
         XCTAssertFalse(row.exists, "the region was not deleted")
+    }
+
+    /// The X closes the picker back to Settings in every state: just opened, the keyboard up
+    /// with a place half typed, the search's answers showing.
+    @MainActor
+    func testCloseTheRegionPicker() throws {
+        let app = XCUIApplication()
+        app.launchArguments = Self.uiSampleLocation + ["-mockOfflineDownloads",
+                                                       "-mockRegionPlace", "Tasmania=-43.6,145.5,-40.7,148.5"]
+        uiAllowSystemAlerts()
+        app.launch()
+
+        let settings = app.buttons["settingsButton"]
+        guard settings.waitForExistence(timeout: 30) else {
+            uiAttachScreenshot(app, "53-close-no-settings")
+            XCTFail("The library has no Settings button")
+            return
+        }
+        settings.tap()
+        let add = app.buttons["addOfflineRegionButton"]
+        guard scrollSettings(app, toReveal: add) else {
+            uiAttachScreenshot(app, "53-close-section-missing")
+            XCTFail("Settings has no Offline terrain section")
+            return
+        }
+
+        // Just opened.
+        guard openRegionPicker(app, from: add, "53-close-opened") else { return }
+        guard closeRegionPicker(app, back: add, "53-close-opened") else { return }
+
+        // The keyboard up, a place half typed.
+        guard openRegionPicker(app, from: add, "53-close-typing") else { return }
+        let field = app.textFields["regionSearchField"]
+        field.tap()
+        field.typeText("Tasm")
+        // A simulator with its hardware keyboard connected shows none; the shot's name says which.
+        let keyboardUp = app.keyboards.firstMatch.waitForExistence(timeout: 3)
+        uiAttachScreenshot(app, keyboardUp ? "53-region-picker-typing" : "53-region-picker-typing-no-keyboard")
+        guard closeRegionPicker(app, back: add, "53-close-typing") else { return }
+
+        // The search's answers showing.
+        guard openRegionPicker(app, from: add, "53-close-results") else { return }
+        field.tap()
+        field.typeText("Tasmania\n")
+        guard app.buttons["regionResult-0"].waitForExistence(timeout: 10) else {
+            uiAttachScreenshot(app, "53-close-no-result")
+            XCTFail("The place search found nothing")
+            return
+        }
+        _ = closeRegionPicker(app, back: add, "53-close-results")
+    }
+
+    /// Taps Add Region… and waits for the picker; false (with a failure) when it did not open.
+    @MainActor
+    private func openRegionPicker(_ app: XCUIApplication, from add: XCUIElement, _ name: String) -> Bool {
+        add.tap()
+        guard app.buttons["cancelRegionPickerButton"].waitForExistence(timeout: 15) else {
+            uiAttachScreenshot(app, "\(name)-not-open")
+            XCTFail("The region picker did not open (\(name))")
+            return false
+        }
+        return true
+    }
+
+    /// Taps the picker's X; true when the picker is gone within a few seconds and Add Region…
+    /// can be tapped again, false (with a failure) otherwise.
+    @MainActor
+    private func closeRegionPicker(_ app: XCUIApplication, back add: XCUIElement, _ name: String) -> Bool {
+        let cancel = app.buttons["cancelRegionPickerButton"]
+        let picker = app.descendants(matching: .any).matching(identifier: "regionPicker").firstMatch
+        cancel.tap()
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, picker.exists || cancel.exists || !(add.exists && add.isHittable) {
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+        guard !picker.exists, !cancel.exists, add.exists, add.isHittable else {
+            uiAttachScreenshot(app, "\(name)-still-open")
+            XCTFail("The X did not close the region picker (\(name))")
+            return false
+        }
+        return true
     }
 
     /// Swipes the Settings form up until `element` can be tapped (a form only builds the rows on

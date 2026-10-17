@@ -6,6 +6,8 @@ import UIKit
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    /// Settings → Offline terrain → Add Region…: the region picker, presented from here.
+    @State private var showRegionPicker = false
 
     init() {}
 
@@ -28,7 +30,8 @@ struct SettingsView: View {
                     RoutesSettingsSection()         // routes: pace, off-route alerts, daylight
                     BatterySettingsSection()        // battery saver
                     SettingsLocatingSection()
-                    OfflineSettingsSection()        // offline regions, terrain around your maps
+                    // Offline regions, terrain around your maps.
+                    OfflineSettingsSection(onAddRegion: { showRegionPicker = true })
                     TracksSection()
                     SettingsStorageSection()
                     SettingsAboutSection()
@@ -52,6 +55,12 @@ struct SettingsView: View {
             }
         }
         .tint(Theme.accent)
+        // On the stack, not on the form's "Add Region…" row: the form does not update a row the
+        // cover hides, so a cover hung there could not be closed.
+        .fullScreenCover(isPresented: $showRegionPicker) {
+            RegionPickerView(onClose: { showRegionPicker = false })
+                .environment(model)
+        }
     }
 }
 

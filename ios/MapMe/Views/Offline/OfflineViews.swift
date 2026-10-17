@@ -12,9 +12,12 @@ struct OfflineSettingsSection: View {
     static let scrollID = "offlineTerrainSection"
 
     @Environment(AppModel.self) private var model
-    @State private var showPicker = false
+    /// Opens the region picker, which Settings presents (outside the form).
+    private let onAddRegion: () -> Void
 
-    init() {}
+    init(onAddRegion: @escaping () -> Void) {
+        self.onAddRegion = onAddRegion
+    }
 
     var body: some View {
         @Bindable var settings = model.settings
@@ -38,19 +41,16 @@ struct OfflineSettingsSection: View {
                         regionMenu(region, offline: offline)
                     }
             }
-            // The cover and the size refresh hang on this row, which is always there: modifiers on
-            // a Section inside a Form can end up on every one of its rows.
+            // The size refresh hangs on this row, which is always there: modifiers on a Section
+            // inside a Form can end up on every one of its rows. The picker's cover is Settings'
+            // own: hung on this row, it was not dismissed while it hid the row.
             Button {
-                showPicker = true
+                onAddRegion()
             } label: {
                 SettingsLabel("Add Region\u{2026}", symbol: "plus", color: Theme.accent.opacity(0.85))
             }
             .accessibilityIdentifier("addOfflineRegionButton")
             .id(Self.scrollID)
-            .fullScreenCover(isPresented: $showPicker) {
-                RegionPickerView()
-                    .environment(model)
-            }
             .task {
                 offline.refreshPinnedBytes()
             }
