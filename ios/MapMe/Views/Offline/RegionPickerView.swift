@@ -140,6 +140,8 @@ struct RegionPickerView: View {
         } message: {
             Text(cellularMessage)
         }
+        // Contain the children: an identifier on a plain container would replace theirs.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("regionPicker")
     }
 

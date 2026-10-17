@@ -181,6 +181,8 @@ struct NotePhotoViewer: View {
             guard let photo = note?.photo else { return }
             image = await model.notes.image(for: photo)
         }
+        // Contain the children: an identifier on a plain container would replace theirs.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("notePhotoViewer")
     }
 
