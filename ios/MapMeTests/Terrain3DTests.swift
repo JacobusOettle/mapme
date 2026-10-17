@@ -508,6 +508,92 @@ final class Terrain3DTests: XCTestCase {
         XCTAssertGreaterThan(Terrain3DOrbit.fitDistance(extent: 9452, fovDegrees: 55), tightest)
     }
 
+    func testScreenPointsMatchTheCamera() throws {
+        let orbit = Terrain3DOrbit(target: SIMD3(0, 0, 0), yaw: 0, pitch: .pi / 4, distance: 1000)
+        let size = CGSize(width: 400, height: 800)
+        let centre = try XCTUnwrap(orbit.screenPoint(of: SIMD3(0, 0, 0), fovDegrees: 55, size: size))
+        XCTAssertEqual(centre.x, 200, accuracy: 1e-9)
+        XCTAssertEqual(centre.y, 400, accuracy: 1e-9)
+        // 100 m east, at the target's depth (1000 m): right of the centre by the focal length's tenth.
+        let focal: Double = 200 / tan(27.5 * Double.pi / 180)
+        let east = try XCTUnwrap(orbit.screenPoint(of: SIMD3(100, 0, 0), fovDegrees: 55, size: size))
+        XCTAssertEqual(Double(east.x), 200 + focal / 10, accuracy: 1e-6)
+        XCTAssertEqual(east.y, 400, accuracy: 1e-9)
+        // North is further up the screen; behind the camera is nowhere.
+        let north = try XCTUnwrap(orbit.screenPoint(of: SIMD3(0, 0, -100), fovDegrees: 55, size: size))
+        XCTAssertLessThan(north.y, 400)
+        XCTAssertNil(orbit.screenPoint(of: SIMD3(0, 2000, 2000), fovDegrees: 55, size: size))
+        // Turned to face east, a point north is on the left.
+        var facingEast = orbit
+        facingEast.yaw = .pi / 2
+        let left = try XCTUnwrap(facingEast.screenPoint(of: SIMD3(0, 0, -100), fovDegrees: 55, size: size))
+        XCTAssertLessThan(left.x, 200)
+    }
+
+    func testDeclutterKeepsTheMostImportantAndNearest() {
+        typealias C = Terrain3DDeclutter.Candidate
+        let view = CGSize(width: 400, height: 800)
+        func place(_ cs: [C], maxLabels: Int = 14) -> [Terrain3DDeclutter.Placement] {
+            Terrain3DDeclutter.place(cs, markerSize: 26, viewSize: view, maxLabels: maxLabels)
+        }
+        func discs(_ ps: [Terrain3DDeclutter.Placement]) -> [Bool] { ps.map(\.disc) }
+        func labels(_ ps: [Terrain3DDeclutter.Placement]) -> [Bool] { ps.map(\.label) }
+
+        // Overlapping, equal priority: the nearer one.
+        let far = C(disc: CGPoint(x: 100, y: 100), label: nil, priority: 5, distance: 500)
+        let near = C(disc: CGPoint(x: 110, y: 100), label: nil, priority: 5, distance: 300)
+        XCTAssertEqual(discs(place([far, near])), [false, true])
+        // A more important one wins even when further away.
+        var important = far
+        important.priority = 9
+        XCTAssertEqual(discs(place([important, near])), [true, false])
+        // Among equals, one already shown stays (no flicker while the view turns).
+        var kept = far
+        kept.wasShown = true
+        XCTAssertEqual(discs(place([kept, near])), [true, false])
+        // Apart: both.
+        let apart = C(disc: CGPoint(x: 300, y: 100), label: nil, priority: 5, distance: 500)
+        XCTAssertEqual(discs(place([far, apart])), [true, true])
+        // Larger on screen (off the view's centre line), the same two collide.
+        let side = C(disc: CGPoint(x: 135, y: 100), label: nil, priority: 5, distance: 300)
+        XCTAssertEqual(discs(place([far, side])), [true, true])
+        var bigFar = far
+        bigFar.scale = 1.5
+        var bigSide = side
+        bigSide.scale = 1.5
+        XCTAssertEqual(discs(place([bigFar, bigSide])), [false, true])
+
+        // A label that would cover a placed disc is left out; its own disc stays.
+        let labelSize = CGSize(width: 80, height: 16)
+        let below = C(disc: CGPoint(x: 100, y: 200), label: labelSize, priority: 5, distance: 300)
+        let above = C(disc: CGPoint(x: 100, y: 160), label: nil, priority: 9, distance: 300)
+        let both: [Terrain3DDeclutter.Placement] = place([below, above])
+        XCTAssertEqual(discs(both), [true, true])
+        XCTAssertEqual(labels(both), [false, false])
+        XCTAssertEqual(labels(place([below])), [true])
+
+        // At most `maxLabels` labels.
+        let row: [C] = (0..<3).map { (i: Int) -> C in
+            C(disc: CGPoint(x: 60, y: 100 + 100 * Double(i)), label: labelSize, priority: 5, distance: 100 * Double(i + 1))
+        }
+        XCTAssertEqual(labels(place(row, maxLabels: 2)), [true, true, false])
+
+        // Behind the camera: not drawn. Off screen: drawn, taking no room.
+        let behind = C(disc: nil, label: labelSize, priority: 9, distance: 10)
+        let offScreen = C(disc: CGPoint(x: -500, y: 100), label: labelSize, priority: 9, distance: 10)
+        let placed: [Terrain3DDeclutter.Placement] = place([behind, offScreen, near])
+        XCTAssertEqual(discs(placed), [false, true, true])
+        XCTAssertEqual(labels(placed), [false, false, false])
+    }
+
+    func testBlockSideColoursAreLinearLight() {
+        let c: SIMD4<Float> = Terrain3DLine.linear(SIMD4<Float>(0.5, 0, 1, 0.7))
+        XCTAssertEqual(c.x, 0.214, accuracy: 0.001)
+        XCTAssertEqual(c.y, 0, accuracy: 1e-6)
+        XCTAssertEqual(c.z, 1, accuracy: 1e-6)
+        XCTAssertEqual(c.w, 0.7, accuracy: 1e-6)
+    }
+
     // MARK: - Geo items
 
     func testOtherMapsPlacesAreNotShownTwice() {

@@ -328,6 +328,14 @@ struct Terrain3DLine: Sendable {
         color.getRed(&r, green: &g, blue: &b, alpha: &a)
         return SIMD4(Float(r), Float(g), Float(b), Float(a))
     }
+
+    /// sRGB components (alpha kept) to linear light, what vertex colours hold.
+    static func linear(_ c: SIMD4<Float>) -> SIMD4<Float> {
+        func channel(_ v: Float) -> Float {
+            v <= 0.04045 ? v / 12.92 : powf((v + 0.055) / 1.055, 2.4)
+        }
+        return SIMD4(channel(c.x), channel(c.y), channel(c.z), c.w)
+    }
 }
 
 /// The geo items on the block (the track comes separately: it grows as you walk).

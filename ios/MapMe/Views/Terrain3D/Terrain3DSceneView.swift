@@ -348,7 +348,9 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
             var colors: [Float] = []
             colors.reserveCapacity(mesh.skirtShade.count * 4)
             for t in mesh.skirtShade {
-                let c = top + (bottom - top) * t
+                // Vertex colours are linear light (unlike material colours, nothing converts them):
+                // sRGB values as they are came out about three times too bright.
+                let c = Terrain3DLine.linear(top + (bottom - top) * t)
                 colors.append(contentsOf: [c.x, c.y, c.z, 1])
             }
             let sides = Self.geometry(positions: mesh.skirtPositions, normals: nil, uvs: nil, colors: colors,
@@ -467,17 +469,21 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
             disc.position = SCNVector3(0, Float(discCentre), 0)
             anchor.addChildNode(disc)
             var label: SCNNode?
+            var labelSize: CGSize?
             if !marker.name.isEmpty {
                 let text = OverlayArt.haloText(marker.name, color: .white, halo: Self.labelHalo, fontSize: 13, weight: .semibold)
                 let node = Self.spriteNode(text)
-                node.position = SCNVector3(0, Float(discCentre + OverlayArt.markerSize / 2 + 2 + text.size.height / 2), 0)
+                let lift = discCentre + OverlayArt.markerSize / 2 + Terrain3DDeclutter.labelGap + text.size.height / 2
+                node.position = SCNVector3(0, Float(lift), 0)
                 node.isHidden = true
                 anchor.addChildNode(node)
                 label = node
+                labelSize = text.size
             }
             anchor.opacity = marker.isForeign ? 0.8 : 1
             markersNode.addChildNode(anchor)
-            sprites.append(Terrain3DSprite(marker: marker, anchor: anchor, disc: disc, label: label, local: p))
+            sprites.append(Terrain3DSprite(marker: marker, anchor: anchor, disc: disc, label: label, local: p,
+                                           discLift: discCentre, labelSize: labelSize))
         }
     }
 
@@ -497,13 +503,19 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
         return SCNNode(geometry: plane)
     }
 
-    /// Constant size on screen, fading with distance, labels for the most important ones near
-    /// enough, far ones drawn first.
+    /// Constant size on screen, fading with distance, decluttered (no disc or label covering a
+    /// more important one), far ones drawn first.
     private func updateSprites() {
         let eye = orbit.position
-        let viewPoints = Double(max(min(bounds.width, bounds.height), 1))
+        let forward = orbit.forward
+        let viewSize = bounds.size
+        let viewPoints = Double(max(min(viewSize.width, viewSize.height), 1))
+        // Labels within range of the camera.
+        let range = max(Terrain3DLimits.labelNearM, orbit.distance * 1.4)
         var ranked: [(sprite: Terrain3DSprite, distance: Double)] = []
         ranked.reserveCapacity(sprites.count)
+        var candidates: [Terrain3DDeclutter.Candidate] = []
+        candidates.reserveCapacity(sprites.count)
         for sprite in sprites {
             let p = SIMD3<Double>(sprite.local.x, sprite.local.y * exaggeration, sprite.local.z)
             let d = Self.length(p - eye)
@@ -514,6 +526,15 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
             let fade = 1 - 0.5 * t
             sprite.anchor.opacity = CGFloat(fade * (sprite.marker.isForeign ? 0.8 : 1))
             ranked.append((sprite, d))
+            let depth = ((p - eye) * forward).sum()
+            let scale = depth > 1e-6 ? CGFloat(d / depth) : 1
+            var disc: CGPoint?
+            if let anchor = orbit.screenPoint(of: p, fovDegrees: Self.fovDegrees, size: viewSize) {
+                disc = CGPoint(x: anchor.x, y: anchor.y - sprite.discLift * scale)
+            }
+            candidates.append(Terrain3DDeclutter.Candidate(disc: disc, label: d <= range ? sprite.labelSize : nil,
+                                                           priority: sprite.marker.priority, distance: d,
+                                                           wasShown: sprite.shown, scale: scale))
         }
         // Far first.
         let order = ranked.sorted { $0.distance > $1.distance }
@@ -521,20 +542,13 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
             entry.sprite.disc.renderingOrder = Self.markerOrder + 2 * k
             entry.sprite.label?.renderingOrder = Self.markerOrder + 2 * k + 1
         }
-        // Labels: the most important first, then the nearest, within range.
-        let range = max(Terrain3DLimits.labelNearM, orbit.distance * 1.4)
-        let candidates = ranked.filter { $0.distance <= range && $0.sprite.label != nil }
-            .sorted { a, b in
-                a.sprite.marker.priority != b.sprite.marker.priority
-                    ? a.sprite.marker.priority > b.sprite.marker.priority : a.distance < b.distance
-            }
-        var shown = Set<ObjectIdentifier>()
-        for entry in candidates.prefix(Terrain3DLimits.maxLabels) {
-            shown.insert(ObjectIdentifier(entry.sprite))
-        }
-        for sprite in sprites {
-            let hidden = !shown.contains(ObjectIdentifier(sprite))
-            if sprite.label?.isHidden != hidden { sprite.label?.isHidden = hidden }
+        let placements = Terrain3DDeclutter.place(candidates, markerSize: OverlayArt.markerSize, viewSize: viewSize,
+                                                  maxLabels: Terrain3DLimits.maxLabels)
+        for (sprite, placement) in zip(sprites, placements) {
+            sprite.shown = placement.disc
+            if sprite.disc.isHidden == placement.disc { sprite.disc.isHidden = !placement.disc }
+            let labelHidden = !placement.label
+            if let label = sprite.label, label.isHidden != labelHidden { label.isHidden = labelHidden }
         }
         if let youLocal, !youNode.isHidden {
             let p = SIMD3<Double>(youLocal.x, youLocal.y * exaggeration, youLocal.z)
@@ -955,13 +969,21 @@ private final class Terrain3DSprite {
     let disc: SCNNode
     let label: SCNNode?
     let local: SIMD3<Double>
+    /// The disc's centre above the anchor, points.
+    let discLift: CGFloat
+    let labelSize: CGSize?
+    /// Placed last time (decluttering keeps these first among equals).
+    var shown = false
 
-    init(marker: Terrain3DMarker, anchor: SCNNode, disc: SCNNode, label: SCNNode?, local: SIMD3<Double>) {
+    init(marker: Terrain3DMarker, anchor: SCNNode, disc: SCNNode, label: SCNNode?, local: SIMD3<Double>,
+         discLift: CGFloat, labelSize: CGSize?) {
         self.marker = marker
         self.anchor = anchor
         self.disc = disc
         self.label = label
         self.local = local
+        self.discLift = discLift
+        self.labelSize = labelSize
     }
 }
 

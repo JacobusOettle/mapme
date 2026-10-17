@@ -960,6 +960,27 @@ struct Terrain3DOrbit: Equatable, Sendable {
         return o
     }
 
+    /// Where scene point `p` lands in a view `size` points large whose field of view spans its
+    /// shorter side; nil when it is behind the camera.
+    func screenPoint(of p: SIMD3<Double>, fovDegrees: Double, size: CGSize) -> CGPoint? {
+        let f = forward
+        // The camera's right and up, as SceneKit's look-at with world up +y builds them.
+        let side = SIMD3<Double>(-f.z, 0, f.x)
+        let sideLength = (side.x * side.x + side.z * side.z).squareRoot()
+        guard sideLength > 1e-9, size.width > 0, size.height > 0 else { return nil }
+        let right = side / sideLength
+        let up = SIMD3<Double>(right.y * f.z - right.z * f.y, right.z * f.x - right.x * f.z, right.x * f.y - right.y * f.x)
+        let v = p - position
+        let depth = (v * f).sum()
+        guard depth > 1e-6 else { return nil }
+        let w = Double(size.width)
+        let h = Double(size.height)
+        let focal = min(w, h) / 2 / tan(fovDegrees * .pi / 360)
+        let x = w / 2 + (v * right).sum() / depth * focal
+        let y = h / 2 - (v * up).sum() / depth * focal
+        return CGPoint(x: x, y: y)
+    }
+
     /// Ground metres per point at `distance` for a field of view of `fovDegrees` across
     /// `viewPoints` points: what keeps billboards and line widths a constant size on screen.
     static func metersPerPoint(distance: Double, fovDegrees: Double, viewPoints: Double) -> Double {
@@ -971,5 +992,73 @@ struct Terrain3DOrbit: Equatable, Sendable {
     static func fitDistance(extent: Double, fovDegrees: Double) -> Double {
         let half = max(extent, 100) / 2
         return half / tan(fovDegrees * .pi / 360) * 1.15
+    }
+}
+
+// MARK: - Decluttering
+
+/// Which billboards to draw, as the 2D map places its POIs: greedily, the most important first
+/// (then the ones already shown, so a turning view doesn't flicker, then the nearest), skipping a
+/// disc that would cover one already placed and a label that would cover anything placed.
+enum Terrain3DDeclutter {
+    struct Candidate: Equatable {
+        /// The disc's centre on screen, points; nil when behind the camera.
+        var disc: CGPoint?
+        /// The label's size, points; nil without a label or out of label range.
+        var label: CGSize?
+        var priority: Int
+        var distance: Double
+        var wasShown: Bool = false
+        /// Screen size over nominal: billboards are sized by distance, the view projects by depth,
+        /// so ones off the view's centre line come out larger.
+        var scale: CGFloat = 1
+    }
+
+    struct Placement: Equatable {
+        var disc: Bool
+        var label: Bool
+    }
+
+    /// Gap kept between a disc and its label above it (points).
+    static let labelGap: CGFloat = 2
+
+    static func place(_ candidates: [Candidate], markerSize: CGFloat, viewSize: CGSize,
+                      maxLabels: Int) -> [Placement] {
+        var result = [Placement](repeating: Placement(disc: false, label: false), count: candidates.count)
+        let order: [Int] = candidates.indices.sorted { i, j in
+            let a = candidates[i]
+            let b = candidates[j]
+            if a.priority != b.priority { return a.priority > b.priority }
+            if a.wasShown != b.wasShown { return a.wasShown }
+            if a.distance != b.distance { return a.distance < b.distance }
+            return i < j
+        }
+        let screen = CGRect(origin: .zero, size: viewSize).insetBy(dx: -markerSize, dy: -markerSize)
+        var taken: [CGRect] = []
+        taken.reserveCapacity(candidates.count * 2)
+        var labels = 0
+        for i in order {
+            let c = candidates[i]
+            guard let centre = c.disc, centre.x.isFinite, centre.y.isFinite else { continue }
+            // Off screen: drawn (nothing shows) but takes no room.
+            guard screen.contains(centre) else {
+                result[i].disc = true
+                continue
+            }
+            let m = markerSize * c.scale
+            let disc = CGRect(x: centre.x - m / 2, y: centre.y - m / 2, width: m, height: m).insetBy(dx: -2, dy: -2)
+            if taken.contains(where: { $0.intersects(disc) }) { continue }
+            taken.append(disc)
+            result[i].disc = true
+            guard let label = c.label, labels < maxLabels else { continue }
+            let size = CGSize(width: label.width * c.scale, height: label.height * c.scale)
+            let box = CGRect(x: centre.x - size.width / 2, y: centre.y - m / 2 - labelGap * c.scale - size.height,
+                             width: size.width, height: size.height).insetBy(dx: 2, dy: 2)
+            if taken.contains(where: { $0.intersects(box) }) { continue }
+            taken.append(box)
+            result[i].label = true
+            labels += 1
+        }
+        return result
     }
 }
