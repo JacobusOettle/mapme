@@ -401,8 +401,12 @@ final class RoutesTests: XCTestCase {
         // The best profile of a GPX route without terrain falls back to the file's elevations.
         let empty = TerrainProvider(store: TerrainStore(), source: EmptyTiles())
         var gpx = Route(name: "From a file", kind: .gpxRoute, points: [])
-        gpx.points = (0...40).map { i in RoutePoint(lat: -25.84, lon: 27.39 + Double(i) * 0.0005, ele: 1400 + Double(i) * 2,
-                                                    isAnchor: true) }
+        gpx.points = (0...40).map { (i: Int) -> RoutePoint in
+            let k = Double(i)
+            let lon: Double = 27.39 + k * 0.0005
+            let ele: Double = 1400 + k * 2
+            return RoutePoint(lat: -25.84, lon: lon, ele: ele, isAnchor: true)
+        }
         let fromFile = await RoutePlanner.bestProfile(for: gpx, terrain: empty)
         let best = try XCTUnwrap(fromFile)
         if best.source == .file {

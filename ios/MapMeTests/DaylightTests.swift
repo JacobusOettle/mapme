@@ -49,7 +49,8 @@ final class DaylightTests: XCTestCase {
         assertTime(sun.sunset, try local(2026, 6, 21, 17, 27, 54, tz), "sunset")
         assertTime(sun.civilDusk, try local(2026, 6, 21, 17, 53, 8, tz), "dusk")
         let now = try local(2026, 6, 21, 15, 30, 0, tz)
-        XCTAssertEqual(try XCTUnwrap(sun.daylightLeft(at: now)), 1 * 3600 + 57 * 60 + 54, accuracy: 60)
+        let leftAt: TimeInterval = 1 * 3600 + 57 * 60 + 54
+        XCTAssertEqual(try XCTUnwrap(sun.daylightLeft(at: now)), leftAt, accuracy: 60)
         XCTAssertEqual(sun.daylightLeft(at: try local(2026, 6, 21, 19, 0, 0, tz)), 0)
     }
 
@@ -129,7 +130,8 @@ final class DaylightTests: XCTestCase {
                                                        destination: "Bannerman Hut", time: time))
         XCTAssertEqual(fine.text, "2 h 10 min of daylight left · at your pace you reach Bannerman Hut at 16:40")
         XCTAssertEqual(fine.level, .normal)
-        XCTAssertEqual(try XCTUnwrap(fine.daylightLeft), 2 * 3600 + 10 * 60 + 25, accuracy: 60)
+        let leftFine: TimeInterval = 2 * 3600 + 10 * 60 + 25
+        XCTAssertEqual(try XCTUnwrap(fine.daylightLeft), leftFine, accuracy: 60)
         // Within 15 min of sunset: amber.
         let tight = try XCTUnwrap(DaylightForecast.make(now: now, sun: sun, eta: try local(2026, 6, 21, 17, 20, 0, tz),
                                                         destination: "Bannerman Hut", time: time))
@@ -175,7 +177,8 @@ final class DaylightTests: XCTestCase {
         assertTime(sun.civilDawn, try local(2026, 6, 21, 6, 31, 19, tz), "dawn of the day ahead")
         assertTime(sun.sunrise, try local(2026, 6, 21, 6, 56, 33, tz), "sunrise of the day ahead")
         XCTAssertNil(sun.daylightLeft(at: start), "no daylight is left before it has begun")
-        XCTAssertEqual(try XCTUnwrap(sun.timeToSunrise(at: start)), 3 * 3600 + 56 * 60 + 33, accuracy: 60)
+        let toSunrise: TimeInterval = 3 * 3600 + 56 * 60 + 33
+        XCTAssertEqual(try XCTUnwrap(sun.timeToSunrise(at: start)), toSunrise, accuracy: 60)
         XCTAssertNil(sun.timeToSunrise(at: try local(2026, 6, 21, 12, 0, 0, tz)))
 
         let dark = try XCTUnwrap(DaylightForecast.make(now: start, sun: sun, eta: try local(2026, 6, 21, 6, 0, 0, tz),

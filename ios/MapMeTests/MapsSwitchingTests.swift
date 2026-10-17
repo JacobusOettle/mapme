@@ -375,7 +375,9 @@ final class MapsSwitchingTests: XCTestCase {
         XCTAssertEqual(margin, 250, accuracy: 2)
         let m = try XCTUnwrap(photo.georef).pixelToMercator.m
         let wc = m[6] * 1000 + m[7] * 1000 + m[8]
-        for (x, y) in [(-margin, -margin), (2000 + margin, -margin), (2000 + margin, 2000 + margin), (-margin, 2000 + margin)] {
+        let far: Double = 2000 + margin
+        let corners: [(Double, Double)] = [(-margin, -margin), (far, -margin), (far, far), (-margin, far)]
+        for (x, y) in corners {
             let w = m[6] * x + m[7] * y + m[8]
             XCTAssertLessThanOrEqual(abs(w - wc), 0.25 * abs(wc) + 1e-9)
         }

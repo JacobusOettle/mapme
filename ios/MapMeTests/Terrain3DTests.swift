@@ -24,10 +24,10 @@ final class Terrain3DTests: XCTestCase {
         let co = cos(rotation)
         let si = sin(rotation)
         // Local offsets from the centre, then translated: M = T(c) · P.
-        let p = [s * co, s * si, -s * co * hw - s * si * hh,
+        let p: [Double] = [s * co, s * si, -s * co * hw - s * si * hh,
                  s * si, -s * co, -s * si * hw + s * co * hh,
                  g, 0, 1 - g * hw]
-        let m = [p[0] + c.x * p[6], p[1] + c.x * p[7], p[2] + c.x * p[8],
+        let m: [Double] = [p[0] + c.x * p[6], p[1] + c.x * p[7], p[2] + c.x * p[8],
                  p[3] + c.y * p[6], p[4] + c.y * p[7], p[5] + c.y * p[8],
                  p[6], p[7], p[8]]
         return Georeference(pixelToMercator: Homography(m), method: .grid, confidence: 1, rmsMeters: 2, warp: warp)
@@ -61,10 +61,26 @@ final class Terrain3DTests: XCTestCase {
     }
 
     static func plane(_ m: SIMD2<Double>, _ rect: MercatorRect) -> Double {
-        1000 + 0.004 * (m.x - rect.minX) + 0.003 * (m.y - rect.minY)
+        let east: Double = 0.004 * (m.x - rect.minX)
+        let south: Double = 0.003 * (m.y - rect.minY)
+        return 1000 + east + south
     }
 
     /// A small lattice: 5 × 4 nodes 100 m apart, x east, z south.
+    /// A tilted plane: up 5 m per 100 m east and 2 m per 100 m north (typed so the compiler
+    /// checks it quickly).
+    static func planeHeight(_ i: Int, _ j: Int) -> Float {
+        let east: Double = Double(i) * 100 * 0.05
+        let north: Double = Double(j) * 100 * 0.02
+        return Float(east + north)
+    }
+
+    /// Rough but repeatable heights, 0 to 40 m.
+    static func roughHeight(_ i: Int, _ j: Int) -> Float {
+        let step: Int = (i * 7 + j * 13) % 5
+        return Float(step * 10)
+    }
+
     static func lattice(heights: (Int, Int) -> Float) -> (nodes: [SIMD2<Double>], heights: [Float]) {
         var nodes: [SIMD2<Double>] = []
         var values: [Float] = []
@@ -111,8 +127,8 @@ final class Terrain3DTests: XCTestCase {
         let h = Double(Self.sheetHeight)
         let m = photo.pixelToMercator.m
         XCTAssertTrue(Terrain3DMargin.perspectiveIsSane(m, w0: 1, x0: -margin, y0: -margin, x1: w + margin, y1: h + margin))
-        XCTAssertFalse(Terrain3DMargin.perspectiveIsSane(m, w0: 1, x0: -margin / 0.7, y0: -margin / 0.7,
-                                                         x1: w + margin / 0.7, y1: h + margin / 0.7))
+        let wide: Double = margin / 0.7
+        XCTAssertFalse(Terrain3DMargin.perspectiveIsSane(m, w0: 1, x0: -wide, y0: -wide, x1: w + wide, y1: h + wide))
     }
 
     func testMeshSizeAndTerrainZoomFollowTheBlock() throws {
@@ -313,14 +329,17 @@ final class Terrain3DTests: XCTestCase {
     // MARK: - Draping
 
     func testSurfacePointsLieOnTheMeshTriangles() {
-        let rough = Self.lattice { i, j in Float(((i * 7 + j * 13) % 5) * 10) }
+        let rough = Self.lattice(heights: Self.roughHeight)
         let surface = Terrain3DSurface(cols: 5, rows: 4, nodes: rough.nodes, heights: rough.heights)
         // Cell (1, 1), above its diagonal: nodes (1,1) = 0 m, (2,1) = 20 m, (2,2) = 0 m.
         let p = surface.point(at: SIMD2(1.7, 1.2))
         XCTAssertEqual(p?.x ?? 0, 170, accuracy: 1e-9)
-        XCTAssertEqual(p?.y ?? 0, 0.7 * 20 + 0.2 * (0 - 20), accuracy: 1e-9)
+        let blended: Double = 0.7 * 20 + 0.2 * (0 - 20)
+        XCTAssertEqual(p?.y ?? 0, blended, accuracy: 1e-9)
         XCTAssertEqual(p?.z ?? 0, 120, accuracy: 1e-9)
-        XCTAssertEqual(surface.point(at: SIMD2(3, 2))?.y ?? -1, Double(rough.heights[2 * 5 + 3]), accuracy: 1e-9)
+        let sampled: Double = surface.point(at: SIMD2<Double>(3, 2))?.y ?? -1
+        let stored = Double(rough.heights[13])  // node (3, 2) of the 5-wide lattice
+        XCTAssertEqual(sampled, stored, accuracy: 1e-9)
         XCTAssertNil(surface.point(at: SIMD2(4.5, 1)))
         XCTAssertNil(surface.point(at: SIMD2(-0.1, 1)))
         // The affine fit back from the ground, and a ground offset in grid units.
@@ -335,19 +354,20 @@ final class Terrain3DTests: XCTestCase {
     /// A line on the block is split where it crosses the triangles' edges, so it lies on the
     /// surface everywhere, not only at its points.
     func testDrapedLineFollowsTheSurfaceBetweenItsPoints() {
-        let plane = Self.lattice { i, j in Float(Double(i) * 100 * 0.05 + Double(j) * 100 * 0.02) }
+        let plane = Self.lattice(heights: Self.planeHeight)
         let flat = Terrain3DSurface(cols: 5, rows: 4, nodes: plane.nodes, heights: plane.heights)
         let pieces = flat.drape([SIMD2(0.5, 0.5), SIMD2(3.5, 2.5)])
         XCTAssertEqual(pieces.count, 1)
         // Both ends and five crossings: columns 1, 2, 3 and rows 1, 2 (no diagonal between).
         XCTAssertEqual(pieces.first?.count, 7)
         for point in pieces.first ?? [] {
-            XCTAssertEqual(point.local.y, 0.05 * point.local.x + 0.02 * point.local.z, accuracy: 1e-9)
+            let onPlane: Double = 0.05 * point.local.x + 0.02 * point.local.z
+            XCTAssertEqual(point.local.y, onPlane, accuracy: 1e-9)
         }
         XCTAssertEqual(flat.crossings(SIMD2(0.5, 0.5), SIMD2(3.5, 2.5)).count, 5)
 
         // On rough terrain, the middle of every piece between two samples is on the surface too.
-        let rough = Self.lattice { i, j in Float(((i * 7 + j * 13) % 5) * 10) }
+        let rough = Self.lattice(heights: Self.roughHeight)
         let surface = Terrain3DSurface(cols: 5, rows: 4, nodes: rough.nodes, heights: rough.heights)
         let line = surface.drape([SIMD2(0.3, 0.2), SIMD2(3.9, 2.7), SIMD2(0.2, 2.9)])
         XCTAssertEqual(line.count, 1)
@@ -368,7 +388,7 @@ final class Terrain3DTests: XCTestCase {
         XCTAssertEqual(twice.count, 2)
         XCTAssertEqual(twice.last?.first?.grid.x ?? -1, 4, accuracy: 1e-12)
         XCTAssertEqual(twice.last?.first?.grid.y ?? -1, 1.25, accuracy: 1e-12)
-        XCTAssertTrue(flat.drape([SIMD2(-3, -3), SIMD2(-1, -2)]).isEmpty)
+        XCTAssertTrue(flat.drape([SIMD2<Double>(-3, -3), SIMD2<Double>(-1, -2)]).isEmpty)
         XCTAssertTrue(flat.drape([SIMD2(1, 1), SIMD2(.nan, 2)]).isEmpty)
     }
 
@@ -483,7 +503,9 @@ final class Terrain3DTests: XCTestCase {
         // Billboards keep their size: metres per point grow with distance.
         XCTAssertEqual(Terrain3DOrbit.metersPerPoint(distance: 1000, fovDegrees: 60, viewPoints: 400),
                        2 * 1000 * tan(.pi / 6) / 400, accuracy: 1e-9)
-        XCTAssertGreaterThan(Terrain3DOrbit.fitDistance(extent: 9452, fovDegrees: 55), 9452 / 2 / tan(27.5 * .pi / 180))
+        let halfFov: Double = 27.5 * Double.pi / 180
+        let tightest: Double = 9452.0 / 2 / tan(halfFov)
+        XCTAssertGreaterThan(Terrain3DOrbit.fitDistance(extent: 9452, fovDegrees: 55), tightest)
     }
 
     // MARK: - Geo items

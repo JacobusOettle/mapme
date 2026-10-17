@@ -78,7 +78,8 @@ final class ExplorerIntegrationTests: XCTestCase {
         XCTAssertFalse(proMax.panelSpan.overlaps(proMax.rightColumnSpan))
         XCTAssertEqual(columns(proMax), 1)
         // The banners always stop above the panel (they span its width); landscape scrolls them.
-        XCTAssertEqual(se.bannersMaxHeight, 375 - 8 - 150 - 12 - 4 - 52, accuracy: 0.01)
+        let bannerRoom: CGFloat = 375 - 8 - 150 - 12 - 4 - 52
+        XCTAssertEqual(se.bannersMaxHeight, bannerRoom, accuracy: 0.01)
     }
 
     // MARK: - The terrain contract

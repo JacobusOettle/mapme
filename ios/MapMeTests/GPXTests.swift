@@ -228,9 +228,12 @@ final class GPXTests: XCTestCase {
 
         // A recorded track exports as before (`Track.gpx`) and reads back as a track.
         var recorded = Track(name: "Morning", startedAt: Date(timeIntervalSince1970: 1_780_000_000))
-        recorded.points = (0..<5).map { i in
-            TrackPoint(lat: -25.84 + Double(i) * 1e-4, lon: 27.39, altitude: 1500, timestamp: Date(timeIntervalSince1970: 1_780_000_000 + Double(i) * 10),
-                       horizontalAccuracy: 5)
+        recorded.points = (0..<5).map { (i: Int) -> TrackPoint in
+            let k = Double(i)
+            let lat: Double = -25.84 + k * 1e-4
+            let time: TimeInterval = 1_780_000_000 + k * 10
+            return TrackPoint(lat: lat, lon: 27.39, altitude: 1500, timestamp: Date(timeIntervalSince1970: time),
+                              horizontalAccuracy: 5)
         }
         let fromTrack = try parse(recorded.gpx(), file: "Morning.gpx")
         XCTAssertEqual(fromTrack.routes.first?.kind, .gpxTrack)
