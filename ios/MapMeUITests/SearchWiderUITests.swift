@@ -6,7 +6,8 @@ import XCTest
 /// custom distance and shows the core's estimate for the mocked position. Closed with Cancel.
 /// The names on the map are looked up in a fixed table (`-mockPlaces`), not Apple Maps, and the
 /// sheet's list is scrolled to each row it checks: a List only builds the rows on screen, and the
-/// places section above the distances pushes the lower rows off it.
+/// places section above the distances pushes the lower rows off it. The result screen's close
+/// button leaves the map in the library, not located.
 final class SearchWiderUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = true
@@ -125,11 +126,68 @@ final class SearchWiderUITests: XCTestCase {
         XCTAssertTrue(app.buttons["calibrateButton"].waitForExistence(timeout: 10))
     }
 
+    /// The not-located screen's close button (top left, clear of the status bar) leaves the import
+    /// without opening the map: back in the library, where the map stays as "Not located".
+    @MainActor
+    func testCloseOnTheNotLocatedScreenKeepsTheMapInTheLibrary() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-importSample", "-simulateTerrainMiss", "-mockLocation", "-25.8405,27.3920",
+                               "-mockPlaces", "Magaliesberg=-25.80,27.45;Hartbeespoort=-25.74,27.85"]
+        allowLocationAlerts()
+        app.launch()
+
+        let searchWider = app.buttons["searchWiderButton"]
+        guard searchWider.waitForExistence(timeout: 180) else {
+            attachScreenshot(app, "07c-search-wider-timeout")
+            XCTFail("The import did not end on the not-found screen with Search wider")
+            return
+        }
+        Thread.sleep(forTimeInterval: 1.5)
+        attachScreenshot(app, "07c-not-located-close")
+        let close = app.buttons["closeImportResultButton"]
+        guard close.exists else {
+            XCTFail("The not-located screen has no close button")
+            return
+        }
+        XCTAssertEqual(close.label, "Close")
+        XCTAssertTrue(close.isHittable, "The close button cannot be tapped")
+        // Below the status bar and the Dynamic Island (Face ID iPhones in portrait: 44 pt or more).
+        let screen: CGRect = app.windows.firstMatch.frame
+        let faceIDPortrait: Bool = screen.height >= 812 && screen.height > screen.width
+        if faceIDPortrait {
+            let top: CGFloat = close.frame.minY
+            XCTAssertGreaterThanOrEqual(top, 44, "The close button is under the status bar")
+        }
+        close.tap()
+
+        XCTAssertTrue(app.buttons["importMenu"].waitForExistence(timeout: 15), "Close did not bring back the library")
+        let deadline = Date().addingTimeInterval(10)
+        while searchWider.exists || close.exists, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+        XCTAssertFalse(searchWider.exists, "The import screen is still up after Close")
+        XCTAssertFalse(close.exists, "The import screen is still up after Close")
+
+        // Maps you are on come first, so the new one may be further down the library.
+        let card = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "mapCard", "Not located"))
+            .firstMatch
+        if !card.waitForExistence(timeout: 5) {
+            scrollSheet(app, toReveal: card, maxDrags: 6)
+        }
+        Thread.sleep(forTimeInterval: 1)
+        attachScreenshot(app, "07c-library-after-close")
+        XCTAssertTrue(card.exists, "The map is not in the library as Not located")
+        if card.exists {
+            XCTAssertTrue(card.label.contains("Grootkloof sample"), "card: \(card.label)")
+        }
+    }
+
     // MARK: - Helpers
 
     /// Drags the sheet's list up until `element` is on screen (a List builds only the rows it
     /// shows), at most `maxDrags` times. Drags in the middle of the window: the sheet's list, clear
-    /// of its Start bar and of the screen behind it.
+    /// of its Start bar and of the screen behind it (the library's lazy grid scrolls the same way).
     @MainActor
     private func scrollSheet(_ app: XCUIApplication, toReveal element: XCUIElement, maxDrags: Int = 4) {
         let window = app.windows.firstMatch

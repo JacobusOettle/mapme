@@ -25,6 +25,15 @@ struct ImportProgressView: View {
                     // bar) even if the cover was laid out without a safe area.
                     .windowSafeAreaPadding()
             }
+            if let job, Self.showsCloseButton(job.phase) {
+                closeButton
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    // Never under the status bar or the Dynamic Island, even without a safe area.
+                    .windowSafeAreaPadding()
+                    .transition(.opacity)
+            }
         }
         .animation(.spring(response: 0.5, dampingFraction: 0.85), value: job?.phase)
         .onAppear { lastJob = model.importJob }
@@ -74,6 +83,30 @@ struct ImportProgressView: View {
         pendingWideSearch = nil
         guard let mapID = (model.importJob ?? lastJob)?.mapID else { return }
         model.searchWider(mapID: mapID, choice: choice)
+    }
+
+    /// The X shows on a result; while the import runs it has Cancel, and a failed one has Close.
+    private static func showsCloseButton(_ phase: ImportJob.Phase) -> Bool {
+        switch phase {
+        case .succeeded, .needsCalibration: return true
+        case .importing, .locating, .failed: return false
+        }
+    }
+
+    /// Leaves without opening the map. A map that was not located stays in the library as
+    /// "Not located", to search wider or calibrate later.
+    @MainActor
+    private var closeButton: some View {
+        Button {
+            model.finishImport(openMap: false)
+        } label: {
+            Image(systemName: "xmark")
+        }
+        .buttonStyle(MapRoundButtonStyle())
+        .accessibilityLabel("Close")
+        .accessibilityIdentifier("closeImportResultButton")
+        // Read first, as a toolbar's close would be, though it is laid out after the content.
+        .accessibilitySortPriority(1)
     }
 
     private var backdrop: some View {

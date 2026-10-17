@@ -202,7 +202,9 @@ Run `scripts/build-core-ios.sh` again after changes in `core/`, and
 6. **If it cannot locate the map** (or you want to correct it), choose
    **Calibrate manually**: tap a point on the map, then the same point on the
    satellite view (or tap **I'm here** where you stand). Two points give a
-   rough fit, three or more a good one.
+   rough fit, three or more a good one. Or close the result screen with ✕:
+   the map stays in the library as *Not located*, to search wider or
+   calibrate later.
 
 Trying it at home: in the iOS Simulator use **Features → Location → Custom
 Location** with latitude `-25.85`, longitude `27.40` to stand in the middle of
