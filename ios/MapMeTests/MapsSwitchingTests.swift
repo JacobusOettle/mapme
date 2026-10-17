@@ -22,9 +22,9 @@ final class MapsSwitchingTests: XCTestCase {
         let w = Double(width)
         let h = Double(height)
         // pixel → centred (u, v, 1) → perspective (u, v, 1 + a·u) → Mercator (scale, flip y, move).
-        let toCentre = [1, 0, -w / 2, 0, 1, -h / 2, 0, 0, 1]
-        let tilt = [1, 0, 0, 0, 1, 0, perspective, 0, 1]
-        let place = [s, 0, c.x, 0, -s, c.y, 0, 0, 1]
+        let toCentre: [Double] = [1, 0, -w / 2, 0, 1, -h / 2, 0, 0, 1]
+        let tilt: [Double] = [1, 0, 0, 0, 1, 0, perspective, 0, 1]
+        let place: [Double] = [s, 0, c.x, 0, -s, c.y, 0, 0, 1]
         let m = multiply(place, multiply(tilt, toCentre))
         let georef = Georeference(pixelToMercator: Homography(m), method: .grid, confidence: 0.9, rmsMeters: 3,
                                   createdAt: Date(timeIntervalSince1970: 1_700_000_000))
@@ -38,7 +38,11 @@ final class MapsSwitchingTests: XCTestCase {
         var out = [Double](repeating: 0, count: 9)
         for r in 0..<3 {
             for c in 0..<3 {
-                out[r * 3 + c] = (0..<3).reduce(0) { $0 + a[r * 3 + $1] * b[$1 * 3 + c] }
+                var sum: Double = 0
+                for k in 0..<3 {
+                    sum += a[r * 3 + k] * b[k * 3 + c]
+                }
+                out[r * 3 + c] = sum
             }
         }
         return out
