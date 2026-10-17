@@ -116,7 +116,7 @@ private struct TrailStatsRow: View {
                 }
             }
         } else if let fix = model.location.location {
-            if let away = Self.offMapText(map: map, here: LatLon(fix.coordinate), units: units) {
+            if let away = MapProximity.offMapText(map: map, here: LatLon(fix.coordinate), units: units) {
                 HStack(spacing: 10) {
                     Image(systemName: "arrow.up.forward.circle.fill")
                         .font(.title2)
@@ -147,11 +147,15 @@ private struct TrailStatsRow: View {
             }
         }
     }
+}
 
+extension MapProximity {
     /// "You are 2.3 km NE of this map" when you are outside the map's footprint.
     static func offMapText(map: MapDocument, here: LatLon, units: DistanceUnits) -> String? {
         guard case .away(let meters, let bearing) = MapProximity.of(map, from: here) else { return nil }
-        return "You are \(GeoFormat.distance(meters, units: units)) \(Geodesy.compassPoint(bearing)) of this map"
+        // The proximity bearing points from you to the map; this sentence needs the reverse.
+        let fromMap = (bearing + 180).truncatingRemainder(dividingBy: 360)
+        return "You are \(GeoFormat.distance(meters, units: units)) \(Geodesy.compassPoint(fromMap)) of this map"
     }
 }
 

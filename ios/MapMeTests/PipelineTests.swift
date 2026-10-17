@@ -354,6 +354,9 @@ final class PipelineTests: XCTestCase {
         XCTAssertLessThan(meters, 12_000)
         XCTAssertGreaterThan(bearing, 180)
         XCTAssertLessThan(bearing, 270)
+        // The off-map card names where you are relative to the map, not the way back.
+        let text: String = MapProximity.offMapText(map: doc, here: away, units: .metric) ?? ""
+        XCTAssertTrue(text.hasSuffix("NE of this map"), text)
     }
 }
 
