@@ -578,6 +578,11 @@ final class Terrain3DTests: XCTestCase {
         }
         XCTAssertEqual(labels(place(row, maxLabels: 2)), [true, true, false])
 
+        // Nothing covers you.
+        let you = CGRect(x: 95, y: 70, width: 30, height: 40)
+        XCTAssertEqual(discs(Terrain3DDeclutter.place([near], markerSize: 26, viewSize: view, maxLabels: 14,
+                                                      reserved: [you])), [false])
+
         // Behind the camera: not drawn. Off screen: drawn, taking no room.
         let behind = C(disc: nil, label: labelSize, priority: 9, distance: 10)
         let offScreen = C(disc: CGPoint(x: -500, y: 100), label: labelSize, priority: 9, distance: 10)

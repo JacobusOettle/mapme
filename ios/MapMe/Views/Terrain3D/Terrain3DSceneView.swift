@@ -488,6 +488,9 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
     }
 
     private static let labelHalo = UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 0.88)
+    /// You on screen, points: the ball (radius 7) on its 24 pt pole.
+    private static let youHalfWidth: CGFloat = 12
+    private static let youHeight: CGFloat = 36
 
     /// A camera-facing picture, sized in points (the anchor's scale turns points into metres).
     private static func spriteNode(_ image: UIImage) -> SCNNode {
@@ -542,8 +545,20 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
             entry.sprite.disc.renderingOrder = Self.markerOrder + 2 * k
             entry.sprite.label?.renderingOrder = Self.markerOrder + 2 * k + 1
         }
+        // You (the ball on its pole) stay clear of discs and labels.
+        var reserved: [CGRect] = []
+        if let youLocal, !youNode.isHidden {
+            let p = SIMD3<Double>(youLocal.x, youLocal.y * exaggeration, youLocal.z)
+            let depth = ((p - eye) * forward).sum()
+            if depth > 1e-6, let foot = orbit.screenPoint(of: p, fovDegrees: Self.fovDegrees, size: viewSize) {
+                let scale = CGFloat(Self.length(p - eye) / depth)
+                let half = Self.youHalfWidth * scale
+                let height = Self.youHeight * scale
+                reserved.append(CGRect(x: foot.x - half, y: foot.y - height, width: 2 * half, height: height + 2))
+            }
+        }
         let placements = Terrain3DDeclutter.place(candidates, markerSize: OverlayArt.markerSize, viewSize: viewSize,
-                                                  maxLabels: Terrain3DLimits.maxLabels)
+                                                  maxLabels: Terrain3DLimits.maxLabels, reserved: reserved)
         for (sprite, placement) in zip(sprites, placements) {
             sprite.shown = placement.disc
             if sprite.disc.isHidden == placement.disc { sprite.disc.isHidden = !placement.disc }
@@ -573,7 +588,8 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
             youLocal = nil
             return
         }
-        let moved = youLocal == nil || youNode.isHidden
+        // Appeared or walked on: its size and the room kept clear for it change.
+        let moved = youLocal != p || youNode.isHidden
         youLocal = p
         youNode.isHidden = false
         youNode.simdPosition = SIMD3<Float>(Float(p.x), Float(p.y * exaggeration), Float(p.z))

@@ -1022,8 +1022,9 @@ enum Terrain3DDeclutter {
     /// Gap kept between a disc and its label above it (points).
     static let labelGap: CGFloat = 2
 
+    /// `reserved`: screen rectangles nothing may cover (you).
     static func place(_ candidates: [Candidate], markerSize: CGFloat, viewSize: CGSize,
-                      maxLabels: Int) -> [Placement] {
+                      maxLabels: Int, reserved: [CGRect] = []) -> [Placement] {
         var result = [Placement](repeating: Placement(disc: false, label: false), count: candidates.count)
         let order: [Int] = candidates.indices.sorted { i, j in
             let a = candidates[i]
@@ -1034,8 +1035,8 @@ enum Terrain3DDeclutter {
             return i < j
         }
         let screen = CGRect(origin: .zero, size: viewSize).insetBy(dx: -markerSize, dy: -markerSize)
-        var taken: [CGRect] = []
-        taken.reserveCapacity(candidates.count * 2)
+        var taken: [CGRect] = reserved
+        taken.reserveCapacity(reserved.count + candidates.count * 2)
         var labels = 0
         for i in order {
             let c = candidates[i]

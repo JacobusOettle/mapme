@@ -499,8 +499,8 @@ too thin):
 * **On top**: POIs (the map's, other maps', waypoints, notes) as billboards (`SCNBillboardConstraint`,
   `OverlayArt.marker` images, labels beyond 600 m hidden), fading with distance, decluttered on
   screen every frame as the 2D map places its POIs (`Terrain3DDeclutter`: most important, then
-  already shown, then nearest first; a disc or label that would cover a placed one is hidden;
-  at most 14 labels); the block's sides shaded in linear light (vertex colours); the recorded
+  already shown, then nearest first; a disc or label that would cover a placed one, or you, is
+  hidden; at most 14 labels); the block's sides shaded in linear light (vertex colours); the recorded
   track (pink) and routes (their colours) as ribbons 2.5 m above the terrain sampled along the
   line every grid cell, unlit, depth-biased; you as a red sphere on a pole with a heading cone.
 * **Camera**: `allowsCameraControl` with `.orbitTurntable`, inertia; starts looking north at 45°
