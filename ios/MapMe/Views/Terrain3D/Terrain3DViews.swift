@@ -45,7 +45,8 @@ struct Terrain3DButton: View {
 
 /// The map draped on the terrain in 3D, with the surrounding area (the continuation margin),
 /// POIs, waypoints, notes, routes, the track and you. Turn, tilt, move and zoom it; the compass
-/// faces it north, Reset goes back to the start, the height menu sets the exaggeration.
+/// faces it north, Reset goes back to the start, the height menu sets the exaggeration, the
+/// appearance button switches dark and paper (the map screen's setting).
 @MainActor
 struct Terrain3DScreen: View {
     let mapID: UUID
@@ -61,6 +62,7 @@ struct Terrain3DScreen: View {
             Theme.background.ignoresSafeArea()
             Terrain3DLiveScene(session: session, controller: controller, mapName: map?.name ?? "Map")
                 .ignoresSafeArea()
+            statusBarShade
             chrome(map: map)
         }
         .accessibilityElement(children: .contain)
@@ -73,6 +75,7 @@ struct Terrain3DScreen: View {
         .onChange(of: model.settings.showOtherMapsPOIs) { _, _ in refreshItems() }
         .onChange(of: model.library.maps) { _, _ in refreshItems() }
         .sensoryFeedback(.selection, trigger: model.settings.terrainExaggeration)
+        .sensoryFeedback(.selection, trigger: model.settings.mapAppearance)
         .sensoryFeedback(.selection, trigger: resets)
         .sensoryFeedback(.success, trigger: session.builds)
     }
@@ -84,6 +87,28 @@ struct Terrain3DScreen: View {
 
     private func refreshItems() {
         session.refreshItems(mapID: mapID, app: model)
+    }
+
+    /// The look on screen: the block's, or the one asked for before there is a block.
+    private var shownAppearance: MapAppearance {
+        session.model?.appearance ?? model.settings.mapAppearance
+    }
+
+    /// Paper's pale sky under the status bar: a short shade keeps its light time and battery
+    /// legible (the app's status bar is light). None in dark.
+    private var statusBarShade: some View {
+        LinearGradient(stops: [
+            Gradient.Stop(color: Color.black.opacity(0.45), location: 0),
+            Gradient.Stop(color: Color.black.opacity(0.3), location: 0.5),
+            Gradient.Stop(color: Color.black.opacity(0), location: 1),
+        ], startPoint: .top, endPoint: .bottom)
+        .frame(height: 96)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .ignoresSafeArea(edges: .top)
+        .opacity(shownAppearance == .paper ? 1 : 0)
+        .animation(.easeInOut(duration: 0.45), value: shownAppearance)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     // MARK: - Chrome
@@ -117,6 +142,7 @@ struct Terrain3DScreen: View {
             status
                 .padding(.horizontal, 12)
                 .padding(.bottom, 12)
+                .animation(.easeInOut(duration: 0.25), value: session.phase)
         }
     }
 
@@ -138,7 +164,8 @@ struct Terrain3DScreen: View {
         .accessibilityIdentifier("terrain3DTitle")
     }
 
-    /// Reset and the height menu, one glass group (as the map's layers and tracking).
+    /// Reset, the height menu and the appearance, one glass group (as the map's layers and
+    /// tracking).
     private var controlStack: some View {
         @Bindable var settings = model.settings
         return VStack(spacing: 0) {
@@ -178,6 +205,25 @@ struct Terrain3DScreen: View {
             }
             .accessibilityLabel("Height, \(Self.exaggerationTitle(settings.terrainExaggeration))")
             .accessibilityIdentifier("terrain3DExaggeration")
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.16))
+                .frame(width: 28, height: 0.5)
+
+            // Dark or paper, as Layers → Map Appearance on the map: one setting for both.
+            Button {
+                settings.mapAppearance = settings.mapAppearance == .dark ? .paper : .dark
+            } label: {
+                Image(systemName: settings.mapAppearance.symbolName)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PressScaleButtonStyle())
+            .accessibilityLabel("Map appearance, \(settings.mapAppearance.label)")
+            .accessibilityHint("Switches between the dark and the paper map")
+            .accessibilityIdentifier("terrain3DAppearance")
         }
         .frame(width: 44)
         .floatingChrome(RoundedRectangle(cornerRadius: 22, style: .continuous))
@@ -194,12 +240,23 @@ struct Terrain3DScreen: View {
 
     // MARK: - Status
 
+    /// Building the other appearance of the block on screen: it stays, with a small capsule.
+    private var restyling: Bool {
+        guard session.phase == .building, let shown = session.model, shown.mapID == mapID else { return false }
+        return shown.appearance != model.settings.mapAppearance
+    }
+
     @ViewBuilder
     private var status: some View {
         switch session.phase {
         case .building:
-            Terrain3DLoadingCard(progress: session.progress)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+            if restyling {
+                Terrain3DRestyleCapsule(appearance: model.settings.mapAppearance, progress: session.progress)
+                    .transition(.opacity)
+            } else {
+                Terrain3DLoadingCard(progress: session.progress)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         case .failed(let message):
             Terrain3DNoticeCard(symbol: "exclamationmark.triangle.fill", title: message, detail: nil,
                                 onRetry: { session.retry(app: model) })
@@ -282,6 +339,7 @@ private struct Terrain3DLiveScene: View {
                 track: settings.showTrack ? model.tracks.current.points : [],
                 items: session.items,
                 itemsRevision: session.itemsRevision,
+                appearance: settings.mapAppearance,
                 // 60 fps and 4× MSAA; the battery saver's 30 fps without (docs/design/explorer.md).
                 maxFrameRate: min(60, Int(battery.maxFrameRate.rounded())),
                 antialiasing: !battery.isActive
@@ -383,6 +441,39 @@ private struct Terrain3DLoadingCard: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(progress.step.label) \(Int((fraction * 100).rounded())) percent")
         .accessibilityIdentifier("terrain3DLoading")
+    }
+}
+
+/// Switching appearance: the block stays on screen while its other look is drawn.
+private struct Terrain3DRestyleCapsule: View {
+    let appearance: MapAppearance
+    let progress: Terrain3DProgress
+
+    var body: some View {
+        let fraction = min(max(progress.fraction, 0.03), 1)
+        let title = "Drawing the \(appearance.label.lowercased()) map…"
+        HStack(spacing: 10) {
+            ZStack {
+                Circle()
+                    .stroke(Color.primary.opacity(0.15), lineWidth: 3)
+                Circle()
+                    .trim(from: 0, to: CGFloat(fraction))
+                    .stroke(Theme.accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.easeOut(duration: 0.3), value: fraction)
+            }
+            .frame(width: 18, height: 18)
+            Text(title)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 14)
+        .frame(minHeight: 36)
+        .floatingChrome(Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title) \(Int((fraction * 100).rounded())) percent")
+        .accessibilityIdentifier("terrain3DRestyling")
     }
 }
 

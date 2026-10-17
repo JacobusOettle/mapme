@@ -491,11 +491,31 @@ too thin):
   h_min − 50 m on the four sides so the block reads as a diorama; NaN heights filled from
   neighbours.
 * **Texture**: one image in the map's pixel space covering the enlarged rectangle (≤ 4096 px on
-  the long side): `mm_terrain_render` (space `map`, the appearance's style, hillshade) for all of
-  it, then the sheet's own raster (the stitched pyramid level ≤ 4096 px, dark or paper as set)
-  drawn into the sheet's rectangle. Per-vertex UVs = the vertex's map pixel (georeference inverse
-  with the warp, `Georeference.Projector`) ÷ the enlarged size. The map is therefore draped
-  exactly, warp included, and continues into DEM contours outside it.
+  the long side): `mm_terrain_render` (space `map`, the appearance's style on the look's ground,
+  its hillshade, `line_scale` 2: minor contours 1.4 texels wide, index 2.2; the interval the
+  automatic one at 1.5 texels per point, so the wider lines do not double it) for all of it, then
+  the sheet's own raster (the stitched pyramid level ≤ 4096 px, dark or paper as set) drawn into
+  the sheet's rectangle. Per-vertex UVs = the vertex's map pixel (georeference inverse with the
+  warp, `Georeference.Projector`) ÷ the enlarged size. The map is therefore draped exactly, warp
+  included, and continues into DEM contours outside it.
+* **Look** (`Terrain3DLook`, per Map Appearance; the scene takes the look of the model it shows,
+  so sky, light, labels and texture change together). SceneKit lights in linear light: level
+  ground gets ambient + key · sin(elevation); the key light comes from the north-west like the
+  core's hillshade, lower than its 45° for slope contrast.
+
+  | | Dark | Paper |
+  |---|---|---|
+  | Ground beyond the sheet | slate #2A303C (the 2D map's near-black hides the relief once lit) | the core's paper |
+  | Hillshade (core) | 0.55 | 0.45 |
+  | Ambient + key light, elevation | 0.38 + 1.1, 35° (level 1.01×, shade 0.38×) | 0.4 + 0.8, 35° (level 0.86×: sunny slopes don't burn out) |
+  | Sky: zenith → horizon → below it | deep blue → blue-grey glow → near-black | soft blue → pale blue → blue-grey haze |
+  | Fog | the horizon's colour | the horizon's colour |
+  | Sheet | dark style, white screened at 12 % (lit near-black shows no slopes) | as printed |
+  | Labels | white on a dark halo | dark ink on a white halo (as the 2D paper map) |
+
+  The block's far edge stands against the glow (or the haze) at a low tilt and against the
+  darker band below the horizon when looking down. The chrome stays the app's dark glass; in
+  paper a short dark shade under the status bar keeps its light text legible on the pale sky.
 * **On top**: POIs (the map's, other maps', waypoints, notes) as billboards (`SCNBillboardConstraint`,
   `OverlayArt.marker` images, labels beyond 600 m hidden), fading with distance, decluttered on
   screen every frame as the 2D map places its POIs (`Terrain3DDeclutter`: most important, then
@@ -503,11 +523,20 @@ too thin):
   hidden; at most 14 labels); the block's sides shaded in linear light (vertex colours); the recorded
   track (pink) and routes (their colours) as ribbons 2.5 m above the terrain sampled along the
   line every grid cell, unlit, depth-biased; you as a red sphere on a pole with a heading cone.
-* **Camera**: `allowsCameraControl` with `.orbitTurntable`, inertia; starts looking north at 45°
-  over the sheet (over you when you are on it); Reset (`scope`), a compass that turns with the
-  camera (tap: face north), Close. Building takes ~1 s off the main thread with a progress ring;
+* **Camera**: our own orbit gestures with inertia (SceneKit's `allowsCameraControl` changes the
+  field of view and can fly under the terrain); starts looking north at 45° over the sheet (over
+  you when you are on it); Reset (`scope`), a compass that turns with the camera (tap: face
+  north), Close. Building takes ~1 s off the main thread with a progress ring;
   missing terrain → "Terrain for this area isn't on your iPhone yet" + Retry (offline) and the
   flat map in 3D.
+* **Appearance control**: under Reset and the height menu, a button with the current appearance's
+  symbol (`moon.fill` Dark, `map` Paper; "Map appearance, Dark", `terrain3DAppearance`, selection
+  haptic) switches `settings.mapAppearance`, the map screen's Layers → Map Appearance, so 2D
+  and 3D follow each other. The block is rebuilt in the other look while the old one stays on
+  screen with a small "Drawing the paper map…" capsule (no progress card); the new one fades in
+  over it (0.45 s) with the camera and the exaggeration kept (same map and frame; Retry too).
+  Switching there and back before the build ends rebuilds nothing. The scene's accessibility
+  value says which look it shows.
 
 ### 7.7 Offline regions and trailhead caching (offline)
 
@@ -681,9 +710,9 @@ terrain (`uiOffMapLocation`), 23 auto-switch toast; 30 route planning bar, 31 ro
 profile, 32 following with the daylight banner, 33 off route, 34 GPX import summary, 35 track
 profile; 40 note editor, 41 notes on the map, 42 photo note card; 45 battery saver settings and
 badge; 50 offline terrain settings, 51 region picker with estimate, 52 downloading; 60 3D view,
-61 3D with a route; 70 the map screen with every feature at once, 71 the same with a dropped
-pin's card (`ExplorerIntegrationUITests`: no control overlaps another or the bottom panel). CI
-publishes the JPEGs next to the PNGs on the `ci-screenshots` branch.
+60d the same view in paper, 61 3D with a route; 70 the map screen with every feature at once, 71
+the same with a dropped pin's card (`ExplorerIntegrationUITests`: no control overlaps another or
+the bottom panel). CI publishes the JPEGs next to the PNGs on the `ci-screenshots` branch.
 
 Unit tests (`MapMeTests/<Feature>Tests.swift`): GPX parse/export round trips (Gaia- and
 AllTrails-style files inline), sun times against NOAA reference values (Pretoria, Tromsø in

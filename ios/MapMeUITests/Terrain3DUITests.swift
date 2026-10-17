@@ -3,7 +3,8 @@ import XCTest
 /// The 3D view of the sample map (docs/design/explorer.md, 3D view; screenshots 60 and 61): the
 /// side column's 3D button opens it, the terrain loads (from the network on CI, or the flat map
 /// with its notice when terrain cannot be had), the camera turns and tilts, the compass faces it
-/// north, the height menu changes the exaggeration, Close returns to the map.
+/// north, the height menu changes the exaggeration, the appearance button switches to paper and
+/// back keeping the view, Close returns to the map.
 final class Terrain3DUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = true
@@ -12,7 +13,8 @@ final class Terrain3DUITests: XCTestCase {
     @MainActor
     func test3DViewOfTheSampleMap() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-importSample", "-mockHeading", "35"] + Self.uiSampleLocation
+        // Dark for this run only: the switch to paper below is not saved, later tests start dark.
+        app.launchArguments = ["-importSample", "-mockHeading", "35", "-mapAppearance", "dark"] + Self.uiSampleLocation
         uiAllowSystemAlerts()
         app.launch()
         guard uiOpenSampleMap(app) != nil else { return }
@@ -66,6 +68,27 @@ final class Terrain3DUITests: XCTestCase {
             XCTFail("The height menu is missing")
         }
 
+        // Paper (the map's Layers → Map Appearance, one setting): rebuilt with the old block on
+        // screen, the camera and the height kept; then dark again.
+        let appearance = app.buttons["terrain3DAppearance"]
+        if appearance.waitForExistence(timeout: 5) {
+            let view = compass.label
+            appearance.tap()
+            XCTAssertTrue(waitFor(appearance, labelContaining: "Paper"), "The appearance button should say Paper")
+            XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "terrain3DLoading").firstMatch.exists,
+                           "Switching the appearance should keep the 3D view on screen")
+            if waitUntilBuilt(app, showing: "Paper") {
+                Thread.sleep(forTimeInterval: 1.5)
+                uiAttachScreenshot(app, "60d-3d-paper")
+                XCTAssertEqual(compass.label, view, "Switching the appearance should keep the view")
+            }
+            appearance.tap()
+            XCTAssertTrue(waitFor(appearance, labelContaining: "Dark"), "The appearance button should say Dark")
+            _ = waitUntilBuilt(app, showing: "Dark")
+        } else {
+            XCTFail("The appearance button is missing")
+        }
+
         // The compass faces north again; Reset and Close.
         compass.tap()
         app.buttons["terrain3DReset"].tap()
@@ -101,12 +124,29 @@ final class Terrain3DUITests: XCTestCase {
     }
 
     /// Waits for the build: the info capsule (terrain range and height) shows when it is done.
+    /// With `appearance` ("Dark", "Paper"), first for the scene to show it: a switch rebuilds the
+    /// block while the old one stays on screen.
     @MainActor
-    private func waitUntilBuilt(_ app: XCUIApplication) -> Bool {
+    private func waitUntilBuilt(_ app: XCUIApplication, showing appearance: String? = nil) -> Bool {
+        if let appearance {
+            let scene = app.descendants(matching: .any).matching(identifier: "terrain3DScene").firstMatch
+            let shown = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", appearance), object: scene)
+            guard XCTWaiter().wait(for: [shown], timeout: 150) == .completed else {
+                uiAttachScreenshot(app, "60-3d-not-switched")
+                XCTFail("The 3D view did not switch to \(appearance) within 150 s")
+                return false
+            }
+        }
         let info = app.descendants(matching: .any).matching(identifier: "terrain3DInfo").firstMatch
         if info.waitForExistence(timeout: 150) { return true }
         uiAttachScreenshot(app, "60-3d-not-built")
         XCTFail("The 3D view was not built within 150 s")
         return false
+    }
+
+    @MainActor
+    private func waitFor(_ element: XCUIElement, labelContaining text: String, timeout: TimeInterval = 5) -> Bool {
+        let said = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", text), object: element)
+        return XCTWaiter().wait(for: [said], timeout: timeout) == .completed
     }
 }

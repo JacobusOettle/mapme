@@ -465,6 +465,22 @@ final class Terrain3DTests: XCTestCase {
         XCTAssertEqual(Terrain3DTextureRule.sheetLongSide(sheetTexels: 4000), Terrain3DLimits.maxSheetRasterSide)
     }
 
+    /// The wider contour lines leave the interval as it was: the core's automatic one at a texel
+    /// and a half per point (at `lineScale` these maps' would double).
+    func testWiderLinesKeepTheContourInterval() {
+        // Grootkloof's texels at 4096.
+        let grootkloof: Double = Terrain3DTextureRule.contourInterval(texelGroundM: 4.616)
+        XCTAssertEqual(grootkloof, 50)
+        let fine: Double = Terrain3DTextureRule.contourInterval(texelGroundM: 3.5)
+        XCTAssertEqual(fine, 25)
+        let fineAtLineScale: Double = ContourInterval.automatic(metersPerPoint: 3.5 * Terrain3DTextureRule.lineScale)
+        XCTAssertGreaterThan(fineAtLineScale, fine)
+        let coarse: Double = Terrain3DTextureRule.contourInterval(texelGroundM: 7)
+        XCTAssertEqual(coarse, 50)
+        let coarseAtLineScale: Double = ContourInterval.automatic(metersPerPoint: 7 * Terrain3DTextureRule.lineScale)
+        XCTAssertGreaterThan(coarseAtLineScale, coarse)
+    }
+
     // MARK: - Camera
 
     func testOrbitCameraLooksAlongItsHeadingFromAbove() {
@@ -597,6 +613,132 @@ final class Terrain3DTests: XCTestCase {
         XCTAssertEqual(c.y, 0, accuracy: 1e-6)
         XCTAssertEqual(c.z, 1, accuracy: 1e-6)
         XCTAssertEqual(c.w, 0.7, accuracy: 1e-6)
+    }
+
+    // MARK: - Look
+
+    /// Rec. 709 weights on the sRGB components: enough to rank light against dark.
+    static func luma(_ c: Terrain3DLook.RGB) -> Double {
+        let r: Double = 0.2126 * c.r
+        let g: Double = 0.7152 * c.g
+        let b: Double = 0.0722 * c.b
+        return r + g + b
+    }
+
+    func testLookFollowsTheAppearance() {
+        XCTAssertEqual(Terrain3DLook.of(.dark), Terrain3DLook.dark)
+        XCTAssertEqual(Terrain3DLook.of(.paper), Terrain3DLook.paper)
+        XCTAssertEqual(Terrain3DLook.dark.appearance, .dark)
+        XCTAssertEqual(Terrain3DLook.paper.appearance, .paper)
+        XCTAssertNotEqual(Terrain3DLook.dark, Terrain3DLook.paper)
+    }
+
+    /// Dark stays dark, but the ground beyond the sheet is lifted off the 2D map's near-black to a
+    /// slate blue the relief's light and shade show on, with a stronger hillshade.
+    func testDarkGroundShowsTheRelief() {
+        let dark: Terrain3DLook = .dark
+        XCTAssertEqual(dark.ground.bytes, [42, 48, 60, 255])
+        let ground: Double = Self.luma(dark.ground)
+        XCTAssertGreaterThan(ground, 0.15)
+        XCTAssertLessThan(ground, 0.25)
+        XCTAssertGreaterThan(dark.ground.b, dark.ground.r)
+        XCTAssertGreaterThan(dark.hillshade, 0.25)
+        // The dark sheet lifted enough for the light to shade it, its near-black paper still dark.
+        XCTAssertGreaterThanOrEqual(dark.sheetLift, 0.1)
+        XCTAssertLessThanOrEqual(dark.sheetLift, 0.15)
+        let liftedPaper: Double = 0.105 + (1 - 0.105) * dark.sheetLift
+        XCTAssertLessThan(liftedPaper, 0.25)
+        // Paper: the core's paper (`Theme.uiOffMapPaper`), the sheet as printed.
+        let paper: Terrain3DLook = .paper
+        XCTAssertEqual(paper.ground, Terrain3DLook.RGB(r: 0.91, g: 0.90, b: 0.87))
+        XCTAssertEqual(paper.sheetLift, 0)
+        XCTAssertEqual(Terrain3DLook.RGB(r: -0.2, g: 0.5, b: 1.4).bytes, [0, 128, 255, 255])
+    }
+
+    func testKeyLightComesFromTheHillshadesSide() {
+        // 45° up: the old fixed sun.
+        let high: SIMD3<Float> = Terrain3DLook.keyDirection(elevationDegrees: 45)
+        XCTAssertEqual(high.x, 0.5, accuracy: 1e-4)
+        XCTAssertEqual(high.y, -0.70711, accuracy: 1e-4)
+        XCTAssertEqual(high.z, 0.5, accuracy: 1e-4)
+        // Lower: towards the south-east (x east, z south) and down, a unit vector.
+        let low: SIMD3<Float> = Terrain3DLook.keyDirection(elevationDegrees: 35)
+        let length: Float = (low.x * low.x + low.y * low.y + low.z * low.z).squareRoot()
+        XCTAssertEqual(length, 1, accuracy: 1e-5)
+        XCTAssertEqual(low.x, low.z, accuracy: 1e-6)
+        XCTAssertGreaterThan(low.x, 0.5)
+        XCTAssertEqual(low.y, -0.57358, accuracy: 1e-4)
+    }
+
+    /// Level ground lit about as drawn; slopes turned away from the light much darker than those
+    /// facing it (the old 520 ambient + 680 at 45° gave 2.3 : 1); paper's sunny slopes not burnt.
+    func testLightGivesTheReliefContrast() {
+        let looks: [Terrain3DLook] = [.dark, .paper]
+        for look in looks {
+            let level: Double = look.levelLight
+            XCTAssertGreaterThan(level, 0.85, "\(look.appearance)")
+            XCTAssertLessThan(level, 1.05, "\(look.appearance)")
+            let contrast: Double = (look.ambient + look.key) / look.ambient
+            XCTAssertGreaterThan(contrast, 2.8, "\(look.appearance)")
+            XCTAssertLessThan(look.keyElevationDegrees, 45, "\(look.appearance)")
+        }
+        let paper: Terrain3DLook = .paper
+        XCTAssertLessThanOrEqual(paper.ambient + paper.key, 1.25)
+        XCTAssertEqual(Terrain3DLook.dark.levelLight, 1.011, accuracy: 0.001)
+    }
+
+    /// The sky's stops run from the zenith down; the horizon is lighter than what lies below it
+    /// (the block's far edge stands out against that), and the haze is the horizon's colour.
+    func testSkyOutlinesTheBlock() throws {
+        let looks: [Terrain3DLook] = [.dark, .paper]
+        for look in looks {
+            let locations: [Double] = look.sky.map { (stop: Terrain3DLook.SkyStop) -> Double in stop.location }
+            XCTAssertEqual(locations, locations.sorted())
+            XCTAssertEqual(locations.first, 0)
+            let horizon = try XCTUnwrap(look.sky.first { (stop: Terrain3DLook.SkyStop) -> Bool in stop.location == 0.5 })
+            let below = try XCTUnwrap(look.sky.last)
+            XCTAssertEqual(look.fog, horizon.color)
+            XCTAssertGreaterThan(Self.luma(horizon.color), Self.luma(below.color) + 0.1, "\(look.appearance)")
+        }
+        // Night above the dark block, a blue daylight sky above paper.
+        let night: Terrain3DLook.RGB = Terrain3DLook.dark.sky[0].color
+        let day: Terrain3DLook.RGB = Terrain3DLook.paper.sky[0].color
+        XCTAssertLessThan(Self.luma(night), 0.1)
+        XCTAssertGreaterThan(Self.luma(day), 0.4)
+        XCTAssertGreaterThan(day.b, day.r)
+    }
+
+    /// Labels as on the 2D map: white on a dark halo, dark ink on a white halo on paper.
+    func testLabelInkStandsOffItsHalo() {
+        let dark: Terrain3DLook = .dark
+        let paper: Terrain3DLook = .paper
+        XCTAssertGreaterThan(Self.luma(dark.labelInk), 0.9)
+        XCTAssertLessThan(Self.luma(dark.labelHalo), 0.1)
+        XCTAssertLessThan(Self.luma(paper.labelInk), 0.2)
+        XCTAssertGreaterThan(Self.luma(paper.labelHalo), 0.9)
+        XCTAssertGreaterThan(paper.labelHaloAlpha, 0.8)
+        // The block's sides darken downwards.
+        let looks: [Terrain3DLook] = [dark, paper]
+        for look in looks {
+            XCTAssertGreaterThan(Self.luma(look.sideTop), Self.luma(look.sideBottom))
+        }
+    }
+
+    /// Another appearance (or Retry) builds the same block: the camera stays over the same place.
+    func testAnotherLookOfTheSameBlockKeepsItsFrame() throws {
+        let g = Self.georef()
+        let w: Int = Self.sheetWidth
+        let h: Int = Self.sheetHeight
+        let a = try XCTUnwrap(Terrain3DArea(georef: g, sheetWidth: w, sheetHeight: h, margin: 2480))
+        let b = try XCTUnwrap(Terrain3DArea(georef: g, sheetWidth: w, sheetHeight: h, margin: 2480))
+        XCTAssertTrue(a.hasSameFrame(as: b))
+        let wider = try XCTUnwrap(Terrain3DArea(georef: g, sheetWidth: w, sheetHeight: h, margin: 3000))
+        XCTAssertFalse(a.hasSameFrame(as: wider))
+        let cropped = try XCTUnwrap(Terrain3DArea(georef: g, sheetWidth: w - 400, sheetHeight: h, margin: 2480))
+        XCTAssertFalse(a.hasSameFrame(as: cropped))
+        // Contour lines in the texture: minor 0.7 pt, at least 1.4 texels wide.
+        let minorTexels: Double = 0.7 * Terrain3DTextureRule.lineScale
+        XCTAssertGreaterThanOrEqual(minorTexels, 1.4)
     }
 
     // MARK: - Geo items

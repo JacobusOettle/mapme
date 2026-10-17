@@ -77,6 +77,8 @@ struct Terrain3DModel: @unchecked Sendable {
     let maxElevationM: Double?
     let dark: Bool
 
+    var appearance: MapAppearance { dark ? .dark : .paper }
+
     /// The block's size on the ground, metres (its longer side).
     var extentM: Double {
         var minX = Double.infinity
@@ -104,16 +106,15 @@ enum Terrain3DBuilder {
         var pyramidLevels: Int
         /// Map pixels around the sheet (the continuation margin).
         var margin: Double
-        var dark: Bool
+        /// The appearance's ground, hillshade and sheet (`Terrain3DLook`).
+        var look: Terrain3DLook
         /// Finest terrain zoom (the battery saver's 12, else 13).
         var maxZoom: Int
         /// The texture's long side (by device memory).
         var textureSide: Int
-    }
 
-    /// Off-map paper behind the contours (the core's styles, `Theme.uiOffMap*`), used where the
-    /// render cannot draw.
-    static func offMapPaper(dark: Bool) -> UIColor { dark ? Theme.uiOffMapNightPaper : Theme.uiOffMapPaper }
+        var dark: Bool { look.appearance == .dark }
+    }
 
     /// Builds the model; nil when the georeference does not place the block or memory for the
     /// texture cannot be had. Progress is reported on the main actor. Cancellable.
@@ -146,8 +147,9 @@ enum Terrain3DBuilder {
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
               let data = ctx.data
         else { return nil }
-        // Every pixel gets the off-map paper first: what stays where the render cannot draw.
-        ctx.setFillColor(offMapPaper(dark: request.dark).cgColor)
+        // Every pixel gets the look's ground first: what stays where the render cannot draw.
+        let ground = request.look.ground.uiColor().cgColor
+        ctx.setFillColor(ground)
         ctx.fill(CGRect(x: 0, y: 0, width: texSize.width, height: texSize.height))
 
         let texelGround = area.metersPerPixel * area.enlargedWidth / Double(texSize.width)
@@ -158,8 +160,9 @@ enum Terrain3DBuilder {
             renderZoom -= 1
         }
         let lineScale = Terrain3DTextureRule.lineScale
+        let interval = Terrain3DTextureRule.contourInterval(texelGroundM: texelGround)
         // In horizontal strips: each asks only for its own tiles, and the core draws a rectangle
-        // whole or in parts with the same pixels (one interval for all: `scale_m_per_pt`).
+        // whole or in parts with the same pixels (one interval and `scale_m_per_pt` for all).
         let strips = max(1, min(16, texSize.height / 512))
         var renderInfo: ContourRenderInfo?
         for s in 0..<strips {
@@ -171,9 +174,9 @@ enum Terrain3DBuilder {
             let renderRequest = ContourRenderRequest(
                 space: .map, rect: [-area.margin, top, area.sheetWidth + area.margin, bottom],
                 pixelToMercator: request.georef.pixelToMercator.m, warp: request.georef.warp,
-                style: request.dark ? .dark : .paper, intervalM: nil, scaleMPerPt: texelGround * lineScale,
-                indexEvery: 5, hillshade: request.dark ? 0.25 : 0.35, lineScale: lineScale, background: nil,
-                maxZoom: renderZoom)
+                style: request.dark ? .dark : .paper, intervalM: interval, scaleMPerPt: texelGround * lineScale,
+                indexEvery: 5, hillshade: request.look.hillshade, lineScale: lineScale,
+                background: request.look.ground.bytes, maxZoom: renderZoom)
             let buffer = UnsafeMutableRawBufferPointer(start: data + y0 * bytesPerRow, count: (y1 - y0) * bytesPerRow)
             let width = texSize.width
             let height = y1 - y0
@@ -185,9 +188,9 @@ enum Terrain3DBuilder {
                 missing: { info in info.missingFraction })
             if renderInfo == nil { renderInfo = answer?.value }
             if answer?.value == nil {
-                // Failed (no store, an error): the strip keeps the paper.
+                // Failed (no store, an error): the strip keeps the ground.
                 let flipped = CGRect(x: 0, y: texSize.height - y1, width: width, height: height)
-                ctx.setFillColor(offMapPaper(dark: request.dark).cgColor)
+                ctx.setFillColor(ground)
                 ctx.fill(flipped)
             }
             await progress(Terrain3DProgress(fraction: upper, step: .contours, tiles: tiles))
@@ -205,6 +208,13 @@ enum Terrain3DBuilder {
             ctx.saveGState()
             ctx.interpolationQuality = .high
             ctx.draw(sheet, in: drawn)
+            if request.look.sheetLift > 0 {
+                // Screened white: the dark paper a touch lighter, its light ink as it was.
+                ctx.setBlendMode(.screen)
+                ctx.setFillColor(UIColor(white: 1, alpha: CGFloat(request.look.sheetLift)).cgColor)
+                ctx.fill(drawn)
+                ctx.setBlendMode(.normal)
+            }
             ctx.setStrokeColor((request.dark ? Theme.uiSheetEdge : Theme.uiSheetEdgePaper).cgColor)
             ctx.setLineWidth(1.5)
             ctx.stroke(drawn)
@@ -434,13 +444,24 @@ final class Terrain3DSession {
     private(set) var attempt = 0
     /// Bumped by each finished build (a haptic).
     private(set) var builds = 0
+    /// The attempt `model` was built for.
+    private var modelAttempt = -1
 
     init() {}
 
-    /// Builds the block for map `mapID` (cancelled with the calling task).
+    /// Builds the block for map `mapID` in the appearance set (cancelled with the calling task).
+    /// The model on screen stays until the new one is ready.
     func build(mapID: UUID, app: AppModel) async {
         guard let map = app.library.map(id: mapID), let georef = map.georef else {
             phase = .failed("Locate this map to see it in 3D")
+            return
+        }
+        let appearance = app.settings.mapAppearance
+        let forAttempt = attempt
+        // Switched to the other appearance and back before it was built: the block on screen is
+        // already this one.
+        if let model, model.mapID == mapID, model.appearance == appearance, modelAttempt == forAttempt {
+            phase = .ready
             return
         }
         phase = .building
@@ -451,7 +472,7 @@ final class Terrain3DSession {
             : Terrain3DMargin.marginPixels(georef: georef, width: map.pixelWidth, height: map.pixelHeight)
         let request = Terrain3DBuilder.Request(
             mapID: map.id, georef: georef, sheetWidth: map.pixelWidth, sheetHeight: map.pixelHeight,
-            pyramidLevels: map.levels, margin: margin, dark: app.settings.mapAppearance == .dark,
+            pyramidLevels: map.levels, margin: margin, look: Terrain3DLook.of(appearance),
             maxZoom: min(13, app.battery.maxTerrainZoom),
             textureSide: Terrain3DLimits.textureSide(physicalMemory: ProcessInfo.processInfo.physicalMemory))
         let tileStore = TileStore(map: map, library: app.library)
@@ -473,6 +494,7 @@ final class Terrain3DSession {
             return
         }
         model = built
+        modelAttempt = forAttempt
         refreshItems(mapID: mapID, app: app)
         phase = .ready
         builds += 1

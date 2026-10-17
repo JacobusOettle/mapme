@@ -326,6 +326,13 @@ struct Terrain3DArea: Sendable {
     var metersPerPixel: Double {
         sheetWidth > 0 ? sheetGroundSize.x / sheetWidth : 0
     }
+
+    /// The same block on the same ground (the same sheet, margin, nodes and local frame): a camera
+    /// over one stands over the same place on the other (another appearance, Retry).
+    func hasSameFrame(as other: Terrain3DArea) -> Bool {
+        sheetWidth == other.sheetWidth && sheetHeight == other.sheetHeight && margin == other.margin
+            && cols == other.cols && rows == other.rows && origin == other.origin && groundScale == other.groundScale
+    }
 }
 
 // MARK: - Texture
@@ -362,9 +369,16 @@ enum Terrain3DTextureRule {
         return min(max(wanted, 512), Terrain3DLimits.maxSheetRasterSide)
     }
 
-    /// Contour line widths: buffer pixels per point (lines a texel and a half wide stay visible
-    /// when the texture is reduced and crisp when it is enlarged).
-    static let lineScale = 1.5
+    /// Contour line widths: buffer pixels per point (minor lines 1.4 texels wide, index lines 2.2:
+    /// they stay visible when the texture is reduced and lit, and crisp when it is enlarged).
+    static let lineScale = 2.0
+
+    /// The contour interval for texels of `texelGroundM` ground metres: the core's automatic one
+    /// at a texel and a half per point, as before the lines widened (at `lineScale` it would
+    /// double on some maps).
+    static func contourInterval(texelGroundM: Double) -> Double {
+        ContourInterval.automatic(metersPerPoint: texelGroundM * 1.5)
+    }
 }
 
 // MARK: - Heights

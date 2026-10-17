@@ -48,6 +48,8 @@ struct Terrain3DSceneInputs {
     var track: [TrackPoint]
     var items: Terrain3DItems
     var itemsRevision: Int
+    /// The appearance asked for: the sky's until a model shows (then the model's own).
+    var appearance: MapAppearance
     var maxFrameRate: Int
     /// 4× MSAA (off with the battery saver).
     var antialiasing: Bool
@@ -100,8 +102,13 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
     private let markersNode = SCNNode()
     private let youNode = SCNNode()
     private let youHeading = SCNNode()
+    private let ambientLight = SCNLight()
+    private let keyLight = SCNLight()
+    private let keyLightNode = SCNNode()
 
     private var model: Terrain3DModel?
+    /// The sky, light and labels on screen: the model's appearance (`Terrain3DLook`).
+    private var look: Terrain3DLook?
     private var orbit = Terrain3DOrbit(target: SIMD3(0, 0, 0), yaw: 0, pitch: Terrain3DOrbit.defaultPitch, distance: 10_000)
     private var exaggeration = Terrain3DLimits.defaultExaggeration
     private var maxDistance = 100_000.0
@@ -210,8 +217,6 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
     // MARK: - Scene
 
     private func setUpScene() {
-        scene.background.contents = Self.skyImage()
-        scene.fogColor = Self.horizon
         scene.fogDensityExponent = 1
         camera.fieldOfView = CGFloat(Self.fovDegrees)
         // Set from the orbit (`applyOrbit`): near and far planes in proportion to the distance keep
@@ -221,23 +226,18 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
         scene.rootNode.addChildNode(cameraNode)
         scnView.pointOfView = cameraNode
 
-        // Soft light from everywhere plus the hillshade's sun (north-west, 45° up): the sheet,
-        // which has no hillshade of its own, reads as relief.
-        let ambient = SCNLight()
-        ambient.type = .ambient
-        ambient.intensity = 520
-        ambient.color = UIColor.white
+        // Soft light from everywhere plus a key light from the hillshade's side (north-west, low):
+        // the sheet, which has no hillshade of its own, reads as relief. Strengths by the look.
+        ambientLight.type = .ambient
+        ambientLight.color = UIColor.white
         let ambientNode = SCNNode()
-        ambientNode.light = ambient
+        ambientNode.light = ambientLight
         scene.rootNode.addChildNode(ambientNode)
-        let sun = SCNLight()
-        sun.type = .directional
-        sun.intensity = 680
-        sun.color = UIColor.white
-        let sunNode = SCNNode()
-        sunNode.light = sun
-        sunNode.simdLook(at: SIMD3<Float>(0.5, -0.7071, 0.5), up: SIMD3<Float>(0, 1, 0), localFront: SIMD3<Float>(0, 0, -1))
-        scene.rootNode.addChildNode(sunNode)
+        keyLight.type = .directional
+        keyLight.color = UIColor.white
+        keyLightNode.light = keyLight
+        scene.rootNode.addChildNode(keyLightNode)
+        applyLook(Terrain3DLook.dark)
 
         for node in [terrainNode, linesNode, markersNode, youNode] {
             scene.rootNode.addChildNode(node)
@@ -246,22 +246,51 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
         youNode.isHidden = true
     }
 
-    /// Night sky to near-black ground, as a spherical backdrop (2:1): the horizon sits mid-image.
-    private static let zenith = UIColor(red: 0.07, green: 0.08, blue: 0.11, alpha: 1)
-    private static let horizon = UIColor(red: 0.15, green: 0.16, blue: 0.19, alpha: 1)
+    /// Sky, haze and light of `next` (labels follow with the markers): the look of the model on
+    /// screen, or of the appearance asked for before there is one.
+    private func applyLook(_ next: Terrain3DLook) {
+        guard next != look else { return }
+        look = next
+        scene.background.contents = Self.skyImage(next)
+        scene.fogColor = next.fog.uiColor()
+        ambientLight.intensity = CGFloat(next.ambient * 1000)
+        keyLight.intensity = CGFloat(next.key * 1000)
+        keyLightNode.simdLook(at: Terrain3DLook.keyDirection(elevationDegrees: next.keyElevationDegrees),
+                              up: SIMD3<Float>(0, 1, 0), localFront: SIMD3<Float>(0, 0, -1))
+        // VoiceOver (and the UI tests) hear which look the scene shows.
+        scnView.accessibilityValue = next.appearance.label
+    }
 
-    private static func skyImage() -> UIImage {
-        let size = CGSize(width: 128, height: 64)
+    /// The look's sky as a spherical backdrop (2:1): the zenith at the top, the horizon mid-image.
+    private static func skyImage(_ look: Terrain3DLook) -> UIImage {
+        let size = CGSize(width: 256, height: 128)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = true
         return UIGraphicsImageRenderer(size: size, format: format).image { ctx in
-            let colors = [zenith.cgColor, horizon.cgColor, Theme.uiBackground.cgColor] as CFArray
-            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 0.5, 0.75]) {
+            let colors = look.sky.map { (stop: Terrain3DLook.SkyStop) -> CGColor in stop.color.uiColor().cgColor } as CFArray
+            let locations: [CGFloat] = look.sky.map { (stop: Terrain3DLook.SkyStop) -> CGFloat in CGFloat(stop.location) }
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: locations) {
                 ctx.cgContext.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: 0, y: size.height),
-                                                 options: [.drawsAfterEndLocation])
+                                                 options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
             }
         }
+    }
+
+    /// The scene as it is, fading out over the next one (another look of the same block).
+    private func crossfade() {
+        let shot = UIImageView(image: scnView.snapshot())
+        shot.frame = scnView.frame
+        shot.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        shot.contentMode = .scaleToFill
+        shot.isUserInteractionEnabled = false
+        shot.isAccessibilityElement = false
+        addSubview(shot)
+        UIView.animate(withDuration: 0.45, delay: 0, options: [.curveEaseInOut, .allowUserInteraction], animations: {
+            shot.alpha = 0
+        }, completion: { _ in
+            shot.removeFromSuperview()
+        })
     }
 
     /// You: a red ball on a white pole with a cone pointing where you face, always on top.
@@ -309,10 +338,16 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
         return m
     }
 
-    /// A model built: the block, then everything on it, and the camera at its start.
+    /// A model built: the block, then everything on it, and the camera at its start. Another
+    /// look of the block on screen (the appearance switched, Retry) keeps the camera where it is
+    /// and fades in over the old one.
     private func load(_ model: Terrain3DModel) {
+        let previous = self.model
+        let sameGround = previous.map { $0.mapID == model.mapID && $0.area.hasSameFrame(as: model.area) } ?? false
+        if previous != nil, window != nil, bounds.width > 0, bounds.height > 0 { crossfade() }
         self.model = model
         stopMotion()
+        applyLook(Terrain3DLook.of(model.appearance))
         terrainNode.childNodes.forEach { $0.removeFromParentNode() }
 
         let material = SCNMaterial()
@@ -340,11 +375,10 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
         terrainNode.addChildNode(surfaceNode)
 
         if !mesh.skirtIndices.isEmpty {
-            // The block's sides: the off-map paper's shade at the top, darker below.
-            let top = Terrain3DLine.rgba(model.dark ? UIColor(red: 0.16, green: 0.16, blue: 0.17, alpha: 1)
-                : UIColor(red: 0.62, green: 0.58, blue: 0.52, alpha: 1))
-            let bottom = Terrain3DLine.rgba(model.dark ? UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 1)
-                : UIColor(red: 0.30, green: 0.27, blue: 0.23, alpha: 1))
+            // The block's sides: a shade of the ground beyond the sheet at the top, darker below.
+            let shade = Terrain3DLook.of(model.appearance)
+            let top = Terrain3DLine.rgba(shade.sideTop.uiColor())
+            let bottom = Terrain3DLine.rgba(shade.sideBottom.uiColor())
             var colors: [Float] = []
             colors.reserveCapacity(mesh.skirtShade.count * 4)
             for t in mesh.skirtShade {
@@ -366,7 +400,12 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
 
         extent = model.extentM
         maxDistance = extent * 3
-        orbit = homeOrbit()
+        if sameGround {
+            // The same ground: only the target's height may have changed (terrain filled in).
+            settleTarget()
+        } else {
+            orbit = homeOrbit()
+        }
         rebuildMarkers()
         drapeRoutes()
         ribbonKey = nil
@@ -420,7 +459,10 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
             updateTrack(inputs.track, force: true)
             return
         }
-        guard model != nil else { return }
+        guard model != nil else {
+            applyLook(Terrain3DLook.of(inputs.appearance))
+            return
+        }
         if wanted != exaggeration { setExaggeration(wanted) }
         if inputs.itemsRevision != itemsRevision {
             itemsRevision = inputs.itemsRevision
@@ -454,6 +496,10 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
         markersNode.childNodes.forEach { $0.removeFromParentNode() }
         sprites = []
         guard let model else { return }
+        // Labels as on the 2D map: white on a dark halo, or dark ink on a white one on paper.
+        let style = look ?? Terrain3DLook.of(model.appearance)
+        let ink = style.labelInk.uiColor()
+        let halo = style.labelHalo.uiColor(alpha: style.labelHaloAlpha)
         for marker in items.markers {
             let g = model.area.gridPoint(for: marker.position)
             guard let p = model.surface.point(at: g) else { continue }
@@ -471,7 +517,7 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
             var label: SCNNode?
             var labelSize: CGSize?
             if !marker.name.isEmpty {
-                let text = OverlayArt.haloText(marker.name, color: .white, halo: Self.labelHalo, fontSize: 13, weight: .semibold)
+                let text = OverlayArt.haloText(marker.name, color: ink, halo: halo, fontSize: 13, weight: .semibold)
                 let node = Self.spriteNode(text)
                 let lift = discCentre + OverlayArt.markerSize / 2 + Terrain3DDeclutter.labelGap + text.size.height / 2
                 node.position = SCNVector3(0, Float(lift), 0)
@@ -487,7 +533,6 @@ final class Terrain3DSceneUIView: UIView, UIGestureRecognizerDelegate {
         }
     }
 
-    private static let labelHalo = UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 0.88)
     /// You on screen, points: the ball (radius 7) on its 24 pt pole.
     private static let youHalfWidth: CGFloat = 12
     private static let youHeight: CGFloat = 36
